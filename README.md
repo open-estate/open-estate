@@ -116,7 +116,7 @@ open-estate-server migrate \
 | Domain | Rust Module | Capabilities |
 |---|---|---|
 | **Geocoding & Autocomplete** | `src/property/{geocode,suggest}.rs` | US Census Geocoder (tract/block/FIPS/CBSA/school districts), OSM/Nominatim/Photon rooftop & autocomplete, optional BYOK ArcGIS/Google Places |
-| **Facts, MLS & Public Records** | `src/property/{facts,house_profile,mls,public_records}.rs` | County Assessor & municipal GIS open data, parcel/building register (BCR, FAR, permits), RESO architectural styles, user CSV ingestion, optional BYOK RentCast/RESO/SimplyRETS/ATTOM connectors |
+| **Facts, MLS & Public Records** | `src/property/{facts,house_profile,mls,public_records}.rs` | County Assessor & municipal GIS open data, parcel/building register (BCR, FAR, permits), RESO architectural styles, user CSV ingestion, optional BYOK RESO/SimplyRETS/ATTOM connectors |
 | **Market Trends & Valuation** | `src/property/{zillow,market,valuation,commercial_data}.rs` | US public-domain FHFA HPI, Census ACS, HUD SAFMR/FMR, BLS CPI, Freddie Mac PMMS mortgage rates (`PUBLIC_DATA_MODE=strict`), repeat-sales + adjusted comps blend, P10/P50/P90 scenarios, CA Prop 13 & loan math |
 | **Your Match Scoring & Search** | `src/scoring/*`, `src/search/*` | Deterministic 11-dimension buyer utility engine, 60s Preference Studio (`/match`), natural-language search (`sea-query`), licensed feed sync, and `lettre` SMTP alerts |
 | **HOA Profile & Buyer Diligence** | `src/modules/{buyer_diligence,move_in_cost,remodel_rebuild}.rs` | Always-on HOA benchmark & rules check, cash-to-close transfer taxes, special districts (Mello-Roos/MUD/CDD), FCC broadband, point-of-sale mandates, break-even horizon, and 33-trade renovation cost catalog |
@@ -144,7 +144,7 @@ Every upstream service queried by default is either **U.S. Federal / State Publi
 | **Footprints, Roads, POIs & Autocomplete** | OpenStreetMap (`overpass-api.de`, `overpass.private.coffee`, `nominatim.openstreetmap.org`, `photon.komoot.io`), Geofabrik `.osm.pbf` | Open Database License (ODbL 1.0) with attribution |
 | **Weather & Air-Quality Telemetry** | Open-Meteo Weather & Air Quality APIs (`open-meteo.com`) | CC BY 4.0 (**Non-Commercial only** on free tier — matches this repository's non-commercial license) |
 | **Neighborhood Context Photos** | Wikimedia Commons GeoSearch | Creative Commons (per-asset CC BY / CC BY-SA / Public Domain attribution) |
-| **Optional BYOK Commercial & Rate-Limit APIs** | OpenAI, Mapbox, LocationIQ, FreeRoute, OpenRouteService, RentCast, ATTOM, RESO Web API 2.0, SimplyRETS, Shovels, Zoneomics, CourtListener, ArcGIS Platform, Google Maps (Places + Street View Embed), Mapillary, HUD User, api.data.gov, EPA AirNow, Socrata, SchoolDigger / GreatSchools | Disabled (or lower anonymous federal/municipal quotas) unless you supply your own credentials in `.env` — see [Optional API Keys & Registration Guide](#optional-api-keys--registration-guide-bring-your-own-key) |
+| **Optional BYOK Commercial & Rate-Limit APIs** | OpenAI, Mapbox, LocationIQ, FreeRoute, OpenRouteService, ATTOM, RESO Web API 2.0, SimplyRETS, Shovels, Zoneomics, CourtListener, ArcGIS Platform, Google Maps (Places + Street View Embed), Mapillary, HUD User, api.data.gov, EPA AirNow, Socrata, SchoolDigger / GreatSchools | Disabled (or lower anonymous federal/municipal quotas) unless you supply your own credentials in `.env` — see [Optional API Keys & Registration Guide](#optional-api-keys--registration-guide-bring-your-own-key) |
 
 ---
 
@@ -169,7 +169,6 @@ Every credential below is an **optional Bring-Your-Own-Key (BYOK) upgrade** conf
 | **2. Routing Fallback** | **LocationIQ Matrix** | `LOCATIONIQ_API_KEY` *(alias: `LOCATIONIQ_ACCESS_TOKEN`)* | `https://us1.locationiq.com` | Free tier (`5,000 req/day`, 2 RPS, no card) | Tier-2 OSM driving matrix fallback (`locationiq_routing`) |
 | **2. Routing Fallback** | **FreeRoute Matrix** | `FREEROUTE_API_KEY` | `https://api.maps.freeroute.org` | Free tier (`~5,000 req/day`, no card) | Tier-2 OSM driving matrix fallback (`freeroute_routing`) |
 | **2. Routing Fallback** | **OpenRouteService (HeiGIT)** | `OPENROUTESERVICE_API_KEY` *(alias: `ORS_API_KEY`)* | `https://api.openrouteservice.org` | Free non-commercial Standard plan | Tier-2 OSM driving matrix fallback (`openrouteservice_routing`) |
-| **3. Facts, AVM & MLS** | **RentCast** | `RENTCAST_API_KEY` | `https://api.rentcast.io` | Free developer tier (`50 calls/mo`) | Nationwide parcel/tax history, sale & rent AVMs, comps, ZIP market stats & MLS sync |
 | **3. Facts, AVM & MLS** | **ATTOM Data** | `ATTOM_API_KEY` | `https://api.gateway.attomdata.com` | 30-day free developer trial (`~1,000 hits`) | Expanded profile, ATTOM AVM, sale/mortgage recorder check & ZIP sold-comp sync |
 | **3. Facts, AVM & MLS** | **RESO Web API 2.0 (IDX)** | `RESO_API_URL` + `RESO_BEARER_TOKEN` | *(operator-supplied)* | Licensed MLS / IDX credentials required | Live OData MLS active/pending/closed listings, media & disclosure PDFs |
 | **3. Facts, AVM & MLS** | **SimplyRETS** | `SIMPLYRETS_AUTH` (`user:pass`) | `https://api.simplyrets.com` | Free test sandbox (`simplyrets:simplyrets`); paid for live MLS | Live MLS listings & ZIP sync (or sandbox test listings) |
@@ -187,9 +186,6 @@ Every credential below is an **optional Bring-Your-Own-Key (BYOK) upgrade** conf
 | **6. Civic, Env & Schools** | **US EPA AirNow** | `AIRNOW_API_KEY` | `https://www.airnowapi.org/aq/observation/latLong/current/` | 100% free developer API key | Live EPA AirNow station AQI observations alongside always-on Open-Meteo 30-day series |
 | **6. Civic, Env & Schools** | **Socrata Open Data** | `SOCRATA_APP_TOKEN` | City SODA portals (`data.sfgov.org`, `data.cityofnewyork.us`, etc.) | 100% free portal App Token *(works keyless at lower limits)* | Higher rate-limit quota on municipal Socrata crime/incident open-data supplements |
 | **6. Civic, Env & Schools** | **SchoolDigger & GreatSchools** | `SCHOOLDIGGER_APP_ID` + `SCHOOLDIGGER_APP_KEY`; `GREATSCHOOLS_API_KEY` | `api.schooldigger.com` / `gs-api.greatschools.org` | SchoolDigger free dev tier; GreatSchools commercial | Tracked in `GET /api/health` (`connectors`) *(report school scores strictly use NCES + state CAASPP/EDFacts datasets)* |
-| **6. Utilities & Broadband** | **OpenEI URDB (`openei_urdb_tariffs`)** | `OPENEI_API_KEY` | `https://api.openei.org/utility_rates` | 100% free OpenEI developer key | NREL/OpenEI Utility Rate Database v7 residential electric tariff schedules |
-| **6. Utilities & Broadband** | **U.S. EIA Open Data v2 (`eia861_electric_rates`)** | `EIA_API_KEY` *(optional; defaults to `DEMO_KEY`)* | `https://api.eia.gov/v2/` | 100% free instant key | State residential electricity & natural-gas retail price benchmarks |
-| **6. Utilities & Broadband** | **FCC Broadband Data Collection (`fcc_broadband_bdc_live`)** | `FCC_BDC_USERNAME` + `FCC_BDC_API_TOKEN` *(alias: `FCC_BDC_API_KEY`)* | `https://broadbandmap.fcc.gov/` | Free FCC BDC account token | Location-level fixed & mobile ISP speeds (`username` / `hash_value` headers) |
 | **7. Property Alerts** | **Outbound SMTP Relay** | `SMTP_HOST`, `SMTP_PORT`, `SMTP_SECURE`, `SMTP_USER`, `SMTP_PASS`, `SMTP_FROM`, `SMTP_FROM_NAME`, `SMTP_REPLY_TO` | *(operator-supplied)* | Free tiers on Gmail App Passwords, Brevo, Resend, or self-hosted | Saved-search & price/status alert emails with RFC 8058 one-click unsubscribe |
 
 ---
@@ -228,11 +224,7 @@ Open Estate resolves driving-time & distance commute matrices in **three tiers**
   3. Copy the token into `OPENROUTESERVICE_API_KEY=` in `.env` (sent directly in the `Authorization` header to `https://api.openrouteservice.org`).
 
 #### 3. Property Facts, AVM, Rent Comps & MLS Feeds
-*(Optional base URL overrides: `RENTCAST_BASE_URL`, `ATTOM_BASE_URL`; keyless JSON/CSV listing feed override: `PUBLIC_LISTING_FEED_URL`.)*
-- **RentCast (`RENTCAST_API_KEY`)**:
-  1. Sign up at [`https://app.rentcast.io/`](https://app.rentcast.io/) and open the **API** dashboard (see [`https://developers.rentcast.io/`](https://developers.rentcast.io/)).
-  2. Choose the **Developer Free** tier (includes **50 free API calls/month**; paid plans scale beyond 50/mo) and click **Create API Key**.
-  3. Set `RENTCAST_API_KEY=` in `.env` (activates both the `rentcast_property` extension and full sale/rental AVM + comps + ZIP sync).
+*(Optional base URL override: `ATTOM_BASE_URL`; keyless JSON/CSV listing feed override: `PUBLIC_LISTING_FEED_URL`.)*
 - **ATTOM Data (`ATTOM_API_KEY`)**:
   1. Go to [`https://api.developer.attomdata.com/`](https://api.developer.attomdata.com/) and click **Get a Free Trial API Key** / **Sign Up** (30-day developer trial, typically ~1,000 API hits).
   2. Verify your email, log in, and open **Account → Applications** to view your API key.
@@ -300,10 +292,6 @@ Open Estate resolves driving-time & distance commute matrices in **three tiers**
 - **SchoolDigger & GreatSchools (`SCHOOLDIGGER_APP_ID` + `SCHOOLDIGGER_APP_KEY`, `GREATSCHOOLS_API_KEY`)**:
   - Open Estate report school scoring uses strictly **official public academic datasets** (NCES + California School Dashboard / CAASPP / federal EDFacts percentiles; third-party school ratings are never mixed into report scores).
   - If you track connector credentials in `GET /api/health` (`connectors`), **SchoolDigger** offers a free `DEV/TEST` tier at `developer.schooldigger.com` (`SCHOOLDIGGER_APP_ID`, `SCHOOLDIGGER_APP_KEY`), and **GreatSchools** commercial API keys are requested via [`https://www.greatschools.org/api/`](https://www.greatschools.org/api/) (`GREATSCHOOLS_API_KEY`).
-- **OpenEI URDB v7 & U.S. EIA Open Data v2 (`OPENEI_API_KEY`, `EIA_API_KEY`)**:
-  - Public municipal/IOU utility schedule lookups work keyless out of the box; adding a free OpenEI key from [`https://openei.org/services/api/signup/`](https://openei.org/services/api/signup/) into `OPENEI_API_KEY=` unlocks NREL/OpenEI URDB v7 tariff details (`openei_urdb_tariffs`), and adding an EIA key from [`https://www.eia.gov/opendata/register.php`](https://www.eia.gov/opendata/register.php) into `EIA_API_KEY=` increases EIA v2 retail rate query limits beyond `DEMO_KEY`.
-- **FCC Broadband Data Collection (`FCC_BDC_USERNAME` + `FCC_BDC_API_TOKEN`)**:
-  - Generate an API token in your FCC Broadband Data Collection account at [`https://broadbandmap.fcc.gov/`](https://broadbandmap.fcc.gov/) and set `FCC_BDC_USERNAME=` and `FCC_BDC_API_TOKEN=` (alias `FCC_BDC_API_KEY`, sent as `username` / `hash_value` headers; optional overrides `FCC_BDC_API_URL`, `FCC_BDC_MOBILE_API_URL`, `FCC_BDC_DISABLED=1`, `SONIC_AVAILABILITY_DISABLED=1`).
 
 #### 7. Outbound SMTP Property Alerts
 - **Variables**: `SMTP_HOST`, `SMTP_PORT` (`465` for `tls`, `587` for `starttls`, `25` for plain), `SMTP_SECURE` (`tls` | `starttls` | `none`), `SMTP_USER`, `SMTP_PASS`, `SMTP_FROM`, plus optional `SMTP_FROM_NAME` and `SMTP_REPLY_TO`.

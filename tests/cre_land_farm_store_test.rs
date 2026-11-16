@@ -31,7 +31,6 @@ fn offline_env() -> EnvConfig {
     EnvConfig::default().with_overrides([
         ("OPENAI_API_KEY", String::new()),
         ("OPENAI_BASE_URL", String::new()),
-        ("RENTCAST_API_KEY", String::new()),
         ("ATTOM_API_KEY", String::new()),
         ("RESO_BEARER_TOKEN", String::new()),
     ])

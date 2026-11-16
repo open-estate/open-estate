@@ -1259,7 +1259,6 @@ async fn test_4_home_area_onsale_showcase_and_no_ops_or_portal_leaks() {
         concat!("open", "door"),
         "greatschools",
         "niche",
-        "rentcast",
         "attom",
         "simplyrets",
         "homelens",

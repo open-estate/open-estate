@@ -9,6 +9,17 @@ driver: openapi_yaml
 proto_message_type: "openestate.extension.v1.HazardSummaryProto"
 priority: 230
 enabled_by_default: true
+tier: basic
+license_class: public_open_data
+execution_mode: eager
+requires_manual_approval: false
+min_plan_tier: ""
+metering:
+  dimensions:
+    - invocations
+    - wall_time_ms
+    - external_api_calls
+    - bytes_downloaded
 provenance: live_verified
 homepage_url: "https://earthquake.usgs.gov/ws/designmaps/"
 documentation_url: "https://earthquake.usgs.gov/ws/designmaps/asce7-22.html"
@@ -29,6 +40,11 @@ rate_limit:
   burst: 8
   timeout_ms: 8000
 cache_ttl_secs: 604800
+sharing:
+  scope: geohash5
+  ttl_secs: 2592000
+  stale_while_revalidate_secs: 604800
+  background_refresh: true
 source_attribution:
   name: "USGS Earthquake Hazards Program — ASCE 7-22 Design Maps"
   url: "https://earthquake.usgs.gov/ws/designmaps/asce7-22.html"

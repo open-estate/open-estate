@@ -227,7 +227,7 @@ fn registry_bounds_latency_ring_at_256_and_events_at_30() {
 #[test]
 fn connector_catalog_never_exposes_secrets_or_tokens() {
     let secret_token = "tok_ultra_secret_value_9988";
-    let secret_rentcast = "rc_live_key_776655";
+    let secret_attom = "attom_live_key_776655";
     let secret_smtp = "smtp_password_secret_3322";
     let env = EnvConfig::from_map(HashMap::from([
         (
@@ -235,7 +235,7 @@ fn connector_catalog_never_exposes_secrets_or_tokens() {
             "https://reso.internal.invalid/odata?key=bad".to_string(),
         ),
         ("RESO_BEARER_TOKEN".to_string(), secret_token.to_string()),
-        ("RENTCAST_API_KEY".to_string(), secret_rentcast.to_string()),
+        ("ATTOM_API_KEY".to_string(), secret_attom.to_string()),
         ("SMTP_HOST".to_string(), "smtp.example.invalid".to_string()),
         (
             "SMTP_USER".to_string(),
@@ -251,7 +251,7 @@ fn connector_catalog_never_exposes_secrets_or_tokens() {
     let serialized = serde_json::to_string(&catalog).expect("serialize connectors");
     for forbidden in [
         secret_token,
-        secret_rentcast,
+        secret_attom,
         secret_smtp,
         "reso.internal.invalid",
         "smtp.example.invalid",
@@ -278,7 +278,7 @@ fn connector_catalog_never_exposes_secrets_or_tokens() {
 #[tokio::test]
 async fn ops_endpoints_return_live_telemetry_and_responsive_html() {
     let (state, temp_dir) = make_test_state(&[
-        ("RENTCAST_API_KEY", "rc_secret_never_leak_12345"),
+        ("ATTOM_API_KEY", "attom_secret_never_leak_12345"),
         ("SHOVELS_API_KEY", "shv_secret_never_leak_67890"),
     ])
     .await;
@@ -595,7 +595,7 @@ async fn ops_endpoints_return_live_telemetry_and_responsive_html() {
     assert!(conns.len() >= 15);
     assert!(conns
         .iter()
-        .any(|c| c["id"] == "rentcast_mls" && c["configured"] == json!(true)));
+        .any(|c| c["id"] == "attom_data" && c["configured"] == json!(true)));
     assert!(conns
         .iter()
         .any(|c| c["id"] == "shovels_permits" && c["configured"] == json!(true)));

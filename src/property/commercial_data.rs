@@ -6,11 +6,11 @@
 // US federal public-domain series (17 U.S.C. § 105) plus optional licensed commercial APIs:
 //   1. FHFA House Price Index (5-digit ZIP `ATNHPIUS{zip5}A`, County `ATNHPIUS{fips}A`,
 //      Metro CBSA `ATNHPIUS{cbsa}Q`, State `{ST}STHPI`, US `USSTHPI`) interpolated to monthly
-//      observations and anchored to U.S. Census Bureau ACS 5-Year `B25077` median home value
-//      (or licensed RentCast / ATTOM market snapshot when API keys are configured).
+//      observations and anchored primarily to U.S. Census Bureau ACS 5-Year `B25077` median
+//      home value (with optional ATTOM market snapshot fallback when API keys are configured).
 //   2. U.S. HUD Small Area Fair Market Rents (SAFMR) / Fair Market Rents & Census ACS `B25064`
 //      median gross rent indexed by U.S. BLS CPI Rent of Primary Residence (`CUUR0000SEHA`),
-//      plus licensed RentCast / ATTOM rent benchmarks when configured.
+//      with optional licensed ATTOM rent benchmarks only as fallback when configured.
 //   3. Explicit `data_licensing` provenance block (`mode`, `osm_attribution`,
 //      `non_appraisal_disclaimer: true`).
 
@@ -52,7 +52,6 @@ pub fn build_data_licensing_block(env: &EnvConfig, zillow_used: bool) -> Value {
             "FEMA NFHL, USGS Earthquake Hazards, EPA Envirofacts & NOAA WMM2025"
         ],
         "licensed_connectors": {
-            "rentcast": env.get("RENTCAST_API_KEY").is_some(),
             "attom": env.get("ATTOM_API_KEY").is_some(),
             "reso_mls": env.get("RESO_API_URL").is_some() && env.get("RESO_BEARER_TOKEN").is_some(),
             "custom_overpass": env.get("OVERPASS_API_URLS").is_some(),
@@ -201,50 +200,6 @@ async fn fetch_licensed_market_quote(
         return quote;
     }
 
-    if let Some(rc_key) = env.get("RENTCAST_API_KEY") {
-        let base = env
-            .get_or("RENTCAST_BASE_URL", "https://api.rentcast.io")
-            .trim_end_matches('/')
-            .to_string();
-        let url = format!("{base}/v1/markets?zipCode={zip5}");
-        let hdrs = [("X-Api-Key", rc_key), ("Accept", "application/json")];
-        if let Ok(j) = http.get_json_opts(&url, 6500, 0, 86400, Some(&hdrs)).await {
-            let sale = j.get("saleData");
-            quote.median_price = sale
-                .and_then(|s| s.get("medianPrice").or_else(|| s.get("averagePrice")))
-                .and_then(|v| v.as_f64())
-                .filter(|&v| v > 10_000.0);
-            if let Some(by_bd) = sale
-                .and_then(|s| s.get("dataByBedrooms"))
-                .and_then(|v| v.as_array())
-            {
-                for item in by_bd {
-                    if let (Some(bd), Some(p)) = (
-                        item.get("bedrooms").and_then(|v| v.as_u64()),
-                        item.get("medianPrice")
-                            .or_else(|| item.get("averagePrice"))
-                            .and_then(|v| v.as_f64()),
-                    ) {
-                        if (1..=5).contains(&(bd as usize)) && p > 10_000.0 {
-                            quote.bd_prices[bd as usize] = Some(p);
-                        }
-                    }
-                }
-            }
-            quote.median_rent = j
-                .get("rentalData")
-                .and_then(|r| r.get("medianRent").or_else(|| r.get("averageRent")))
-                .and_then(|v| v.as_f64())
-                .filter(|&v| v > 200.0);
-            if quote.median_price.is_some() || quote.median_rent.is_some() {
-                quote.source_name = Some("RentCast Licensed Market Statistics API".to_string());
-                quote.source_url =
-                    Some("https://developers.rentcast.io/reference/market-statistics".to_string());
-                return quote;
-            }
-        }
-    }
-
     if let Some(attom_key) = env.get("ATTOM_API_KEY") {
         let base = env
             .get_or("ATTOM_BASE_URL", "https://api.gateway.attomdata.com")
@@ -390,7 +345,7 @@ fn pick_acs_metric(acs: Option<&Value>, levels: &[&str], field: &str) -> Option<
 }
 
 /// Fast clean-room ZIP home-value anchor when `COMMERCIAL_DATA_MODE=strict`
-/// (returns `None` when neither licensed market data nor Census ACS B25077 is available).
+/// (prefers free U.S. Census ACS B25077 primary; falls back to optional ATTOM licensed quote).
 pub async fn clean_room_zip_anchor(http: &HttpClient, env: &EnvConfig, geo: &Value) -> Option<f64> {
     let zip5: String = geo
         .get("zip")
@@ -400,10 +355,6 @@ pub async fn clean_room_zip_anchor(http: &HttpClient, env: &EnvConfig, geo: &Val
         .chars()
         .take(5)
         .collect();
-    let licensed = fetch_licensed_market_quote(http, env, &zip5).await;
-    if let Some(p) = licensed.median_price.filter(|&x| x > 0.0) {
-        return Some(p);
-    }
     if zip5.len() == 5 {
         let base = env
             .get_or("CENSUS_REPORTER_BASE_URL", "https://api.censusreporter.org")
@@ -425,7 +376,8 @@ pub async fn clean_room_zip_anchor(http: &HttpClient, env: &EnvConfig, geo: &Val
             }
         }
     }
-    None
+    let licensed = fetch_licensed_market_quote(http, env, &zip5).await;
+    licensed.median_price.filter(|&x| x > 0.0)
 }
 
 fn yoy_of_monthly(s: &[(String, f64)]) -> Option<f64> {
@@ -574,8 +526,28 @@ pub async fn populate_clean_room_market_data(
             None => None,
         }
     };
+    let acs_zip_val = pick_acs_metric(
+        acs,
+        &[
+            "zip", "zcta", "tract", "place", "county", "metro", "msa", "state",
+        ],
+        "medianHomeValue",
+    );
+    let acs_zip_rent = pick_acs_metric(
+        acs,
+        &[
+            "zip", "zcta", "tract", "place", "county", "metro", "msa", "state",
+        ],
+        "medianGrossRent",
+    );
     let cpi_rent_fut = http.get_text_opts(&cpi_rent_url, 6500, 0, 86400 * 7, None);
-    let licensed_fut = fetch_licensed_market_quote(http, env, &zip5);
+    let licensed_fut = async {
+        if acs_zip_val.is_none() {
+            fetch_licensed_market_quote(http, env, &zip5).await
+        } else {
+            LicensedMarketQuote::default()
+        }
+    };
     let hud_fut = fetch_hud_safmr_rent(http, env, &zip5, county_fips);
 
     let (zip_hpi_txt, county_hpi_txt, tract_hpi_txt, cpi_rent_res, licensed, hud_safmr) = tokio::join!(
@@ -643,14 +615,8 @@ pub async fn populate_clean_room_market_data(
         (metro_hpi_monthly.clone(), "fhfa_metro_state")
     };
 
-    // 2. Anchor dollar home-value levels strictly to Licensed or Census ACS B25077 observations
-    let acs_zip_val = pick_acs_metric(
-        acs,
-        &[
-            "zip", "zcta", "tract", "place", "county", "metro", "msa", "state",
-        ],
-        "medianHomeValue",
-    );
+    // 2. Anchor dollar home-value levels primarily to free Census ACS B25077 observations
+    //    (falling back to optional licensed ATTOM market snapshot only when ACS is absent)
     let acs_tract_val = pick_acs_metric(acs, &["tract"], "medianHomeValue");
     let acs_metro_val =
         pick_acs_metric(acs, &["metro", "msa", "county", "state"], "medianHomeValue");
@@ -661,18 +627,18 @@ pub async fn populate_clean_room_market_data(
         .checked_sub(25)
         .map(|idx| local_hpi_monthly[idx].0.clone());
 
-    let (zip_mid_series, price_anchor_source) = if let Some(lic_p) = licensed.median_price {
+    let (zip_mid_series, price_anchor_source) = if let Some(acs_v) = acs_zip_val {
+        (
+            scale_hpi_to_dollars(&local_hpi_monthly, acs_v, acs_anchor_ym.as_deref()),
+            Some("census_acs_b25077_fhfa_indexed"),
+        )
+    } else if let Some(lic_p) = licensed.median_price {
         if let (Some(sn), Some(su)) = (&licensed.source_name, &licensed.source_url) {
             sources.push(SourceItem::new(sn.clone(), su.clone()));
         }
         (
             scale_hpi_to_dollars(&local_hpi_monthly, lic_p, None),
             Some("licensed_market_api"),
-        )
-    } else if let Some(acs_v) = acs_zip_val {
-        (
-            scale_hpi_to_dollars(&local_hpi_monthly, acs_v, acs_anchor_ym.as_deref()),
-            Some("census_acs_b25077_fhfa_indexed"),
         )
     } else {
         (Vec::new(), None)
@@ -804,13 +770,6 @@ pub async fn populate_clean_room_market_data(
         })
         .unwrap_or_default();
 
-    let acs_zip_rent = pick_acs_metric(
-        acs,
-        &[
-            "zip", "zcta", "tract", "place", "county", "metro", "msa", "state",
-        ],
-        "medianGrossRent",
-    );
     let acs_tract_rent = pick_acs_metric(acs, &["tract"], "medianGrossRent");
     let acs_metro_rent =
         pick_acs_metric(acs, &["metro", "msa", "county", "state"], "medianGrossRent");
@@ -821,13 +780,7 @@ pub async fn populate_clean_room_market_data(
         .map(|idx| cpi_rent_monthly[idx].0.clone());
 
     let (zip_rent_series, static_rent_anchor, rent_methodology) =
-        if let Some(lic_r) = licensed.median_rent {
-            (
-                scale_hpi_to_dollars(&cpi_rent_monthly, lic_r, None),
-                Some(lic_r),
-                Some("licensed_rent_api_bls_cpi"),
-            )
-        } else if let Some((hud_r, hud_url)) = hud_safmr.clone() {
+        if let Some((hud_r, hud_url)) = hud_safmr.clone() {
             sources.push(SourceItem::new(
                 "U.S. HUD Small Area Fair Market Rents (SAFMR) / Fair Market Rents (Public Domain)",
                 hud_url,
@@ -846,6 +799,12 @@ pub async fn populate_clean_room_market_data(
                 scale_hpi_to_dollars(&cpi_rent_monthly, acs_r, cpi_anchor_ym.as_deref()),
                 Some(acs_r),
                 Some("census_acs_b25064_bls_cpi"),
+            )
+        } else if let Some(lic_r) = licensed.median_rent {
+            (
+                scale_hpi_to_dollars(&cpi_rent_monthly, lic_r, None),
+                Some(lic_r),
+                Some("licensed_rent_api_bls_cpi"),
             )
         } else {
             (Vec::new(), None, None)

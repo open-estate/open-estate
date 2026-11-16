@@ -1,8 +1,18 @@
 mod common;
 
+use open_estate::db::shared_cache_store::{get_shared_blob_by_tile_key, get_shared_data_record};
+use open_estate::db::DbStore;
+use open_estate::extensions::proto::shared_v1::{
+    AirQualityCellProto, NoiseTileProto, TractIndicatorsProto,
+};
+use open_estate::extensions::shared_cache::{
+    dataset_ids, encode_geohash, get_shared_dataset_proto, seed_builtin_shared_datasets,
+    ShareScope, ShareScopeExt, SharedExtensionCache,
+};
 use open_estate::modules::environment::{
     air_score, compute_air_stats, contamination_score, model_osm_noise_db, noise_category,
-    noise_score, run_environment, screening_score, water_score, NplBoundary, SiteRecord,
+    noise_score, run_environment, run_environment_with_db, screening_score, water_score,
+    NplBoundary, SiteRecord,
 };
 use open_estate::shared::{EnvConfig, HttpClient};
 use serde_json::{json, Map, Value};
@@ -432,4 +442,187 @@ async fn test_offline_environment_failures_do_not_fabricate_scores_or_montana_wa
     assert!(!joined.contains("No leaking underground storage tank"));
     assert!(!joined.contains("No Toxics Release Inventory"));
     assert!(!joined.contains("No public water-system boundary matched"));
+}
+
+#[tokio::test]
+#[ignore = "live external environment services; run with --ignored"]
+async fn live_public_environment_shared_data_reuses_noise_blobs_air_and_tract_across_parcels() {
+    let db = DbStore::connect_url(":memory:", Some("sqlite"))
+        .await
+        .expect("connect sqlite");
+    seed_builtin_shared_datasets(&db)
+        .await
+        .expect("seed builtin shared datasets");
+
+    let live_http = HttpClient::new(None);
+    let env = EnvConfig::from_map(std::collections::HashMap::new());
+    let (lat1, lon1) = (37.2872, -121.9500);
+    let gh5 = encode_geohash(lat1, lon1, 5).expect("geohash5");
+    let gh6 = encode_geohash(lat1, lon1, 6).expect("geohash6");
+    let geo1 = json!({
+        "state": "CA",
+        "city": "Campbell",
+        "county": "Santa Clara",
+        "countyFips": "06085",
+        "zip": "95008",
+    });
+
+    let out1 = run_environment_with_db(&live_http, &env, Some(&db), lat1, lon1, &geo1)
+        .await
+        .expect("live parcel 1 environment");
+    assert_eq!(out1.data["checks"]["air"], json!(true));
+    assert_eq!(out1.data["checks"]["noise"], json!(true));
+    assert_eq!(out1.data["checks"]["calEnviroScreen"], json!(true));
+    assert_eq!(out1.data["checks"]["ejscreen"], json!(true));
+
+    let tract11 = out1.data["screening"]["calEnviroScreen"]["tract"]
+        .as_str()
+        .expect("CalEnviroScreen tract")
+        .to_string();
+    assert_eq!(tract11.len(), 11);
+    let bg12 = out1.data["screening"]["ejscreen"]["blockGroup"]
+        .as_str()
+        .expect("EJScreen block group")
+        .to_string();
+    assert_eq!(bg12.len(), 12);
+
+    let (ces_row, ces_proto) = get_shared_dataset_proto::<TractIndicatorsProto>(
+        None,
+        &db,
+        dataset_ids::TRACT_INDICATORS,
+        ShareScope::CensusTract,
+        &tract11,
+        "ces4",
+    )
+    .await
+    .expect("read ces4")
+    .expect("ces4 persisted in shared_data_records");
+    assert!(ces_proto.calenviroscreen_percentile.is_some());
+    assert_eq!(ces_row.hit_count, 0);
+
+    let (ej_row, ej_proto) = get_shared_dataset_proto::<TractIndicatorsProto>(
+        None,
+        &db,
+        dataset_ids::TRACT_INDICATORS,
+        ShareScope::CensusBlockGroup,
+        &bg12,
+        "ejscreen23",
+    )
+    .await
+    .expect("read ejscreen23")
+    .expect("ejscreen23 persisted in shared_data_records");
+    assert!(ej_proto.ejscreen_pm25_percentile.is_some());
+    assert_eq!(ej_row.hit_count, 0);
+
+    let (air_row, air_proto) = get_shared_dataset_proto::<AirQualityCellProto>(
+        None,
+        &db,
+        dataset_ids::AIR_QUALITY_CELL,
+        ShareScope::Geohash5,
+        &gh5,
+        "air_cams",
+    )
+    .await
+    .expect("read AIR_QUALITY_CELL")
+    .expect("AIR_QUALITY_CELL persisted in shared_data_records");
+    assert!(air_proto.pm25_mean_30d_ug_m3.is_some());
+    assert_eq!(air_row.hit_count, 0);
+
+    let (noise_row, noise_proto) = get_shared_dataset_proto::<NoiseTileProto>(
+        None,
+        &db,
+        dataset_ids::NOISE_TILE,
+        ShareScope::Geohash6,
+        &gh6,
+        "bts_2022_v1",
+    )
+    .await
+    .expect("read NOISE_TILE")
+    .expect("NOISE_TILE persisted in shared_data_records");
+    assert_eq!(noise_proto.zoom, 12);
+    let expected_blob_hash = noise_proto
+        .blob_hash
+        .as_deref()
+        .expect("NOISE_TILE blob_hash populated");
+    assert_eq!(noise_row.blob_hash.as_deref(), Some(expected_blob_hash));
+
+    let (_blob_row, blob_bytes) =
+        get_shared_blob_by_tile_key(&db, None, dataset_ids::NOISE_TILE, &noise_proto.tile_key)
+            .await
+            .expect("read shared_blobs by tile_key")
+            .expect("BTS noise tile blob persisted");
+    assert!(!blob_bytes.is_empty());
+
+    // Clear L1 memory cache so Parcel 2 must load CES4, EJScreen, AirQuality, and BTS PNG blobs from SQLite offline.
+    SharedExtensionCache::global().invalidate_l1_all().await;
+
+    let offline = HttpClient::offline_loopback_only(None);
+    let (lat2, lon2) = (37.2874, -121.9498);
+    assert_eq!(encode_geohash(lat2, lon2, 6).as_deref(), Some(gh6.as_str()));
+    let geo2 = json!({
+        "state": "CA",
+        "city": "Campbell",
+        "county": "Santa Clara",
+        "countyFips": "06085",
+        "tract": tract11,
+        "blockGroup": bg12,
+        "zip": "95008",
+    });
+
+    let out2 = run_environment_with_db(&offline, &env, Some(&db), lat2, lon2, &geo2)
+        .await
+        .expect("offline parcel 2 environment reuses shared DB + PNG blobs");
+    assert_eq!(out2.data["checks"]["calEnviroScreen"], json!(true));
+    assert_eq!(
+        out2.data["screening"]["calEnviroScreen"]["overallPercentile"],
+        out1.data["screening"]["calEnviroScreen"]["overallPercentile"]
+    );
+    assert_eq!(out2.data["checks"]["ejscreen"], json!(true));
+    assert_eq!(
+        out2.data["screening"]["ejscreen"]["blockGroup"],
+        out1.data["screening"]["ejscreen"]["blockGroup"]
+    );
+    assert_eq!(out2.data["checks"]["air"], json!(true));
+    assert_eq!(out2.data["air"]["pm25"]["mean"], out1.data["air"]["pm25"]["mean"]);
+    assert_eq!(out2.data["checks"]["noise"], json!(true));
+    assert!(
+        out2.data["noise"]["estLdnDb"].as_f64().is_some(),
+        "parcel 2 noise must pixel-sample BTS PNG from shared_blobs while offline"
+    );
+
+    let ces_after = get_shared_data_record(
+        &db,
+        dataset_ids::TRACT_INDICATORS,
+        ShareScope::CensusTract.as_str(),
+        &tract11,
+        "ces4",
+    )
+    .await
+    .expect("read ces4 hit_count")
+    .expect("ces4 row");
+    assert!(ces_after.hit_count >= 1);
+
+    let ej_after = get_shared_data_record(
+        &db,
+        dataset_ids::TRACT_INDICATORS,
+        ShareScope::CensusBlockGroup.as_str(),
+        &bg12,
+        "ejscreen23",
+    )
+    .await
+    .expect("read ej hit_count")
+    .expect("ej row");
+    assert!(ej_after.hit_count >= 1);
+
+    let air_after = get_shared_data_record(
+        &db,
+        dataset_ids::AIR_QUALITY_CELL,
+        ShareScope::Geohash5.as_str(),
+        &gh5,
+        "air_cams",
+    )
+    .await
+    .expect("read air hit_count")
+    .expect("air row");
+    assert!(air_after.hit_count >= 1);
 }

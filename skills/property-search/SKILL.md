@@ -22,7 +22,7 @@ Allows homebuyers to describe their ideal home in plain language (price, ZIP/cit
 3. **Background ZIP Watcher & Report Harvester (`src/search/sync.rs`, `src/search/alerts.rs`)**
    - Runs in `open-estate-server`'s background loop (`run_background_sync_cycle`, default every 15 min via `--sync-interval-min`) and on-demand via `POST /api/sync`.
    - Pluggable multi-source ingestion for **for-sale**, **pending**, and **sold** homes per ZIP (`sync_connector_status`):
-     - **RentCast** (`RENTCAST_API_KEY`), **RESO Web API 2.0** (`RESO_API_URL` + `RESO_BEARER_TOKEN`), **SimplyRETS** (`SIMPLYRETS_AUTH`), **ATTOM** (`ATTOM_API_KEY`)
+     - **RESO Web API 2.0** (`RESO_API_URL` + `RESO_BEARER_TOKEN`), **SimplyRETS** (`SIMPLYRETS_AUTH`), **ATTOM** (`ATTOM_API_KEY`)
      - **Operator HTTP / CSV feeds** (`PUBLIC_LISTING_FEED_URL` and `POST /api/listings/ingest` via `csv`)
      - **Open Estate Reports & Comps** (`extract_listings_from_report`, `ingest_report_into_db`, `seed_reports_from_dir` from `cached_reports` / `reports/`, excluding synthetic benchmarks via `is_synthetic_comp_entry`) — extracts `wildfire_zone` from CAL FIRE FHSZ / USFS WHP and `walk_score` strictly on a 0–100 scale (`facts.walkScore.walk`, else `civic.scores.walkability`, never the 1–20 EPA index).
    - School context uses **public state and federal data only** (NCES EDGE directory and official state/federal performance data via CAASPP / EDFacts with source and year; GreatSchools, Niche, SchoolDigger, and the HUD School Proficiency Index are never scored, and student–teacher ratios are never shown as letter grades — see `us-property-report/references/compliance.md`).

@@ -1674,13 +1674,11 @@ mod tests {
 
         hub.set_module_enabled("neighborhood_livability", true)
             .unwrap();
-        assert!(is_routing_module_enabled(&hub));
-        if hub.set_module_enabled("commute_transit", false).unwrap() {
-            assert!(
-                !is_routing_module_enabled(&hub),
-                "routing must disable when commute_transit module is off"
-            );
-        }
+        hub.set_module_enabled("commute_transit", false).unwrap();
+        assert!(
+            !is_routing_module_enabled(&hub),
+            "routing must disable when commute_transit module is off"
+        );
 
         // FreeRoute stays unconfigured by default so AUTH_MISSING contract holds unless explicitly opted in
         let empty = EnvConfig::from_map(HashMap::new());

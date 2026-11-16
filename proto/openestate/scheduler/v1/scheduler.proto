@@ -1,0 +1,134 @@
+syntax = "proto3";
+
+package openestate.scheduler.v1;
+
+// Trigger schedule kind for a database-backed job (`scheduled_jobs`).
+enum ScheduleKind {
+  SCHEDULE_KIND_UNSPECIFIED = 0;
+  SCHEDULE_KIND_CRON = 1;
+  SCHEDULE_KIND_INTERVAL = 2;
+  SCHEDULE_KIND_ONCE = 3;
+}
+
+// Execution lifecycle status of a scheduled job run (`scheduled_job_runs`).
+enum ScheduledRunStatus {
+  SCHEDULED_RUN_STATUS_UNSPECIFIED = 0;
+  SCHEDULED_RUN_STATUS_RUNNING = 1;
+  SCHEDULED_RUN_STATUS_SUCCEEDED = 2;
+  SCHEDULED_RUN_STATUS_FAILED = 3;
+  SCHEDULED_RUN_STATUS_TIMED_OUT = 4;
+  SCHEDULED_RUN_STATUS_CANCELLED = 5;
+  SCHEDULED_RUN_STATUS_SKIPPED = 6;
+}
+
+// Cron / interval / one-shot schedule definition with jitter and IANA/UTC timezone.
+message ScheduleSpecProto {
+  ScheduleKind kind = 1;
+  // Standard 5-field cron expression (`min hour dom month dow`) when `kind == SCHEDULE_KIND_CRON`.
+  optional string cron_expr = 2;
+  // Interval duration in seconds when `kind == SCHEDULE_KIND_INTERVAL`.
+  optional uint64 interval_secs = 3;
+  // Unix epoch seconds for one-shot runs when `kind == SCHEDULE_KIND_ONCE`.
+  optional int64 run_at_unix = 4;
+  // Optional RFC3339 representation of `run_at_unix`.
+  optional string run_at_rfc3339 = 5;
+  // Maximum deterministic/bounded jitter in seconds applied to next-run scheduling.
+  uint64 jitter_secs = 6;
+  // IANA timezone name (e.g., "UTC", "America/Los_Angeles") or UTC offset.
+  string timezone = 7;
+}
+
+// Retry & exponential backoff policy for failed/timed-out scheduled jobs.
+message RetryPolicyProto {
+  uint32 max_attempts = 1;
+  uint64 initial_backoff_secs = 2;
+  uint64 max_backoff_secs = 3;
+  double backoff_multiplier = 4;
+  bool retry_on_timeout = 5;
+}
+
+// Typed or JSON job parameters payload carried by `ScheduledJobProto`.
+message ScheduledJobParamsProto {
+  string proto_type = 1;
+  bytes payload_bytes = 2;
+  string payload_json = 3;
+  map<string, string> attributes = 4;
+}
+
+// Self-contained metering usage summary recorded on each `ScheduledJobRunProto`
+// (mirrors `openestate.extension.v1.UsageDimensionsProto` + `ExtensionUsageEventProto` metadata).
+message ScheduledJobUsageSummaryProto {
+  uint64 invocations = 1;
+  uint64 invocations_ok = 2;
+  uint64 invocations_failed = 3;
+  uint64 invocations_cached = 4;
+  uint64 invocations_denied = 5;
+  uint64 wall_time_ms = 6;
+  uint64 llm_input_tokens = 7;
+  uint64 llm_cached_input_tokens = 8;
+  uint64 llm_cache_write_tokens = 9;
+  uint64 llm_output_tokens = 10;
+  uint64 llm_reasoning_tokens = 11;
+  uint64 llm_cost_micros = 12;
+  uint64 browser_session_ms = 13;
+  uint64 browser_page_loads = 14;
+  uint64 emails_sent = 15;
+  uint64 emails_ingested = 16;
+  uint64 documents_ingested = 17;
+  uint64 pages_ocr = 18;
+  uint64 bytes_downloaded = 19;
+  uint64 bytes_stored = 20;
+  uint64 external_api_calls = 21;
+  uint64 external_api_cost_micros = 22;
+  optional string llm_model = 23;
+  optional string llm_effort = 24;
+  string outcome = 25;
+  bool billable = 26;
+  string invocation_id = 27;
+}
+
+// Database-persisted recurring or one-shot scheduled job (`scheduled_jobs`).
+message ScheduledJobProto {
+  string id = 1;
+  string kind = 2;
+  string name = 3;
+  optional string owner_extension_id = 4;
+  ScheduleSpecProto schedule = 5;
+  bytes params_proto = 6;
+  string params_json = 7;
+  bool enabled = 8;
+  int32 priority = 9;
+  optional int64 next_run_at_unix = 10;
+  optional string next_run_at_rfc3339 = 11;
+  optional int64 last_run_at_unix = 12;
+  optional string last_run_at_rfc3339 = 13;
+  optional string last_status = 14;
+  optional string last_error = 15;
+  optional string lease_owner = 16;
+  optional int64 lease_expires_at_unix = 17;
+  uint64 max_runtime_secs = 18;
+  RetryPolicyProto retry_policy = 19;
+  optional string created_by = 20;
+  optional string updated_by = 21;
+  string created_at_rfc3339 = 22;
+  string updated_at_rfc3339 = 23;
+}
+
+// Execution run history record (`scheduled_job_runs`).
+message ScheduledJobRunProto {
+  string run_id = 1;
+  string job_id = 2;
+  string job_kind = 3;
+  string job_name = 4;
+  int64 started_at_unix = 5;
+  string started_at_rfc3339 = 6;
+  optional int64 finished_at_unix = 7;
+  optional string finished_at_rfc3339 = 8;
+  ScheduledRunStatus status = 9;
+  uint32 attempt = 10;
+  optional string worker_id = 11;
+  optional ScheduledJobUsageSummaryProto usage_summary = 12;
+  optional string usage_summary_json = 13;
+  optional string error = 14;
+  optional string output_json = 15;
+}

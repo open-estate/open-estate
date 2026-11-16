@@ -53,6 +53,106 @@ enum ProvenanceTier {
   PROVENANCE_UNVERIFIED = 4;
 }
 
+// Commercial / OSS entitlement tier for an extension package.
+enum ExtensionTier {
+  EXTENSION_TIER_UNSPECIFIED = 0;
+  EXTENSION_TIER_BASIC = 1;
+  EXTENSION_TIER_PREMIUM = 2;
+}
+
+// Data license and operational safety classification for an extension package.
+enum LicenseClass {
+  LICENSE_CLASS_UNSPECIFIED = 0;
+  LICENSE_CLASS_PUBLIC_OPEN_DATA = 1;
+  LICENSE_CLASS_BYOK_COMMERCIAL_API = 2;
+  LICENSE_CLASS_NON_OPEN_SCRAPE = 3;
+  LICENSE_CLASS_HUMAN_IN_LOOP = 4;
+  LICENSE_CLASS_LLM_SERVICE = 5;
+}
+
+// Scheduling mode for an extension during report builds.
+enum ExecutionMode {
+  EXECUTION_MODE_UNSPECIFIED = 0;
+  EXECUTION_MODE_EAGER = 1;
+  EXECUTION_MODE_LAZY = 2;
+}
+
+// LLM reasoning effort level (`none|minimal|low|medium|high|xhigh|max`).
+enum ReasoningEffort {
+  REASONING_EFFORT_UNSPECIFIED = 0;
+  REASONING_EFFORT_NONE = 1;
+  REASONING_EFFORT_MINIMAL = 2;
+  REASONING_EFFORT_LOW = 3;
+  REASONING_EFFORT_MEDIUM = 4;
+  REASONING_EFFORT_HIGH = 5;
+  REASONING_EFFORT_XHIGH = 6;
+  REASONING_EFFORT_MAX = 7;
+}
+
+// Shared data cache / dataset reuse scope key derivation granularity.
+enum ShareScope {
+  SHARE_SCOPE_UNSPECIFIED = 0;
+  SHARE_SCOPE_PARCEL = 1;
+  SHARE_SCOPE_BUILDING = 2;
+  SHARE_SCOPE_HOA = 3;
+  SHARE_SCOPE_SUBDIVISION = 4;
+  SHARE_SCOPE_GEOHASH7 = 5;
+  SHARE_SCOPE_GEOHASH6 = 6;
+  SHARE_SCOPE_GEOHASH5 = 7;
+  SHARE_SCOPE_CENSUS_BLOCK_GROUP = 8;
+  SHARE_SCOPE_CENSUS_TRACT = 9;
+  SHARE_SCOPE_ZIP = 10;
+  SHARE_SCOPE_CITY = 11;
+  SHARE_SCOPE_COUNTY = 12;
+  SHARE_SCOPE_STATE = 13;
+  SHARE_SCOPE_UTILITY_TERRITORY = 14;
+  SHARE_SCOPE_GLOBAL = 15;
+}
+
+// Lifecycle status for a lazily-populated report section.
+enum LazySectionStatusKind {
+  LAZY_SECTION_STATUS_KIND_UNSPECIFIED = 0;
+  LAZY_SECTION_STATUS_KIND_PENDING = 1;
+  LAZY_SECTION_STATUS_KIND_AWAITING_EXTERNAL_RESPONSE = 2;
+  LAZY_SECTION_STATUS_KIND_AWAITING_APPROVAL = 3;
+  LAZY_SECTION_STATUS_KIND_NOT_ENABLED = 4;
+  LAZY_SECTION_STATUS_KIND_FAILED = 5;
+  LAZY_SECTION_STATUS_KIND_READY = 6;
+}
+
+// Section-level status entry placed under `report.lazySections[sectionId]`.
+message LazySectionStatusProto {
+  string section_id = 1;
+  LazySectionStatusKind status = 2;
+  string message = 3;
+  bool can_subscribe = 4;
+  optional string required_tier = 5;
+  repeated string extension_ids = 6;
+  optional string updated_at = 7;
+  optional string fetched_at = 8;
+  optional string source_fingerprint = 9;
+}
+
+// Non-sensitive preview metadata attached to a `PaywallLockProto` placeholder.
+message PaywallPreviewMetaProto {
+  bool available = 1;
+  optional uint32 document_count = 2;
+  optional uint32 finding_count = 3;
+  optional uint32 comp_count = 4;
+  optional uint32 item_count = 5;
+  optional uint32 redacted_field_count = 6;
+  optional string status = 7;
+}
+
+// Zero-leak redaction placeholder replacing locked subtrees for unentitled viewers.
+message PaywallLockProto {
+  bool paywall_locked = 1;
+  string section_id = 2;
+  string required_tier = 3;
+  string required_tier_label = 4;
+  PaywallPreviewMetaProto preview_meta = 5;
+}
+
 // Geographic coverage filter & deterministic specificity inputs for an extension or tariff rule.
 // Specificity ranking: exact `zip_codes` (500) > `cities` (400) > `zip_prefixes` (300) > `counties` FIPS (200) > `states` (100) > `nationwide` (10).
 message GeoScopeProto {
@@ -77,8 +177,9 @@ message GeoScopeProto {
 // Declarative credential binding resolved from environment variables (never hardcoded secrets).
 message AuthSpecProto {
   // "none", "api_key_header", "bearer_token", "api_key_query", or "basic".
+  // YAML alias: "type".
   string auth_type = 1;
-  // Environment variable holding the secret (e.g., "RENTCAST_API_KEY", "FCC_BDC_API_KEY").
+  // Environment variable holding the secret (e.g., "OPENEI_API_KEY", "FCC_BDC_API_TOKEN").
   string env_var = 2;
   // HTTP request header name when `auth_type` uses headers (e.g., "X-Api-Key", "Authorization").
   string header_name = 3;
@@ -98,14 +199,218 @@ message RateLimitSpecProto {
   uint32 max_retries = 4;
 }
 
+// Metering dimensions emitted by this extension inside `MeterScope` (`UsageDimensionsProto` keys).
+message MeteringSpecProto {
+  repeated string dimensions = 1;
+}
+
+// Per-task LLM model/profile/effort override inside an extension manifest (`llm.tasks`).
+message LlmTaskSpecProto {
+  string task = 1;
+  string profile = 2;
+  // Concrete model names are allowed ONLY on private manifests; forbidden in `public/extensions/*`.
+  optional string model = 3;
+  ReasoningEffort effort = 4;
+  optional uint32 max_output_tokens = 5;
+}
+
+// Per-extension LLM profile, concrete model (private manifests only), reasoning effort & task overrides.
+message LlmSpecProto {
+  string profile = 1;
+  // Concrete model names are allowed ONLY on private manifests; forbidden in `public/extensions/*`.
+  optional string model = 2;
+  ReasoningEffort effort = 3;
+  optional uint32 max_output_tokens = 4;
+  repeated LlmTaskSpecProto tasks = 5;
+}
+
+// Cross-home shared data caching & background refresh configuration for an extension.
+message SharingSpecProto {
+  ShareScope scope = 1;
+  uint64 ttl_secs = 2;
+  bool background_refresh = 3;
+  repeated string key_fields = 4;
+  uint64 stale_while_revalidate_secs = 5;
+}
+
+// Declarative citation metadata inside `manifest.yaml` (`source_attribution` / `attribution`).
+message ManifestSourceAttributionProto {
+  // YAML alias: `source_name`.
+  string name = 1;
+  // YAML alias: `source_url`.
+  string url = 2;
+  optional string schedule_or_version = 3;
+  optional string notes = 4;
+}
+
+// OpenAPI 3.x operation binding (`openapi` / `openapi_operation`).
+message OpenApiBindingProto {
+  optional string spec_file = 1;
+  optional string operation_id = 2;
+  optional string path = 3;
+  optional string method = 4;
+  // YAML alias: `parameters`.
+  map<string, string> query_params = 5;
+  map<string, string> headers = 6;
+  optional string body_template = 7;
+}
+
+// Declarative HTTP request template (`request` / `endpoint`).
+message DeclarativeRequestProto {
+  string method = 1;
+  string url = 2;
+  // YAML alias: `parameters`.
+  map<string, string> query_params = 3;
+  map<string, string> headers = 4;
+  optional string body_template = 5;
+}
+
+// RFC 9535 JSONPath extraction mapping (`response_mapping`).
+message ResponseMappingProto {
+  optional string root_path = 1;
+  optional string items_path = 2;
+  bool require_non_empty = 3;
+  map<string, string> fields = 4;
+}
+
+// Declarative electric tariff rule inside `tariff_catalog.electric_rules`.
+message ElectricRuleProto {
+  string id = 1;
+  // YAML alias: `match_scope`.
+  GeoScopeProto geo_scope = 2;
+  string carrier_name = 3;
+  string short_name = 4;
+  string utility_type = 5;
+  optional string utility_type_label = 6;
+  optional string cca_program = 7;
+  string rate_schedule = 8;
+  double rate_per_kwh_usd = 9;
+  double off_peak_kwh_usd = 10;
+  double peak_kwh_usd = 11;
+  double monthly_base_fee_usd = 12;
+  string solar_nem_policy = 13;
+  string tariff_url = 14;
+  string rate_source = 15;
+}
+
+// Declarative natural gas tariff rule inside `tariff_catalog.gas_rules`.
+message GasRuleProto {
+  string id = 1;
+  // YAML alias: `match_scope`.
+  GeoScopeProto geo_scope = 2;
+  string carrier_name = 3;
+  string heating_fuel_norm = 4;
+  string rate_schedule = 5;
+  optional double rate_per_therm_usd = 6;
+  double monthly_base_fee_usd = 7;
+  string tariff_url = 8;
+  string rate_source = 9;
+}
+
+// Declarative water, sanitary sewer, and solid waste rule inside `tariff_catalog.water_sewer_trash_rules`.
+message WaterSewerTrashRuleProto {
+  string id = 1;
+  // YAML alias: `match_scope`.
+  GeoScopeProto geo_scope = 2;
+  string water_carrier_name = 3;
+  optional string fallback_water_carrier_name = 4;
+  optional string water_pwsid = 5;
+  string water_source_type = 6;
+  string water_rate_unit = 7;
+  optional double water_volumetric_rate_usd = 8;
+  double water_base_monthly_usd = 9;
+  optional string water_tariff_url = 10;
+  string sewer_carrier_name = 11;
+  string sewer_type = 12;
+  int64 sewer_monthly_usd = 13;
+  string trash_carrier_name = 14;
+  int64 trash_monthly_usd = 15;
+}
+
+// Declarative broadband footprint rule inside `footprint_catalog.broadband_rules`.
+message BroadbandRuleProto {
+  string id = 1;
+  // YAML alias: `match_scope`.
+  GeoScopeProto geo_scope = 2;
+  bool exclude_rural = 3;
+  bool only_when_category_empty = 4;
+  string carrier_name = 5;
+  string technology = 6;
+  string tier_category = 7;
+  int64 max_download_mbps = 8;
+  int64 max_upload_mbps = 9;
+  bool symmetrical = 10;
+  string typical_monthly_usd = 11;
+  string availability_status = 12;
+  string check_url = 13;
+}
+
+// Collection of published electric, gas, and water/sewer/trash tariff rules (`tariff_catalog` / `static_tariffs`).
+message TariffCatalogProto {
+  repeated ElectricRuleProto electric_rules = 1;
+  repeated GasRuleProto gas_rules = 2;
+  repeated WaterSewerTrashRuleProto water_sewer_trash_rules = 3;
+}
+
+// Collection of published broadband carrier footprint rules (`footprint_catalog`).
+message FootprintCatalogProto {
+  repeated BroadbandRuleProto broadband_rules = 1;
+}
+
+// Typed union of optional static tariff attributes accepted inside `geo_rules[*].static_tariff`.
+message StaticTariffRuleSpecProto {
+  optional string carrier_name = 1;
+  optional string short_name = 2;
+  optional string utility_type = 3;
+  optional string utility_type_label = 4;
+  optional string cca_program = 5;
+  optional string rate_schedule = 6;
+  optional double rate_per_kwh_usd = 7;
+  optional double off_peak_kwh_usd = 8;
+  optional double peak_kwh_usd = 9;
+  optional double monthly_base_fee_usd = 10;
+  optional string solar_nem_policy = 11;
+  optional string tariff_url = 12;
+  optional string rate_source = 13;
+  optional string heating_fuel_norm = 14;
+  optional double rate_per_therm_usd = 15;
+  optional string water_carrier_name = 16;
+  optional string fallback_water_carrier_name = 17;
+  optional string water_pwsid = 18;
+  optional string water_source_type = 19;
+  optional string water_rate_unit = 20;
+  optional double water_volumetric_rate_usd = 21;
+  optional double water_base_monthly_usd = 22;
+  optional string water_tariff_url = 23;
+  optional string sewer_carrier_name = 24;
+  optional string sewer_type = 25;
+  optional int64 sewer_monthly_usd = 26;
+  optional string trash_carrier_name = 27;
+  optional int64 trash_monthly_usd = 28;
+}
+
+// Compact `geo_rules` syntax supporting `match_scope` + `static_tariff` or `broadband_option`.
+message GeoRuleProto {
+  string id = 1;
+  // YAML alias: `geo_scope`.
+  GeoScopeProto match_scope = 2;
+  bool exclude_rural = 3;
+  optional StaticTariffRuleSpecProto static_tariff = 4;
+  optional BroadbandRuleProto broadband_option = 5;
+}
+
 // Home-Assistant-style integration manifest (`extensions/<vendor_id>/manifest.yaml`).
+// Protobuf descriptor is the single source of truth for strict YAML validation and `manifest.schema.json`.
 message ExtensionManifestProto {
+  // YAML alias: `id`.
   string extension_id = 1;
   string name = 2;
   string version = 3;
   string description = 4;
   CapabilityDomain domain = 5;
+  // YAML alias: `domains`.
   repeated CapabilityDomain additional_domains = 6;
+  // YAML alias: `driver_kind`.
   DriverKind driver = 7;
   GeoScopeProto geo_scope = 8;
   AuthSpecProto auth = 9;
@@ -119,13 +424,50 @@ message ExtensionManifestProto {
   optional string openapi_spec_file = 16;
   optional string documentation_url = 17;
   repeated string codeowners = 18;
+  // YAML alias: `provenance`.
   ProvenanceTier default_provenance = 19;
   // Upstream extension IDs that must run before this extension in DAG topological order.
+  // YAML alias: `dependencies`.
   repeated string depends_on = 20;
   // Upstream capability domains whose produced envelopes are passed into this extension's `upstream_envelopes`.
+  // YAML aliases: `consumes_domains`, `input_domains`.
   repeated CapabilityDomain input_from_domains = 21;
   // "any" (default: skip only when zero upstream sources produced usable envelopes) or "all".
   string upstream_require_mode = 22;
+  // Commercial monetization tier: `basic` or `premium`.
+  ExtensionTier tier = 23;
+  // Data license classification: `public_open_data`, `byok_commercial_api`,
+  // `non_open_scrape`, `human_in_loop`, or `llm_service`.
+  LicenseClass license_class = 24;
+  // Scheduling mode: `eager` (initial report build) or `lazy` (queued via LazyWorker).
+  ExecutionMode execution_mode = 25;
+  // When true, execution requires explicit approval (never auto-enqueued or auto-run).
+  bool requires_manual_approval = 26;
+  // Minimum commercial plan tier required when gated (e.g. "", "single_deal", "pro").
+  string min_plan_tier = 27;
+  // Resource dimensions metered for this extension.
+  MeteringSpecProto metering = 28;
+  // Optional report section ID targeted by lazy outputs (e.g. "publicResearch").
+  // YAML alias: `report_section`.
+  string section_id = 29;
+  // Default enablement state shipped in manifest (`false` required for `human_in_loop`).
+  optional bool enabled_by_default = 30;
+  // Per-extension / per-task LLM profile, model (private only), and reasoning effort configuration.
+  optional LlmSpecProto llm = 31;
+  // Cross-home shared data caching & background refresh configuration.
+  optional SharingSpecProto sharing = 32;
+  optional string homepage_url = 33;
+  // YAML alias: `attribution`.
+  optional ManifestSourceAttributionProto source_attribution = 34;
+  // YAML alias: `openapi_operation`.
+  optional OpenApiBindingProto openapi = 35;
+  // YAML alias: `endpoint`.
+  optional DeclarativeRequestProto request = 36;
+  optional ResponseMappingProto response_mapping = 37;
+  // YAML alias: `static_tariffs`.
+  optional TariffCatalogProto tariff_catalog = 38;
+  optional FootprintCatalogProto footprint_catalog = 39;
+  repeated GeoRuleProto geo_rules = 40;
 }
 
 // Mandatory citation & provenance metadata attached to every extension result.
@@ -205,5 +547,9 @@ message ExtensionEnvelopeProto {
     MepIntelProto mep_intel = 31;
     RemodelIntelProto remodel_intel = 32;
     CodeEnforcementIntelProto code_enforcement_intel = 33;
+    RentalListingProto rental_listing = 34;
+    RentalMarketCellProto rental_market_cell = 35;
+    DisclosurePacketProto disclosure_packet = 36;
+    DocumentForensicsVerdictProto forensics_verdict = 37;
   }
 }

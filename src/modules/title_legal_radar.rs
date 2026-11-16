@@ -2488,7 +2488,6 @@ enum LiveDocketStatus {
 
 #[derive(Debug, Default, Clone)]
 struct LiveDocketOutcome {
-    checked: bool,
     status: LiveDocketStatus,
     error_note: Option<String>,
     hits: Vec<Value>,
@@ -2674,7 +2673,6 @@ async fn query_courtlistener_dockets(
             "title-legal-radar: CourtListener RECAP query skipped — COURTLISTENER_API_TOKEN not configured (unauthenticated)".to_string(),
         );
         return LiveDocketOutcome {
-            checked: false,
             status: LiveDocketStatus::Unauthenticated,
             error_note: Some(
                 "Federal RECAP dockets require COURTLISTENER_API_TOKEN (unauthenticated)"
@@ -2758,7 +2756,6 @@ async fn query_courtlistener_dockets(
                 }
             }
             LiveDocketOutcome {
-                checked: true,
                 status: LiveDocketStatus::LiveChecked,
                 error_note: None,
                 hits,
@@ -2776,7 +2773,6 @@ async fn query_courtlistener_dockets(
                 }
             )));
             LiveDocketOutcome {
-                checked: false,
                 status: if is_unauth {
                     LiveDocketStatus::Unauthenticated
                 } else {
@@ -2812,75 +2808,153 @@ async fn query_open_recorder_and_distress(
     let fips = county_fips.trim();
     let clean_street = street.trim();
 
-    // 1. NYC ACRIS Real Property Legals + DOF Tax Lien Sale List (5 NYC boroughs)
-    let is_nyc = st == "NY"
-        && (matches!(fips, "36005" | "36047" | "36061" | "36081" | "36085")
-            || matches!(
-                city.trim().to_ascii_lowercase().as_str(),
-                "new york" | "manhattan" | "brooklyn" | "queens" | "bronx" | "staten island"
-            ));
+    // 1. NYC ACRIS Real Property Legals + DOF Tax Lien Sale Lists (5 NYC boroughs)
+    let nyc_borough_code: Option<&str> = match fips {
+        "36061" => Some("1"),
+        "36005" => Some("2"),
+        "36047" => Some("3"),
+        "36081" => Some("4"),
+        "36085" => Some("5"),
+        _ => match city.trim().to_ascii_lowercase().as_str() {
+            "manhattan" | "new york" => Some("1"),
+            "bronx" => Some("2"),
+            "brooklyn" => Some("3"),
+            "queens" => Some("4"),
+            "staten island" => Some("5"),
+            _ => None,
+        },
+    };
+    let is_nyc = st == "NY" && nyc_borough_code.is_some();
 
     if is_nyc && clean_street.len() >= 4 {
-        if let Ok(acris_url) = Url::parse_with_params(
-            "https://data.cityofnewyork.us/resource/8h5j-fqxa.json",
-            &[("$limit", "8"), ("$q", clean_street)],
-        ) {
-            match http
-                .get_json_opts(acris_url.as_str(), LIVE_QUERY_TIMEOUT_MS, 0, 86_400, None)
-                .await
-            {
-                Ok(Value::Array(rows)) => {
-                    rec_out.checked = true;
-                    rec_out.source_name =
-                        Some("NYC Dept. of Finance — ACRIS Open Data".to_string());
-                    rec_out.source_url = Some(
-                        "https://data.cityofnewyork.us/City-Government/ACRIS-Real-Property-Legals/8h5j-fqxa".to_string(),
-                    );
-                    sources.push(SourceItem::new(
-                        "NYC ACRIS Real Property Legals (NYC Open Data Socrata)",
-                        "https://data.cityofnewyork.us/City-Government/ACRIS-Real-Property-Legals/8h5j-fqxa",
-                    ));
-                    for row in rows.iter().take(6) {
-                        rec_out.records.push(json!({
-                            "documentId": val_str(row.get("document_id")),
-                            "documentType": val_str(row.get("property_type")).unwrap_or("ACRIS Indexed Parcel Instrument"),
-                            "recordedDate": val_str(row.get("good_through_date")),
-                            "boroughBlockLot": format!(
-                                "{}-{}-{}",
-                                val_str(row.get("borough")).unwrap_or("?"),
-                                val_str(row.get("block")).unwrap_or("?"),
-                                val_str(row.get("lot")).unwrap_or("?")
-                            ),
-                        }));
-                    }
-                }
-                Ok(_) => {}
-                Err(e) => warnings.push(sanitize_user_warning(&format!(
-                    "title-legal-radar: NYC ACRIS lookup failed ({e})"
-                ))),
-            }
+        let mut tokens: Vec<&str> = clean_street.split_whitespace().collect();
+        let house_num = tokens
+            .first()
+            .filter(|t| t.chars().any(|c| c.is_ascii_digit()))
+            .map(|t| {
+                t.chars()
+                    .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
+                    .collect::<String>()
+                    .to_ascii_uppercase()
+            })
+            .filter(|s| !s.is_empty());
+        if house_num.is_some() && !tokens.is_empty() {
+            tokens.remove(0);
         }
+        if matches!(
+            tokens.last().map(|t| t.to_ascii_uppercase()).as_deref(),
+            Some(
+                "ST" | "STREET"
+                    | "AVE"
+                    | "AVENUE"
+                    | "RD"
+                    | "ROAD"
+                    | "BLVD"
+                    | "DR"
+                    | "DRIVE"
+                    | "LN"
+                    | "LANE"
+                    | "PL"
+                    | "PLACE"
+                    | "WAY"
+            )
+        ) && tokens.len() > 1
+        {
+            tokens.pop();
+        }
+        let street_stem: String = tokens
+            .join(" ")
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || *c == ' ' || *c == '-')
+            .collect::<String>()
+            .trim()
+            .to_ascii_uppercase();
 
-        if let Ok(lien_url) = Url::parse_with_params(
-            "https://data.cityofnewyork.us/resource/9f9k-226w.json",
-            &[("$limit", "5"), ("$q", clean_street)],
-        ) {
-            if let Ok(Value::Array(rows)) = http
-                .get_json_opts(lien_url.as_str(), LIVE_QUERY_TIMEOUT_MS, 0, 43_200, None)
-                .await
-            {
-                dist_out.checked = true;
-                dist_out.source_name = Some("NYC DOF Tax Lien Sale List (Open Data)".to_string());
-                dist_out.source_url = Some(
-                    "https://data.cityofnewyork.us/City-Government/DOF-Tax-Lien-Sale-List/9f9k-226w"
-                        .to_string(),
-                );
-                for row in rows.iter().take(5) {
-                    dist_out.records.push(json!({
-                        "documentType": "NYC DOF Tax Lien Sale Notice",
-                        "recordedDate": val_str(row.get("month")),
-                        "documentId": format!("{}-{}", val_str(row.get("block")).unwrap_or(""), val_str(row.get("lot")).unwrap_or("")),
-                    }));
+        if !street_stem.is_empty() {
+            let boro_clause = nyc_borough_code
+                .map(|b| format!("borough='{b}' AND "))
+                .unwrap_or_default();
+            let acris_where = match house_num.as_deref() {
+                Some(hn) => format!(
+                    "{boro_clause}street_number='{hn}' AND starts_with(street_name,'{street_stem}')"
+                ),
+                None => format!("{boro_clause}starts_with(street_name,'{street_stem}')"),
+            };
+            if let Ok(acris_url) = Url::parse_with_params(
+                "https://data.cityofnewyork.us/resource/8h5j-fqxa.json",
+                &[("$limit", "8"), ("$where", acris_where.as_str())],
+            ) {
+                match http
+                    .get_json_opts(acris_url.as_str(), LIVE_QUERY_TIMEOUT_MS, 0, 86_400, None)
+                    .await
+                {
+                    Ok(Value::Array(rows)) => {
+                        rec_out.checked = true;
+                        rec_out.source_name =
+                            Some("NYC Dept. of Finance — ACRIS Open Data".to_string());
+                        rec_out.source_url = Some(
+                            "https://data.cityofnewyork.us/City-Government/ACRIS-Real-Property-Legals/8h5j-fqxa".to_string(),
+                        );
+                        sources.push(SourceItem::new(
+                            "NYC ACRIS Real Property Legals (NYC Open Data Socrata)",
+                            "https://data.cityofnewyork.us/City-Government/ACRIS-Real-Property-Legals/8h5j-fqxa",
+                        ));
+                        for row in rows.iter().take(6) {
+                            rec_out.records.push(json!({
+                                "documentId": val_str(row.get("document_id")),
+                                "documentType": val_str(row.get("property_type")).unwrap_or("ACRIS Indexed Parcel Instrument"),
+                                "recordedDate": val_str(row.get("good_through_date")),
+                                "boroughBlockLot": format!(
+                                    "{}-{}-{}",
+                                    val_str(row.get("borough")).unwrap_or("?"),
+                                    val_str(row.get("block")).unwrap_or("?"),
+                                    val_str(row.get("lot")).unwrap_or("?")
+                                ),
+                            }));
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(e) => warnings.push(sanitize_user_warning(&format!(
+                        "title-legal-radar: NYC ACRIS lookup failed ({e})"
+                    ))),
+                }
+            }
+
+            let lien_where = match house_num.as_deref() {
+                Some(hn) => format!(
+                    "{boro_clause}house_number='{hn}' AND starts_with(street_name,'{street_stem}')"
+                ),
+                None => format!("{boro_clause}starts_with(street_name,'{street_stem}')"),
+            };
+            if let Ok(lien_url) = Url::parse_with_params(
+                "https://data.cityofnewyork.us/resource/9rz4-mjek.json",
+                &[("$limit", "5"), ("$where", lien_where.as_str())],
+            ) {
+                match http
+                    .get_json_opts(lien_url.as_str(), LIVE_QUERY_TIMEOUT_MS, 0, 43_200, None)
+                    .await
+                {
+                    Ok(Value::Array(rows)) => {
+                        dist_out.checked = true;
+                        dist_out.source_name =
+                            Some("NYC DOF Tax Lien Sale Lists (Open Data)".to_string());
+                        dist_out.source_url = Some(
+                            "https://data.cityofnewyork.us/City-Government/Tax-Lien-Sale-Lists/9rz4-mjek"
+                                .to_string(),
+                        );
+                        for row in rows.iter().take(5) {
+                            let cycle = val_str(row.get("cycle")).unwrap_or("Lien List");
+                            dist_out.records.push(json!({
+                                "documentType": format!("NYC DOF Tax Lien Sale Notice ({cycle})"),
+                                "recordedDate": val_str(row.get("month")),
+                                "documentId": format!("{}-{}", val_str(row.get("block")).unwrap_or(""), val_str(row.get("lot")).unwrap_or("")),
+                            }));
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(e) => warnings.push(sanitize_user_warning(&format!(
+                        "title-legal-radar: NYC DOF Tax Lien Sale lookup failed ({e})"
+                    ))),
                 }
             }
         }
@@ -3252,6 +3326,7 @@ impl DataExtensionAdapter for TitleUnderwriterRatesAdapter {
             depends_on: Vec::new(),
             input_from_domains: Vec::new(),
             upstream_require_mode: "any".to_string(),
+            ..Default::default()
         }
     }
 
@@ -3714,9 +3789,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn courtlistener_missing_token_and_401_report_unauthenticated() {
+    async fn courtlistener_missing_token_and_unreachable_report_honest_status() {
         use std::collections::HashMap;
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
         use tokio::net::TcpListener;
 
         let http = HttpClient::new(None);
@@ -3748,40 +3822,36 @@ mod tests {
         assert!(note.contains("COURTLISTENER_API_TOKEN"));
         assert!(!note.to_ascii_lowercase().contains("offline/cached mode"));
 
-        // 2. HTTP 401 from an overridden CourtListener URL also maps cleanly to `courtlistener_unauthenticated`
+        // 2. Unreachable CourtListener endpoint maps cleanly to `courtlistener_unavailable`
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
-        let addr = listener.local_addr().expect("local_addr");
-        let srv = tokio::spawn(async move {
-            if let Ok((mut sock, _)) = listener.accept().await {
-                let mut buf = [0u8; 1024];
-                let _ = sock.read(&mut buf).await;
-                let body = r#"{"detail":"Authentication credentials were not provided."}"#;
-                let resp = format!(
-                    "HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                    body.len(),
-                    body
-                );
-                let _ = sock.write_all(resp.as_bytes()).await;
-            }
-        });
-        let env_401 = EnvConfig::from_map(HashMap::from([(
+        let closed_addr = listener.local_addr().expect("local_addr");
+        drop(listener);
+        let env_down = EnvConfig::from_map(HashMap::from([(
             "COURTLISTENER_API_URL".to_string(),
-            format!("http://{addr}/api/rest/v4/search/"),
+            format!("http://{closed_addr}/api/rest/v4/search/"),
         )]));
         let mut s2 = Vec::new();
         let mut w2 = Vec::new();
-        let out_401 = query_courtlistener_dockets(
-            &HttpClient::from_env(&env_401, None),
-            &env_401,
+        let out_down = query_courtlistener_dockets(
+            &HttpClient::from_env(&env_down, None),
+            &env_down,
             "742 Synth Ave",
             "Synth City",
             &mut s2,
             &mut w2,
         )
         .await;
-        let _ = srv.await;
-        assert_eq!(out_401.status, LiveDocketStatus::Unauthenticated);
-        assert!(w2.iter().any(|w| w.contains("unauthenticated")));
+        assert_eq!(out_down.status, LiveDocketStatus::Unavailable);
+        let sec_down = build_litigation_and_dockets_section(
+            &json!({}),
+            &json!({ "state": "CA" }),
+            &json!({ "yearBuilt": 2000 }),
+            &json!({}),
+            NaiveDate::from_ymd_opt(2026, 11, 15).unwrap(),
+            Some(&out_down),
+        );
+        assert_eq!(sec_down["coverageStatus"], "courtlistener_unavailable");
+        assert!(w2.iter().any(|w| w.contains("unavailable")));
     }
 
     #[test]

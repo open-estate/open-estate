@@ -12,7 +12,7 @@
 //   PII redaction (`redact_title_pii`) execute BEFORE any text ever leaves the server to an LLM API.
 
 use crate::ai::llm::{
-    parse_model_spec, ModelSpec, DEFAULT_FALLBACK_MODEL, DEFAULT_MATCH_MODEL,
+    extract_response_text, extract_usage, resolve_llm_spec_for_call, ModelSpec,
 };
 use crate::guardrails::{
     scrub_sensitive_text, scrub_untrusted_document_lines, validate_and_scrub_property_document,
@@ -2331,40 +2331,16 @@ struct VisionHttpError {
 }
 
 fn resolve_vision_ocr_models(env: &EnvConfig) -> Vec<ModelSpec> {
-    let primary_raw = env.get("LLM_MATCH_MODEL").unwrap_or(DEFAULT_MATCH_MODEL);
-    let primary = parse_model_spec(primary_raw, env.get("LLM_EFFORT"));
-    let fb_raw = env
-        .get("LLM_FALLBACK_MODEL")
-        .unwrap_or(DEFAULT_FALLBACK_MODEL);
-
-    let mut chain = vec![primary];
-    for part in fb_raw.split(',') {
-        let trimmed = part.trim();
-        if !trimmed.is_empty() && !trimmed.eq_ignore_ascii_case("none") {
-            chain.push(parse_model_spec(trimmed, None));
-        }
-    }
-
-    let mut seen = HashSet::new();
-    let mut deduped = Vec::new();
-    for spec in chain {
-        if spec.model.is_empty() {
-            continue;
-        }
-        let key = format!("{}@{}", spec.model, spec.effort.as_deref().unwrap_or(""));
-        if seen.insert(key) {
-            deduped.push(spec);
-        }
-    }
-    deduped
+    resolve_llm_spec_for_call(env, None, Some("pdf_vision_ocr"), Some("extraction_fast")).models
 }
 
 fn extract_responses_output_text(j: &Value) -> std::result::Result<String, String> {
-    crate::ai::llm::extract_response_text(j).map_err(|e| e.message)
+    extract_response_text(j).map_err(|e| e.message)
 }
 
 async fn send_vision_ocr_once(
     http: &HttpClient,
+    env: &EnvConfig,
     endpoint: &str,
     api_key: &str,
     model: &str,
@@ -2476,16 +2452,41 @@ async fn send_vision_ocr_once(
         });
     }
 
-    extract_responses_output_text(&j).map_err(|msg| VisionHttpError {
+    let text = extract_responses_output_text(&j).map_err(|msg| VisionHttpError {
         status: Some(status.as_u16()),
         message: scrub_sensitive_text(&msg),
         unsupported_effort: false,
         rejected_input_file: false,
-    })
+    })?;
+    let response_model = j
+        .get("model")
+        .and_then(|m| m.as_str())
+        .unwrap_or(model)
+        .to_string();
+    let echoed_effort = j
+        .pointer("/reasoning/effort")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .or_else(|| effort.map(str::to_string));
+    if let Some(usage) = extract_usage(j.get("usage")) {
+        crate::metering::add_llm_usage_detailed(
+            Some(env),
+            &usage,
+            &response_model,
+            Some(model),
+            echoed_effort.as_deref(),
+            Some("extraction_fast"),
+            Some("pdf_vision_ocr"),
+        );
+    }
+    Ok(text)
 }
 
 async fn send_vision_ocr_with_effort_fallback(
     http: &HttpClient,
+    env: &EnvConfig,
     endpoint: &str,
     api_key: &str,
     spec: &ModelSpec,
@@ -2495,6 +2496,7 @@ async fn send_vision_ocr_with_effort_fallback(
 ) -> std::result::Result<String, VisionHttpError> {
     match send_vision_ocr_once(
         http,
+        env,
         endpoint,
         api_key,
         &spec.model,
@@ -2509,6 +2511,7 @@ async fn send_vision_ocr_with_effort_fallback(
         Err(err) if err.unsupported_effort && spec.effort.is_some() => {
             send_vision_ocr_once(
                 http,
+                env,
                 endpoint,
                 api_key,
                 &spec.model,
@@ -2616,6 +2619,7 @@ pub async fn ocr_pdf_via_llm_responses(
     for spec in &models {
         match send_vision_ocr_with_effort_fallback(
             http,
+            env,
             &endpoint,
             api_key,
             spec,
@@ -2645,6 +2649,7 @@ pub async fn ocr_pdf_via_llm_responses(
                     if let Some(ref img_content) = input_image_content {
                         match send_vision_ocr_with_effort_fallback(
                             http,
+                            env,
                             &endpoint,
                             api_key,
                             spec,

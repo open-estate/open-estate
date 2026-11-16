@@ -592,7 +592,6 @@ async fn cloud_open_estate_twelve_factor_connectors_and_clean_room_market_parity
     // 2. Cloud Open Estate 12-factor configuration: every BYOK connector & infrastructure override
     //    activates cleanly via standard environment variables without code changes or secret leaks.
     let secret_openai = "test-cloud-openai-placeholder-112233";
-    let secret_rentcast = "rc-cloud-test-secret-445566";
     let secret_attom = "attom-cloud-test-secret-778899";
     let secret_reso = "reso-cloud-test-bearer-001122";
     let secret_smtp = "smtp-cloud-test-pass-334455";
@@ -605,7 +604,6 @@ async fn cloud_open_estate_twelve_factor_connectors_and_clean_room_market_parity
         ),
         ("LLM_MODEL".to_string(), "gpt-4.1".to_string()),
         ("LLM_FALLBACK_MODEL".to_string(), "gpt-4o-mini".to_string()),
-        ("RENTCAST_API_KEY".to_string(), secret_rentcast.to_string()),
         ("ATTOM_API_KEY".to_string(), secret_attom.to_string()),
         (
             "RESO_API_URL".to_string(),
@@ -663,7 +661,6 @@ async fn cloud_open_estate_twelve_factor_connectors_and_clean_room_market_parity
     let connectors = connector_status(&cloud_env);
     for expected_id in [
         "reso",
-        "rentcast",
         "simplyrets",
         "attom",
         "shovels",
@@ -686,15 +683,14 @@ async fn cloud_open_estate_twelve_factor_connectors_and_clean_room_market_parity
     }
 
     let catalog = build_connector_catalog(&cloud_env);
-    assert_eq!(catalog.len(), 19);
+    assert_eq!(catalog.len(), 18);
     assert!(
         catalog.iter().all(|c| c["configured"] == json!(true)),
-        "all 19 ops catalog connectors must report configured=true in full Cloud env: {catalog:?}"
+        "all 18 ops catalog connectors must report configured=true in full Cloud env: {catalog:?}"
     );
     let catalog_str = serde_json::to_string(&catalog).unwrap();
     for secret in [
         secret_openai,
-        secret_rentcast,
         secret_attom,
         secret_reso,
         secret_smtp,

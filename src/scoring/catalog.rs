@@ -407,7 +407,7 @@ pub fn map_reso_style(value: &str) -> Option<ResoStyle> {
         })
 }
 
-/// Non-standard values seen in local MLS feeds and county records (RentCast `architectureType`,
+/// Non-standard values seen in local MLS feeds and county records (assessor `architectureType`,
 /// ATTOM), compared with [`norm_key`].
 const STYLE_ALIASES: &[(&str, StyleFamily)] = &[
     ("midcentury", StyleFamily::MidCentury),

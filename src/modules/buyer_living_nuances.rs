@@ -23,18 +23,26 @@
 //!    HOA CC&R minimum-lease check (`hoaMonthly > 0`), and ADU/JADU house-hacking cross-referenced
 //!    with `remodelAndRebuild` and `valuation.rentResearch` (never inventing ADU rent if absent).
 
+use crate::db::shared_cache_store::{compute_sha256_hex, GeoIndexColumns, SharedDataRecordRow};
+use crate::extensions::proto::shared_v1::{PlanningRadarCellProto, PlanningRadarItemProto};
+use crate::extensions::shared_cache::{
+    dataset_ids, encode_geohash, get_shared_dataset_proto, put_shared_dataset_proto, ShareScope,
+    SharedExtensionCache,
+};
 use crate::registry::rates_and_costs::TIER1_COASTAL_WIND_FIPS;
 use crate::registry::us_geo::state_abbr_for_fips;
 use crate::registry::utilities::{
     resolve_electric_utility, resolve_gas_utility, UtilityLookupInput,
 };
 use crate::shared::{
-    arcgis_representative_point, bbox_around, bearing_deg, compass8, haversine_m, round_n,
-    unwrap_data, EnvConfig, HttpClient, ModuleOutput, SourceItem, MILE_M, OSM_ODBL_ATTRIBUTION,
+    arcgis_representative_point, bbox_around, bearing_deg, compass8, haversine_m, now_iso,
+    round_n, unwrap_data, EnvConfig, HttpClient, ModuleOutput, SourceItem, MILE_M,
+    OSM_ODBL_ATTRIBUTION,
 };
 use chrono::Datelike;
 use once_cell::sync::Lazy;
 use regex::Regex;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
@@ -1073,6 +1081,417 @@ struct LiveRadarFetchResult {
     warnings: Vec<String>,
 }
 
+const PLANNING_RADAR_CELL_TTL_SECS: u64 = 86_400;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct StoredRadarSource {
+    name: String,
+    url: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct StoredRadarItem {
+    id: String,
+    name: String,
+    category: String,
+    status: String,
+    lat: f64,
+    lon: f64,
+    impact_note: String,
+    source_name: String,
+    source_url: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct StoredRadarCellPayload {
+    overpass_ok: bool,
+    municipal_gis_ok: bool,
+    municipal_portal_name: Option<String>,
+    sources: Vec<StoredRadarSource>,
+    items: Vec<StoredRadarItem>,
+}
+
+fn canonical_radar_category(cat: &str) -> (&'static str, &'static str) {
+    match cat.trim() {
+        "planning_appeal_or_review" => (
+            "planning_appeal_or_review",
+            "Municipal Planning Appeal / Review",
+        ),
+        "historical_planning_record" => (
+            "historical_planning_record",
+            "Historical Municipal Planning Record",
+        ),
+        "approved_planning_entitlement" => (
+            "approved_planning_entitlement",
+            "Approved Planning Entitlement",
+        ),
+        "municipal_planning_application" => (
+            "municipal_planning_application",
+            "Municipal Planning Entitlement",
+        ),
+        "road_or_transit_infrastructure" => (
+            "road_or_transit_infrastructure",
+            "Road / Transit Infrastructure",
+        ),
+        "multifamily_or_mixed_use" => (
+            "multifamily_or_mixed_use",
+            "Multi-Family / Mixed-Use Infill",
+        ),
+        "commercial_development" => (
+            "commercial_development",
+            "Commercial / Institutional Project",
+        ),
+        "proposed_facility" => (
+            "proposed_facility",
+            "Proposed Infrastructure / Building",
+        ),
+        _ => (
+            "residential_infill",
+            "Active Building / Parcel Construction",
+        ),
+    }
+}
+
+fn planning_radar_params_hash(
+    env: &EnvConfig,
+    state: &str,
+    county_fips: &str,
+    city: &str,
+) -> String {
+    let st = state.trim().to_ascii_uppercase();
+    let fips = county_fips.trim();
+    let ct = city.trim().to_ascii_lowercase();
+    let ov = env.get("OVERPASS_API_URLS").unwrap_or("").trim();
+    compute_sha256_hex(format!("planning_radar_v1:{st}:{fips}:{ct}:{ov}").as_bytes())
+}
+
+fn planning_radar_geo(lat: f64, lon: f64) -> Option<(String, GeoIndexColumns)> {
+    let gh6 = encode_geohash(lat, lon, 6)?;
+    Some((
+        gh6.clone(),
+        GeoIndexColumns {
+            geohash5: encode_geohash(lat, lon, 5),
+            geohash6: Some(gh6),
+            geohash7: encode_geohash(lat, lon, 7),
+            ..Default::default()
+        },
+    ))
+}
+
+fn planning_radar_cell_to_proto(
+    geohash6: &str,
+    res: &LiveRadarFetchResult,
+) -> PlanningRadarCellProto {
+    let source_name = if let Some(portal) = res.municipal_portal_name.as_deref() {
+        portal.to_string()
+    } else if let Some(first) = res.sources.first() {
+        first.name.clone()
+    } else {
+        "OpenStreetMap Overpass & Municipal Planning GIS".to_string()
+    };
+    let source_url = res
+        .sources
+        .first()
+        .map(|s| s.url.clone())
+        .unwrap_or_else(|| "https://www.openstreetmap.org/copyright".to_string());
+    PlanningRadarCellProto {
+        geohash6: geohash6.to_string(),
+        projects: res
+            .projects
+            .iter()
+            .map(|p| PlanningRadarItemProto {
+                project_id: p.id.clone(),
+                title: p.name.clone(),
+                status: p.status.clone(),
+                category: p.category.to_string(),
+                address: None,
+                lat: Some(p.lat),
+                lon: Some(p.lon),
+                proposed_units: None,
+                filed_date: None,
+                source_url: Some(p.source_url.clone()),
+            })
+            .collect(),
+        source_name,
+        source_url,
+        fetched_at_rfc3339: now_iso(),
+    }
+}
+
+fn planning_radar_result_from_record(
+    lat: f64,
+    lon: f64,
+    row: &SharedDataRecordRow,
+    proto: &PlanningRadarCellProto,
+) -> LiveRadarFetchResult {
+    if let Some(payload) = row
+        .payload_json
+        .as_deref()
+        .and_then(|s| serde_json::from_str::<StoredRadarCellPayload>(s).ok())
+    {
+        let projects = payload
+            .items
+            .into_iter()
+            .filter_map(|item| {
+                let dist_m = haversine_m(lat, lon, item.lat, item.lon);
+                if !(0.0..=RADAR_SEARCH_RADIUS_M).contains(&dist_m) {
+                    return None;
+                }
+                let brg = bearing_deg(lat, lon, item.lat, item.lon);
+                let (category, category_label) = canonical_radar_category(&item.category);
+                Some(MappedProjectItem {
+                    id: item.id,
+                    name: item.name,
+                    category,
+                    category_label,
+                    status: item.status,
+                    distance_m: dist_m.round() as i64,
+                    distance_miles: round_n(dist_m / MILE_M, 2),
+                    direction: compass8(brg),
+                    bearing_deg: brg.round() as i64,
+                    lat: item.lat,
+                    lon: item.lon,
+                    impact_note: item.impact_note,
+                    source_name: item.source_name,
+                    source_url: item.source_url,
+                })
+            })
+            .collect();
+        let sources = payload
+            .sources
+            .into_iter()
+            .map(|s| SourceItem::new(s.name, s.url))
+            .collect();
+        return LiveRadarFetchResult {
+            queried: true,
+            overpass_ok: payload.overpass_ok,
+            municipal_gis_ok: payload.municipal_gis_ok,
+            municipal_portal_name: payload.municipal_portal_name,
+            projects,
+            sources,
+            warnings: Vec::new(),
+        };
+    }
+
+    let projects = proto
+        .projects
+        .iter()
+        .filter_map(|item| {
+            let (pla, plo) = (item.lat?, item.lon?);
+            let dist_m = haversine_m(lat, lon, pla, plo);
+            if !(0.0..=RADAR_SEARCH_RADIUS_M).contains(&dist_m) {
+                return None;
+            }
+            let brg = bearing_deg(lat, lon, pla, plo);
+            let (category, category_label) = canonical_radar_category(&item.category);
+            let (_, _, impact_note) =
+                classify_planning_entitlement_item(&item.category, &item.title, &item.status);
+            Some(MappedProjectItem {
+                id: item.project_id.clone(),
+                name: item.title.clone(),
+                category,
+                category_label,
+                status: item.status.clone(),
+                distance_m: dist_m.round() as i64,
+                distance_miles: round_n(dist_m / MILE_M, 2),
+                direction: compass8(brg),
+                bearing_deg: brg.round() as i64,
+                lat: pla,
+                lon: plo,
+                impact_note,
+                source_name: proto.source_name.clone(),
+                source_url: item
+                    .source_url
+                    .clone()
+                    .unwrap_or_else(|| proto.source_url.clone()),
+            })
+        })
+        .collect();
+    let mut sources = Vec::new();
+    if !proto.source_name.trim().is_empty() && !proto.source_url.trim().is_empty() {
+        sources.push(SourceItem::new(
+            proto.source_name.clone(),
+            proto.source_url.clone(),
+        ));
+    }
+    LiveRadarFetchResult {
+        queried: true,
+        overpass_ok: true,
+        municipal_gis_ok: !proto.source_name.trim().is_empty(),
+        municipal_portal_name: (!proto.source_name.trim().is_empty())
+            .then(|| proto.source_name.clone()),
+        projects,
+        sources,
+        warnings: Vec::new(),
+    }
+}
+
+async fn read_planning_radar_cell_record(
+    http: &HttpClient,
+    env: &EnvConfig,
+    lat: f64,
+    lon: f64,
+    params_hash: &str,
+) -> Option<(SharedDataRecordRow, PlanningRadarCellProto)> {
+    if http.is_bypassing_cache_reads() {
+        return None;
+    }
+    let gh6 = encode_geohash(lat, lon, 6)?;
+    let db = crate::modules::broadband_live::shared_broadband_db(env).await?;
+    match get_shared_dataset_proto::<PlanningRadarCellProto>(
+        Some(SharedExtensionCache::global()),
+        &db,
+        dataset_ids::PLANNING_RADAR_CELL,
+        ShareScope::Geohash6,
+        &gh6,
+        params_hash,
+    )
+    .await
+    {
+        Ok(hit) => hit,
+        Err(e) => {
+            tracing::warn!("buyer_living_nuances: read shared PLANNING_RADAR_CELL failed ({e})");
+            None
+        }
+    }
+}
+
+async fn write_planning_radar_cell_record(
+    env: &EnvConfig,
+    lat: f64,
+    lon: f64,
+    params_hash: &str,
+    res: &LiveRadarFetchResult,
+) {
+    if !res.overpass_ok && !res.municipal_gis_ok {
+        return;
+    }
+    let Some((gh6, geo)) = planning_radar_geo(lat, lon) else {
+        return;
+    };
+    let Some(db) = crate::modules::broadband_live::shared_broadband_db(env).await else {
+        return;
+    };
+    let proto = planning_radar_cell_to_proto(&gh6, res);
+    let payload = StoredRadarCellPayload {
+        overpass_ok: res.overpass_ok,
+        municipal_gis_ok: res.municipal_gis_ok,
+        municipal_portal_name: res.municipal_portal_name.clone(),
+        sources: res
+            .sources
+            .iter()
+            .map(|s| StoredRadarSource {
+                name: s.name.clone(),
+                url: s.url.clone(),
+            })
+            .collect(),
+        items: res
+            .projects
+            .iter()
+            .map(|p| StoredRadarItem {
+                id: p.id.clone(),
+                name: p.name.clone(),
+                category: p.category.to_string(),
+                status: p.status.clone(),
+                lat: p.lat,
+                lon: p.lon,
+                impact_note: p.impact_note.clone(),
+                source_name: p.source_name.clone(),
+                source_url: p.source_url.clone(),
+            })
+            .collect(),
+    };
+    let payload_json = serde_json::to_string(&payload).ok();
+    let provenance_json = Some(
+        json!({
+            "source": "planning_rezoning_radar",
+            "geohash6": gh6,
+            "overpassOk": res.overpass_ok,
+            "municipalGisOk": res.municipal_gis_ok,
+        })
+        .to_string(),
+    );
+    if let Err(e) = put_shared_dataset_proto(
+        Some(SharedExtensionCache::global()),
+        &db,
+        dataset_ids::PLANNING_RADAR_CELL,
+        ShareScope::Geohash6,
+        &gh6,
+        params_hash,
+        geo,
+        &proto,
+        payload_json,
+        provenance_json,
+        None,
+        PLANNING_RADAR_CELL_TTL_SECS,
+    )
+    .await
+    {
+        tracing::warn!("buyer_living_nuances: write shared PLANNING_RADAR_CELL failed ({e})");
+    }
+}
+
+async fn resolve_planning_radar_live(
+    http: &HttpClient,
+    env: &EnvConfig,
+    state: &str,
+    county_fips: &str,
+    city: &str,
+    lat: f64,
+    lon: f64,
+) -> LiveRadarFetchResult {
+    let params_hash = planning_radar_params_hash(env, state, county_fips, city);
+    if let Some((row, proto)) =
+        read_planning_radar_cell_record(http, env, lat, lon, &params_hash).await
+    {
+        return planning_radar_result_from_record(lat, lon, &row, &proto);
+    }
+    if http.is_offline_blocked() {
+        return LiveRadarFetchResult {
+            queried: true,
+            overpass_ok: false,
+            municipal_gis_ok: false,
+            ..Default::default()
+        };
+    }
+
+    let (ov_res, mun_res) = tokio::join!(
+        fetch_overpass_construction(http, env, lat, lon),
+        fetch_municipal_planning_projects(http, state, county_fips, city, lat, lon)
+    );
+    let mut out = LiveRadarFetchResult {
+        queried: true,
+        ..Default::default()
+    };
+    match ov_res {
+        Ok(items) => {
+            out.overpass_ok = true;
+            out.projects.extend(items);
+            out.sources.push(SourceItem::new(
+                format!("{OSM_ODBL_ATTRIBUTION} — Construction & Proposed Radar"),
+                "https://www.openstreetmap.org/copyright",
+            ));
+        }
+        Err(e) => {
+            out.warnings.push(format!(
+                "Neighborhood construction map scan unavailable ({})",
+                crate::shared::sanitize_user_warning(&e)
+            ));
+        }
+    }
+    let (mun_items, mun_sources, portal_name, mun_ok) = mun_res;
+    if mun_ok {
+        out.municipal_gis_ok = true;
+        out.municipal_portal_name = portal_name;
+        out.projects.extend(mun_items);
+        out.sources.extend(mun_sources);
+    }
+    if out.overpass_ok || out.municipal_gis_ok {
+        write_planning_radar_cell_record(env, lat, lon, &params_hash, &out).await;
+    }
+    out
+}
+
 fn classify_planning_entitlement_item(
     work_type: &str,
     desc: &str,
@@ -2095,6 +2514,89 @@ fn parse_fcc_mobile_json(j: &Value) -> Option<LiveFccMobileData> {
     })
 }
 
+fn mobile_carriers_to_hex_proto(
+    lat: f64,
+    lon: f64,
+    map_url: &str,
+    carriers: &[Value],
+) -> crate::extensions::proto::shared_v1::BroadbandHexProto {
+    let hex_id = crate::extensions::shared_cache::encode_geohash(lat, lon, 7)
+        .unwrap_or_else(|| format!("{lat:.5},{lon:.5}"));
+    let opts: Vec<crate::extensions::proto::BroadbandOptionProto> = carriers
+        .iter()
+        .filter_map(|c| {
+            let name = c.get("carrierName").and_then(Value::as_str)?.trim();
+            if name.is_empty() {
+                return None;
+            }
+            let g5 = c
+                .get("outdoor5gNr35x3")
+                .and_then(Value::as_str)
+                .unwrap_or("not_reported_at_35_3_tier");
+            let (dl, ul) = match g5 {
+                "verified_fcc_bdc_35_3_mbps" => (35, 3),
+                "verified_fcc_bdc_7_1_mbps" => (7, 1),
+                _ => (5, 1),
+            };
+            Some(crate::extensions::proto::BroadbandOptionProto {
+                carrier_name: name.to_string(),
+                technology: "5G-NR / 4G LTE".to_string(),
+                tier_category: "wireless".to_string(),
+                max_download_mbps: dl,
+                max_upload_mbps: ul,
+                symmetrical: false,
+                typical_monthly_usd: String::new(),
+                availability_status: g5.to_string(),
+                check_url: map_url.to_string(),
+            })
+        })
+        .collect();
+    let max_dl = opts.iter().map(|o| o.max_download_mbps).max().unwrap_or(0);
+    let max_ul = opts.iter().map(|o| o.max_upload_mbps).max().unwrap_or(0);
+    crate::extensions::proto::shared_v1::BroadbandHexProto {
+        hex_or_block_id: hex_id,
+        scope_kind: "geohash7".to_string(),
+        carriers: opts,
+        max_download_mbps: max_dl,
+        max_upload_mbps: max_ul,
+        fiber_present: false,
+        bdc_vintage: "fcc_bdc_live".to_string(),
+        source_url: map_url.to_string(),
+        fetched_at_rfc3339: crate::shared::now_iso(),
+    }
+}
+
+fn mobile_carriers_from_hex_proto(
+    hex: &crate::extensions::proto::shared_v1::BroadbandHexProto,
+) -> Vec<Value> {
+    hex.carriers
+        .iter()
+        .map(|o| {
+            let g5 = if !o.availability_status.trim().is_empty() {
+                o.availability_status.as_str()
+            } else if o.max_download_mbps >= 35 {
+                "verified_fcc_bdc_35_3_mbps"
+            } else if o.max_download_mbps >= 7 {
+                "verified_fcc_bdc_7_1_mbps"
+            } else {
+                "not_reported_at_35_3_tier"
+            };
+            let lte = if o.max_download_mbps >= 5 {
+                "verified_fcc_bdc_5_1_mbps"
+            } else {
+                "verify_on_fcc_map"
+            };
+            json!({
+                "carrierName": o.carrier_name,
+                "outdoor5gNr35x3": g5,
+                "outdoor4gLte5x1": lte,
+                "signalStrengthDbm": Value::Null,
+                "provenance": "fcc_bdc_live",
+            })
+        })
+        .collect()
+}
+
 async fn fetch_fcc_mobile_bdc(
     http: &HttpClient,
     env: &EnvConfig,
@@ -2125,6 +2627,42 @@ async fn fetch_fcc_mobile_bdc(
     let base = env
         .get("FCC_BDC_MOBILE_API_URL")
         .unwrap_or(FCC_BDC_MOBILE_DEFAULT_API_URL);
+    let fcc_mobile_map_url =
+        format!("https://broadbandmap.fcc.gov/location-summary/mobile?latlon={lat:.6}%2C{lon:.6}");
+    let params_hash = crate::modules::broadband_live::broadband_hex_params_hash(
+        "fcc_mobile",
+        base,
+        FCC_BDC_MOBILE_DEFAULT_API_URL,
+    );
+    if lat.is_finite() && lon.is_finite() {
+        if let Some((row, hex_proto)) =
+            crate::modules::broadband_live::read_broadband_hex_record(
+                http,
+                env,
+                lat,
+                lon,
+                &params_hash,
+            )
+            .await
+        {
+            let carriers = row
+                .payload_json
+                .as_deref()
+                .and_then(|s| serde_json::from_str::<Vec<Value>>(s).ok())
+                .filter(|v| !v.is_empty())
+                .unwrap_or_else(|| mobile_carriers_from_hex_proto(&hex_proto));
+            if !carriers.is_empty() {
+                return Some(LiveFccMobileData {
+                    queried: true,
+                    live_verified: true,
+                    status: "live_verified",
+                    http_status: Some(200),
+                    reason: None,
+                    carriers,
+                });
+            }
+        }
+    }
     let mut url = Url::parse(base).ok()?;
     url.query_pairs_mut()
         .append_pair("latitude", &format!("{lat:.6}"))
@@ -2180,7 +2718,20 @@ async fn fetch_fcc_mobile_bdc(
     };
 
     let code = resp.status().as_u16();
-    if code == 401 || code == 405 || !resp.status().is_success() {
+    let is_success = resp.status().is_success();
+    let Ok(raw_bytes) = resp.bytes().await else {
+        return Some(LiveFccMobileData {
+            queried: true,
+            live_verified: false,
+            status: "unavailable",
+            http_status: Some(code),
+            reason: Some("fcc_body_read_failed".to_string()),
+            carriers: Vec::new(),
+        });
+    };
+    crate::metering::add_bytes_downloaded(raw_bytes.len() as u64);
+
+    if code == 401 || code == 405 || !is_success {
         let reason = match code {
             401 => "http_401_unauthorized".to_string(),
             405 => "http_405_method_not_available".to_string(),
@@ -2196,7 +2747,7 @@ async fn fetch_fcc_mobile_bdc(
         });
     }
 
-    let Ok(j) = resp.json::<Value>().await else {
+    let Ok(j) = serde_json::from_slice::<Value>(&raw_bytes) else {
         return Some(LiveFccMobileData {
             queried: true,
             live_verified: false,
@@ -2207,16 +2758,42 @@ async fn fetch_fcc_mobile_bdc(
         });
     };
 
-    parse_fcc_mobile_json(&j).or_else(|| {
-        Some(LiveFccMobileData {
+    match parse_fcc_mobile_json(&j) {
+        Some(data) => {
+            if data.live_verified && !data.carriers.is_empty() && lat.is_finite() && lon.is_finite() {
+                let hex_proto =
+                    mobile_carriers_to_hex_proto(lat, lon, &fcc_mobile_map_url, &data.carriers);
+                let payload_json = serde_json::to_string(&data.carriers).ok();
+                let prov_json = Some(
+                    json!({
+                        "source": "FCC National Broadband Map (BDC)",
+                        "provenance": "fcc_bdc_live",
+                        "kind": "mobile",
+                    })
+                    .to_string(),
+                );
+                crate::modules::broadband_live::write_broadband_hex_record(
+                    env,
+                    lat,
+                    lon,
+                    &params_hash,
+                    &hex_proto,
+                    payload_json,
+                    prov_json,
+                )
+                .await;
+            }
+            Some(data)
+        }
+        None => Some(LiveFccMobileData {
             queried: true,
             live_verified: false,
             status: "unavailable",
             http_status: Some(code),
             reason: Some("fcc_empty_or_unrecognized_response".to_string()),
             carriers: Vec::new(),
-        })
-    })
+        }),
+    }
 }
 
 fn build_mobile_5g_coverage(
@@ -3553,21 +4130,6 @@ pub async fn run_buyer_living_nuances(
         };
     };
 
-    if http.is_offline_blocked() {
-        let offline_radar = LiveRadarFetchResult {
-            queried: true,
-            overpass_ok: false,
-            municipal_gis_ok: false,
-            ..Default::default()
-        };
-        let data = assemble_buyer_living_intel(report, Some(&offline_radar), None);
-        return ModuleOutput {
-            data,
-            sources: Vec::new(),
-            warnings: Vec::new(),
-        };
-    }
-
     let hub = crate::extensions::ExtensionHub::global();
     let radar_enabled = hub.is_enabled("planning_rezoning_radar");
     let state = ctx.state.clone();
@@ -3578,38 +4140,7 @@ pub async fn run_buyer_living_nuances(
         if !radar_enabled {
             return LiveRadarFetchResult::default();
         }
-        let (ov_res, mun_res) = tokio::join!(
-            fetch_overpass_construction(http, env, lat, lon),
-            fetch_municipal_planning_projects(http, &state, &county_fips, &city, lat, lon)
-        );
-        let mut out = LiveRadarFetchResult {
-            queried: true,
-            ..Default::default()
-        };
-        match ov_res {
-            Ok(items) => {
-                out.overpass_ok = true;
-                out.projects.extend(items);
-                out.sources.push(SourceItem::new(
-                    format!("{OSM_ODBL_ATTRIBUTION} — Construction & Proposed Radar"),
-                    "https://www.openstreetmap.org/copyright",
-                ));
-            }
-            Err(e) => {
-                out.warnings.push(format!(
-                    "Neighborhood construction map scan unavailable ({})",
-                    crate::shared::sanitize_user_warning(&e)
-                ));
-            }
-        }
-        let (mun_items, mun_sources, portal_name, mun_ok) = mun_res;
-        if mun_ok {
-            out.municipal_gis_ok = true;
-            out.municipal_portal_name = portal_name;
-            out.projects.extend(mun_items);
-            out.sources.extend(mun_sources);
-        }
-        out
+        resolve_planning_radar_live(http, env, &state, &county_fips, &city, lat, lon).await
     };
 
     let mobile_fut = fetch_fcc_mobile_bdc(http, env, lat, lon);
@@ -4002,30 +4533,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fcc_mobile_405_reports_unavailable_with_empty_carriers() {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        use tokio::net::TcpListener;
-
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = listener.local_addr().unwrap().port();
-        tokio::spawn(async move {
-            if let Ok((mut s, _)) = listener.accept().await {
-                let mut buf = [0u8; 2048];
-                let _ = s.read(&mut buf).await;
-                let body = r#"{"status_code":405,"message":"Method Not Available"}"#;
-                let resp = format!(
-                    "HTTP/1.1 405 Method Not Allowed\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                    body.len(),
-                    body
-                );
-                let _ = s.write_all(resp.as_bytes()).await;
-            }
-        });
-
+    async fn fcc_mobile_unreachable_endpoint_reports_unavailable_with_empty_carriers() {
         let mut map = HashMap::new();
         map.insert(
             "FCC_BDC_MOBILE_API_URL".to_string(),
-            format!("http://127.0.0.1:{port}/mobile"),
+            "http://127.0.0.1:1/mobile".to_string(),
         );
         let env = EnvConfig::from_map(map);
         let http = HttpClient::offline_loopback_only(None);
@@ -4036,7 +4548,164 @@ mod tests {
         assert_eq!(mob["available"].as_bool(), Some(false));
         assert_eq!(mob["status"].as_str(), Some("unavailable"));
         assert_eq!(mob["provenance"].as_str(), Some("fcc_bdc_unavailable"));
-        assert_eq!(mob["httpStatus"].as_i64(), Some(405));
         assert_eq!(mob["carriers"].as_array().map(Vec::len), Some(0));
+    }
+
+    struct TempMobileDbDir(std::path::PathBuf);
+
+    impl Drop for TempMobileDbDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[tokio::test]
+    async fn fcc_mobile_broadband_hex_db_reuse_avoids_network_for_neighbor() {
+        use crate::metering::{
+            InvocationContext, InvocationOutcome, InvocationTrigger, MeterScope,
+        };
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        static SEQ: AtomicU64 = AtomicU64::new(1);
+        let base = std::env::var_os("CARGO_TARGET_DIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(".cache"));
+        let dir = base.join("broadband-hex-mobile-tests").join(format!(
+            "pid-{}-{}",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&dir).expect("create test db dir");
+        let _guard = TempMobileDbDir(dir.clone());
+        let db_path = dir.join("broadband_mobile.sqlite");
+
+        let env = EnvConfig::from_map(HashMap::from([(
+            "SQLITE_DB_PATH".to_string(),
+            db_path.to_string_lossy().into_owned(),
+        )]));
+
+        let (lat_a, lon_a) = (37.287200, -121.950000);
+        let (lat_b, lon_b) = (37.287250, -121.949950);
+        let carriers = vec![json!({
+            "carrierName": "Example Carrier 5G",
+            "outdoor5gNr35x3": "verified_fcc_bdc_35_3_mbps",
+            "outdoor4gLte5x1": "verified_fcc_bdc_5_1_mbps",
+            "signalStrengthDbm": Value::Null,
+            "provenance": "fcc_bdc_live",
+        })];
+        let map_url = format!(
+            "https://broadbandmap.fcc.gov/location-summary/mobile?latlon={lat_a:.6}%2C{lon_a:.6}"
+        );
+        let hex_proto = mobile_carriers_to_hex_proto(lat_a, lon_a, &map_url, &carriers);
+        let params_hash = crate::modules::broadband_live::broadband_hex_params_hash(
+            "fcc_mobile",
+            FCC_BDC_MOBILE_DEFAULT_API_URL,
+            FCC_BDC_MOBILE_DEFAULT_API_URL,
+        );
+        crate::modules::broadband_live::write_broadband_hex_record(
+            &env,
+            lat_a,
+            lon_a,
+            &params_hash,
+            &hex_proto,
+            serde_json::to_string(&carriers).ok(),
+            Some(json!({"source": "FCC"}).to_string()),
+        )
+        .await;
+
+        let offline = HttpClient::offline_loopback_only(None);
+        let ctx = InvocationContext::new("fcc_mobile_5g")
+            .with_trigger(InvocationTrigger::UserRequest);
+        let (live, ev) = MeterScope::run(
+            ctx,
+            fetch_fcc_mobile_bdc(&offline, &env, lat_b, lon_b),
+        )
+        .await;
+        let data = live.expect("DB-cached mobile coverage for neighbor");
+        assert!(data.live_verified);
+        assert_eq!(data.carriers.len(), 1);
+        assert_eq!(data.carriers[0]["carrierName"].as_str(), Some("Example Carrier 5G"));
+        assert_eq!(ev.outcome, InvocationOutcome::Cached);
+        assert_eq!(ev.dims.external_api_calls, 0);
+    }
+
+    #[tokio::test]
+    async fn planning_radar_cell_persists_and_reuses_geohash6_zero_network() {
+        use crate::metering::{
+            InvocationContext, InvocationOutcome, InvocationTrigger, MeterScope,
+        };
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        static SEQ: AtomicU64 = AtomicU64::new(1);
+        let base = std::env::var_os("CARGO_TARGET_DIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(".cache"));
+        let dir = base.join("planning-radar-cell-tests").join(format!(
+            "pid-{}-{}",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&dir).expect("create test db dir");
+        let _guard = TempMobileDbDir(dir.clone());
+        let db_path = dir.join("planning_radar.sqlite");
+
+        let env = EnvConfig::from_map(HashMap::from([(
+            "SQLITE_DB_PATH".to_string(),
+            db_path.to_string_lossy().into_owned(),
+        )]));
+
+        let (lat_a, lon_a) = (37.287200, -121.950000);
+        let (lat_b, lon_b) = (37.287250, -121.949950);
+        assert_eq!(
+            encode_geohash(lat_a, lon_a, 6),
+            encode_geohash(lat_b, lon_b, 6),
+            "neighboring parcels must share geohash6"
+        );
+
+        let sample = LiveRadarFetchResult {
+            queried: true,
+            overpass_ok: true,
+            municipal_gis_ok: true,
+            municipal_portal_name: Some("Example Municipal Planning GIS".to_string()),
+            projects: vec![MappedProjectItem {
+                id: "pln-example-101".to_string(),
+                name: "Example Civic Plaza Entitlement".to_string(),
+                category: "approved_planning_entitlement",
+                category_label: "Approved Planning Entitlement",
+                status: "Approved".to_string(),
+                distance_m: 120,
+                distance_miles: 0.07,
+                direction: "N",
+                bearing_deg: 0,
+                lat: 37.288280,
+                lon: -121.950000,
+                impact_note: "Municipal planning entitlement approved.".to_string(),
+                source_name: "Example Municipal Planning GIS".to_string(),
+                source_url: "https://planning.example.org/projects/pln-101".to_string(),
+            }],
+            sources: vec![SourceItem::new(
+                "Example Municipal Planning GIS",
+                "https://planning.example.org/projects",
+            )],
+            warnings: Vec::new(),
+        };
+        let params_hash = planning_radar_params_hash(&env, "CA", "06085", "Campbell");
+        write_planning_radar_cell_record(&env, lat_a, lon_a, &params_hash, &sample).await;
+
+        let offline = HttpClient::offline_loopback_only(None);
+        let ctx = InvocationContext::new("planning_rezoning_radar")
+            .with_trigger(InvocationTrigger::UserRequest);
+        let (reused, ev) = MeterScope::run(
+            ctx,
+            resolve_planning_radar_live(&offline, &env, "CA", "06085", "Campbell", lat_b, lon_b),
+        )
+        .await;
+        assert!(reused.overpass_ok);
+        assert!(reused.municipal_gis_ok);
+        assert_eq!(reused.projects.len(), 1);
+        assert_eq!(reused.projects[0].id, "pln-example-101");
+        assert_eq!(reused.projects[0].category, "approved_planning_entitlement");
+        assert_eq!(ev.outcome, InvocationOutcome::Cached);
+        assert_eq!(ev.dims.external_api_calls, 0);
     }
 }

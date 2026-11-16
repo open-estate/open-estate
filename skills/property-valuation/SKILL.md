@@ -46,7 +46,7 @@ base rates, not predictions.
 
 ## Ownership cost, Rental Comps, Active Nearby Listings & 2026 Loan Programs
 - **Ownership cost**: 20% down, 30-yr fixed at the latest Freddie Mac PMMS rate (6.65% benchmark when offline); property tax = `facts.taxRate` or `market.govTaxBenchmark.effectiveTaxRate` (else 1.00% Prop 13 statutory base in CA; omitted with a warning outside CA when unavailable rather than guessed); insurance, maintenance, closing cash, buy-vs-rent breakeven, rate-sensitivity ±1.5 pts, and income needed at 33% DTI.
-- **Rental / Lease Comps (`rentalComps`, `rentalSummary`)**: Geocoded nearby lease comps + ZORI + RentCast rent range + statutory US/California Civil Code § 1950.5 (AB 12) security-deposit law summary.
+- **Rental / Lease Comps (`rentalComps`, `rentalSummary`)**: Geocoded nearby lease comps + HUD SAFMR / Census ACS B25064 / BLS CPI benchmarks + statutory US/California Civil Code § 1950.5 (AB 12) security-deposit law summary.
 - **Active Nearby Listings (`activeNearby`)**: Hyperlocal active for-sale and for-rent listings within ~0.6 mi, explicitly separated from closed sales as asking prices.
 - **Assessed vs Market (`assessmentVsMarket`)**: Compares County Assessor roll value against estimated market value.
 - **2026 Mortgage Limits & Assistance (`loanPrograms`)**: 2026 FHFA Conforming (`$832,750` baseline / `$1,249,125` high-cost county ceiling) & FHA limits, `Conforming` / `High-Balance Conforming` / `Jumbo` classification, side-by-side Conventional 20% / Conventional 5% / FHA 3.5% / VA 0% options, and State HFA DPA / local BMR portals.

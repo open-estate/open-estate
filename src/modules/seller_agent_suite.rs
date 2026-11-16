@@ -3441,8 +3441,8 @@ mod tests {
         );
         assert_eq!(ns["estimatedAdjustedBasisUsd"].as_i64(), Some(1_250_000));
         assert_eq!(ns["irc121Exclusion"]["stateTopCgPct"].as_f64(), Some(0.0));
-        // Orange County FL custom ("Title Company or Closing Attorney"): seller pays promulgated Owner's Title + attorney settlement ($7,675 + $1,350 = $9,025)
-        assert_eq!(ns["sellerTitleAndEscrowBenchmarkUsd"].as_i64(), Some(9_025));
+        // Orange County FL custom: seller pays promulgated Owner's Title + settlement fee ($7,675 + $1,150 = $8,825)
+        assert_eq!(ns["sellerTitleAndEscrowBenchmarkUsd"].as_i64(), Some(8_825));
 
         // FL Save Our Homes portability caps $690k differential at $500,000 statutory max
         let tp = &out.seller_suite["taxPortability"];

@@ -1318,18 +1318,14 @@ async fn discover_and_download_public_docs(
         "We only ask you to upload inspection reports or disclosures when we cannot fetch them via API. Ask your buyer's agent to pull the listing's disclosure/inspection packet (Disclosures.io / Glide / MLS supplements) — if you don't have an agent yet, or if no pre-inspection exists and you need a local home inspector, we can recommend one.".to_string()
     };
 
-    let brand_name = env.brand_name();
     let mut sources_checked = vec![
-        "MLS & RESO Web API Media/Document attachments (inspectionUrl, disclosureUrl, flyerUrl, documents[])".to_string(),
-        "Public listing remarks & syndication PDF links (HTTPS SSRF-verified)".to_string(),
-        "Municipal open-data permit & code-enforcement portals".to_string(),
-        format!("Prior {brand_name} cached report & historical listing database"),
+        "MLS & RESO Web API Media/Document attachments (inspectionUrl, disclosureUrl, flyerUrl, documents[])",
+        "Public listing remarks & syndication PDF links (HTTPS SSRF-verified)",
+        "Municipal open-data permit & code-enforcement portals",
+        "Prior Open Estate cached report & historical listing database",
     ];
     if env.get("INSPECTION_API_URL").is_some() {
-        sources_checked.insert(
-            0,
-            "Configured Property Inspection & Disclosure API (INSPECTION_API_URL)".to_string(),
-        );
+        sources_checked.insert(0, "Configured Property Inspection & Disclosure API (INSPECTION_API_URL)");
     }
 
     let search_status = json!({
@@ -1364,7 +1360,6 @@ async fn research_past_reports(
     geo: &Value,
     facts: &Value,
     slug: &str,
-    brand_name: &str,
 ) -> Value {
     let zip = val_str(geo.get("zip"))
         .or_else(|| val_str(facts.get("zip")))
@@ -1526,7 +1521,7 @@ async fn research_past_reports(
     let found_prior = prior_rep_opt.is_some() || !listing_snapshots.is_empty();
     let summary = if let Some(ref ga) = prior_generated_at {
         format!(
-            "Prior {brand_name} report snapshot found from {ga}{}{}.",
+            "Prior Open Estate report snapshot found from {ga}{}{}.",
             prior_val_usd
                 .map(|v| format!(" (prior valuation ${v})"))
                 .unwrap_or_default(),
@@ -1538,13 +1533,11 @@ async fn research_past_reports(
         )
     } else if !listing_snapshots.is_empty() {
         format!(
-            "Found {} historical listing index snapshot(s) for this parcel in {brand_name} search history.",
+            "Found {} historical listing index snapshot(s) for this parcel in Open Estate search history.",
             listing_snapshots.len()
         )
     } else {
-        format!(
-            "First {brand_name} report generated for this parcel — baseline valuation, permits, and HOA snapshot recorded for future change tracking."
-        )
+        "First Open Estate report generated for this parcel — baseline valuation, permits, and HOA snapshot recorded for future change tracking.".to_string()
     };
 
     json!({
@@ -2452,16 +2445,50 @@ pub(crate) async fn fetch_municipal_open_data_stage1(
     let Some(ref st) = parse_street_components(geo, facts) else {
         return (Vec::new(), Vec::new(), Vec::new(), None);
     };
-    query_municipal_open_data(http, env, geo, st).await
-}
-
-async fn research_permits_and_violations(
-    http: &HttpClient,
-    env: &EnvConfig,
-    geo: &Value,
-    facts: &Value,
-) -> (Value, Vec<SourceItem>) {
-    research_permits_and_violations_inner(http, env, geo, facts, None).await
+    let (permits, violations, sources, portal_name) =
+        query_municipal_open_data(http, env, geo, st).await;
+    if !permits.is_empty() {
+        let city = val_str(geo.get("place").or_else(|| geo.get("city")))
+            .unwrap_or("")
+            .to_string();
+        let state = val_str(geo.get("state")).unwrap_or("").to_string();
+        let zip = val_str(geo.get("zip")).unwrap_or("").to_string();
+        let county_fips = val_str(geo.get("countyFips")).unwrap_or("").to_string();
+        let county_name = val_str(geo.get("countyName").or_else(|| geo.get("county")))
+            .map(str::to_string);
+        let city_q = crate::extensions::proto::ExtensionQueryProto {
+            address: val_str(geo.get("formattedAddress"))
+                .unwrap_or(&st.full_upper)
+                .to_string(),
+            street: st.full_upper.clone(),
+            city,
+            state,
+            zip,
+            county_fips,
+            county_name,
+            lat: val_f64(geo.get("lat")),
+            lon: val_f64(geo.get("lon")),
+            ..Default::default()
+        };
+        let proto_permits: Vec<crate::extensions::proto::PermitRecordProto> = permits
+            .iter()
+            .map(crate::property::permit_pipeline::permit_value_to_proto)
+            .collect();
+        let portal_url = permits
+            .first()
+            .and_then(|p| p.get("sourceUrl"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        crate::property::permit_pipeline::persist_city_permit_dataset_page(
+            &city_q,
+            portal_name.as_deref().unwrap_or("US Municipal Open-Data Portal"),
+            portal_url,
+            &proto_permits,
+            true,
+        )
+        .await;
+    }
+    (permits, violations, sources, portal_name)
 }
 
 async fn research_permits_and_violations_inner(
@@ -2965,9 +2992,8 @@ pub async fn run_deep_property_research_with_prefetched(
     slug: &str,
     prefetched_permits: Option<(Vec<Value>, Vec<Value>, Vec<SourceItem>, Option<String>)>,
 ) -> ModuleOutput {
-    let brand_name = env.brand_name();
     let docs_fut = discover_and_download_public_docs(env, geo, facts, mls, hoa_profile, slug);
-    let past_fut = research_past_reports(db, geo, facts, slug, &brand_name);
+    let past_fut = research_past_reports(db, geo, facts, slug);
     let permits_fut =
         research_permits_and_violations_inner(http, env, geo, facts, prefetched_permits);
 

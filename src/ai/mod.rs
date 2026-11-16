@@ -27,8 +27,10 @@ pub use agent_harness::{
     MAX_COMPACTED_CHARS, MAX_TOOL_STEPS,
 };
 pub use analyst::{
-    analysis_schema, build_deterministic_analyst_fallback, run_ai_analyst,
-    run_ai_analyst_with_refresh, sanitize_fair_housing, validate_analyst_data,
+    analysis_schema, build_deterministic_analyst_fallback, derive_neighborhood_scope,
+    get_cached_neighborhood_narrative, put_neighborhood_narrative, run_ai_analyst,
+    run_ai_analyst_with_refresh, run_ai_analyst_with_store, sanitize_fair_housing,
+    validate_analyst_data, NeighborhoodNarrativeScope, NEIGHBORHOOD_NARRATIVE_TTL_SECS,
 };
 pub use artifact_canvas::{
     artifact_canvas_schema, build_deterministic_artifact, generate_llm_artifact_with_client,
@@ -45,10 +47,12 @@ pub use brief::{build_brief, build_brief_with_limit, BRIEF_VERSION, DEFAULT_MAX_
 pub use inspect::{analyze_inspection, inspection_schema, SYSTEMS};
 pub use llm::{
     compute_llm_cache_key, global_llm_cache, parse_json_loose, parse_model_spec,
+    resolve_interactive_model_specs, resolve_llm_spec_for_call,
+    resolve_llm_spec_for_call_with_active, resolve_match_model_specs, resolve_match_models,
     resolve_model_specs_with_effort, resolve_models, resolve_models_with_effort, responses_json,
     responses_json_with_cache, validate_json_schema, DbLlmCache, FnLlmCache, LayeredLlmCache,
     LlmCache, LlmCacheBackend, LlmCallOptions, LlmCallResult, LlmError, LlmInput, LlmMessage,
-    LlmUsage, MemoryLlmCache, ModelSpec,
+    LlmUsage, MemoryLlmCache, ModelSpec, ResolvedLlmCallSpec,
 };
 pub use pdf::{
     decode_base64_payload, extract_and_ocr_uploads_async, extract_document_pages,

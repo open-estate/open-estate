@@ -12,53 +12,59 @@ static MODEL_ID_SCRUB_RE: Lazy<Regex> = Lazy::new(|| {
     .expect("valid MODEL_ID_SCRUB_RE")
 });
 
-use crate::shared::{
-    apply_brand_to_str, effective_brand_domain, effective_brand_name,
-    localize_compass_in_cjk_value, sanitize_user_warnings,
-};
-
-/// Scrubs unverified offline broadband fabrication (`fiberLikely`, `broadbandCatalog`, fallback `fcc.status`)
-/// so stored and newly normalized reports never surface invented fiber/carrier availability.
-fn strip_offline_broadband_fabrication(
-    conn_obj: &mut serde_json::Map<String, Value>,
-    from_fresh_offline_bundle: bool,
-) {
-    let has_live_fcc = conn_obj
-        .get("fcc")
-        .and_then(|f| f.get("status"))
-        .and_then(Value::as_str)
-        == Some("live_fcc");
-    if has_live_fcc {
-        return;
-    }
-    let conn_offline =
-        conn_obj.get("status").and_then(Value::as_str) == Some("offline_deterministic_fallback");
-    let fcc_offline_or_heuristic = matches!(
-        conn_obj
-            .get("fcc")
-            .and_then(|f| f.get("status"))
-            .and_then(Value::as_str),
-        Some("offline_deterministic_fallback" | "heuristic")
-    );
-    if !(from_fresh_offline_bundle || conn_offline || fcc_offline_or_heuristic) {
-        return;
-    }
-    conn_obj.insert("fiberLikely".into(), Value::Null);
-    conn_obj.insert("broadbandCatalog".into(), Value::Null);
-    if let Some(fcc_obj) = conn_obj.get_mut("fcc").and_then(Value::as_object_mut) {
-        if matches!(
-            fcc_obj.get("status").and_then(Value::as_str),
-            Some("offline_deterministic_fallback" | "heuristic")
-        ) {
-            fcc_obj.insert("status".into(), Value::String("not_queried".into()));
-        }
-    }
-}
+use crate::shared::{localize_compass_in_cjk_value, sanitize_user_warnings};
 
 /// Brings a stored report up to the current presentation rules without regenerating it:
 /// Chinese AI text and translations get Chinese compass directions (坐北朝南, not 坐N朝S), and
 /// warnings recorded by older builds lose raw request URLs and transport boilerplate.
 /// Idempotent; returns `true` when anything changed.
+/// Clears unverified offline broadband fabrication unless `conn_obj` carries live FCC
+/// or confirmed address-level verification.
+fn strip_unverified_offline_broadband(
+    conn_obj: &mut serde_json::Map<String, Value>,
+    clear_unverified_catalog: bool,
+) {
+    let is_verified_live = conn_obj
+        .get("fcc")
+        .and_then(|f| f.get("status"))
+        .and_then(Value::as_str)
+        == Some("live_fcc")
+        || matches!(
+            conn_obj.get("verificationStatus").and_then(Value::as_str),
+            Some("confirmed_fcc" | "confirmed_address" | "address_verified")
+        )
+        || conn_obj.get("fiberConfirmedFcc").and_then(Value::as_bool) == Some(true)
+        || conn_obj
+            .get("fiberConfirmedAddress")
+            .and_then(Value::as_bool)
+            == Some(true);
+    if is_verified_live {
+        return;
+    }
+    let fcc_offline = conn_obj
+        .get("fcc")
+        .and_then(|f| f.get("status"))
+        .and_then(Value::as_str)
+        == Some("offline_deterministic_fallback");
+    let conn_offline =
+        conn_obj.get("status").and_then(Value::as_str) == Some("offline_deterministic_fallback");
+    if conn_offline {
+        conn_obj.insert("status".into(), Value::String("not_queried".into()));
+    }
+    if clear_unverified_catalog || conn_offline || fcc_offline {
+        conn_obj.insert("fiberLikely".into(), Value::Null);
+        conn_obj.insert("broadbandCatalog".into(), Value::Null);
+        if let Some(fcc_obj) = conn_obj.get_mut("fcc").and_then(Value::as_object_mut) {
+            if matches!(
+                fcc_obj.get("status").and_then(Value::as_str),
+                Some("offline_deterministic_fallback" | "heuristic")
+            ) {
+                fcc_obj.insert("status".into(), Value::String("not_queried".into()));
+            }
+        }
+    }
+}
+
 pub fn normalize_stored_report(report: &mut Value) -> bool {
     let before = report_display_fingerprint(report);
     let ai_translations = report
@@ -167,8 +173,8 @@ pub fn normalize_stored_report(report: &mut Value) -> bool {
             if obj.get("hoaProfile").is_none() {
                 obj.insert("hoaProfile".into(), bd_bundle.hoa_profile);
             }
-            // Preserve existing connectivity when present (scrubbing any offline fallback fabrication);
-            // otherwise strip unverified offline broadband fabrication on the fresh deterministic bundle.
+            // Preserve existing connectivity when present; otherwise strip unverified offline
+            // broadband fallback fabrication so cached/stored reports never invent fiber drops.
             let existing_conn = obj
                 .get("buyerDiligence")
                 .and_then(|bd| bd.get("connectivity"))
@@ -177,7 +183,7 @@ pub fn normalize_stored_report(report: &mut Value) -> bool {
             let mut new_bd = bd_bundle.buyer_diligence;
             if let Some(mut conn_val) = existing_conn {
                 if let Some(conn_obj) = conn_val.as_object_mut() {
-                    strip_offline_broadband_fabrication(conn_obj, false);
+                    strip_unverified_offline_broadband(conn_obj, false);
                 }
                 if let Some(bd_obj) = new_bd.as_object_mut() {
                     bd_obj.insert("connectivity".into(), conn_val);
@@ -186,15 +192,10 @@ pub fn normalize_stored_report(report: &mut Value) -> bool {
                 .get_mut("connectivity")
                 .and_then(Value::as_object_mut)
             {
-                strip_offline_broadband_fabrication(conn_obj, true);
+                strip_unverified_offline_broadband(conn_obj, true);
             }
             obj.insert("buyerDiligence".into(), new_bd);
         }
-    } else if let Some(conn_obj) = report
-        .pointer_mut("/buyerDiligence/connectivity")
-        .and_then(Value::as_object_mut)
-    {
-        strip_offline_broadband_fabrication(conn_obj, false);
     }
     if report.get("facts").is_some() || report.get("geo").is_some() {
         if report
@@ -300,11 +301,12 @@ pub fn apply_runtime_module_filter(
                 ongoing.insert("waterCarrier".to_string(), Value::Null);
             }
         }
-        for ptr in ["/buyerLivingIntel", "/modules/buyerLivingIntel/data"] {
-            if let Some(bli) = report.pointer_mut(ptr).and_then(Value::as_object_mut) {
-                bli.insert("mobile5gCoverage".to_string(), Value::Null);
-                bli.insert("electrificationPayback".to_string(), Value::Null);
-            }
+        if let Some(bli) = report
+            .get_mut("buyerLivingIntel")
+            .and_then(Value::as_object_mut)
+        {
+            bli.insert("mobile5gCoverage".to_string(), Value::Null);
+            bli.insert("electrificationPayback".to_string(), Value::Null);
         }
     }
     if !snap.is_enabled("ai_analyst") {
@@ -758,132 +760,6 @@ pub fn sanitize_report_for_html(report: &Value) -> Value {
     clean
 }
 
-/// Rewrites default brand strings inside an embedded i18n resource JSON bundle when a custom
-/// white-label `brand_name` or `brand_domain` is active.
-pub fn localize_i18n_json_for_brand(
-    raw_json: &str,
-    brand_name: &str,
-    brand_domain: &str,
-) -> String {
-    let eff_name = effective_brand_name(brand_name);
-    let eff_domain = effective_brand_domain(brand_domain);
-    if eff_name == "Open Estate" && eff_domain == "open-estate.local" {
-        return raw_json.to_string();
-    }
-    fn walk_json(v: &mut Value, eff_name: &str, eff_domain: &str) {
-        match v {
-            Value::String(s) => {
-                let updated = apply_brand_to_str(s, eff_name, eff_domain);
-                if updated != *s {
-                    *s = updated;
-                }
-            }
-            Value::Array(arr) => {
-                for item in arr {
-                    walk_json(item, eff_name, eff_domain);
-                }
-            }
-            Value::Object(map) => {
-                for val in map.values_mut() {
-                    walk_json(val, eff_name, eff_domain);
-                }
-            }
-            _ => {}
-        }
-    }
-    if let Ok(mut parsed) = serde_json::from_str::<Value>(raw_json) {
-        walk_json(&mut parsed, eff_name, eff_domain);
-        if let Ok(out) = serde_json::to_string(&parsed) {
-            return out;
-        }
-    }
-    let esc_name = serde_json::to_string(eff_name)
-        .map(|s| s.trim_matches('"').to_string())
-        .unwrap_or_else(|_| eff_name.to_string());
-    let esc_domain = serde_json::to_string(eff_domain)
-        .map(|s| s.trim_matches('"').to_string())
-        .unwrap_or_else(|_| eff_domain.to_string());
-    let mut out = raw_json.to_string();
-    if eff_domain != "open-estate.local" {
-        out = out.replace("open-estate.local", &esc_domain);
-    }
-    if eff_name != "Open Estate" {
-        out = out.replace("Open Estate", &esc_name);
-    }
-    out
-}
-
-/// Recursively localizes default `"Open Estate"` / `"open-estate.local"` strings inside a report
-/// JSON value for white-label serving while preserving internal identifiers and third-party URLs.
-pub fn localize_report_value_for_brand(
-    val: &mut Value,
-    brand_name: &str,
-    brand_domain: &str,
-) {
-    let eff_name = effective_brand_name(brand_name);
-    let eff_domain = effective_brand_domain(brand_domain);
-    if let Some(obj) = val.as_object_mut() {
-        let mut brand_obj = obj
-            .get("brand")
-            .and_then(Value::as_object)
-            .cloned()
-            .unwrap_or_default();
-        brand_obj.insert("name".to_string(), Value::String(eff_name.to_string()));
-        brand_obj.insert("domain".to_string(), Value::String(eff_domain.to_string()));
-        obj.insert("brand".to_string(), Value::Object(brand_obj.clone()));
-        if let Some(meta) = obj.get_mut("meta").and_then(Value::as_object_mut) {
-            let mut mbrand = meta
-                .get("brand")
-                .and_then(Value::as_object)
-                .cloned()
-                .unwrap_or_default();
-            mbrand.insert("name".to_string(), Value::String(eff_name.to_string()));
-            mbrand.insert("domain".to_string(), Value::String(eff_domain.to_string()));
-            meta.insert("brand".to_string(), Value::Object(mbrand));
-        }
-    }
-    if eff_name == "Open Estate" && eff_domain == "open-estate.local" {
-        return;
-    }
-    fn walk(v: &mut Value, key_hint: Option<&str>, eff_name: &str, eff_domain: &str) {
-        match v {
-            Value::String(s) => {
-                if matches!(
-                    key_hint,
-                    Some(
-                        "id" | "key" | "slug" | "rawSlug" | "visualKind" | "targetSection"
-                            | "thumbUrl" | "icon"
-                    )
-                ) {
-                    return;
-                }
-                if matches!(key_hint, Some("url" | "sourceUrl" | "href" | "portalUrl")) {
-                    if eff_domain != "open-estate.local" && s.contains("open-estate.local") {
-                        *s = s.replace("open-estate.local", eff_domain);
-                    }
-                    return;
-                }
-                let updated = apply_brand_to_str(s, eff_name, eff_domain);
-                if updated != *s {
-                    *s = updated;
-                }
-            }
-            Value::Array(arr) => {
-                for item in arr {
-                    walk(item, key_hint, eff_name, eff_domain);
-                }
-            }
-            Value::Object(map) => {
-                for (k, child) in map.iter_mut() {
-                    walk(child, Some(k.as_str()), eff_name, eff_domain);
-                }
-            }
-            _ => {}
-        }
-    }
-    walk(val, None, eff_name, eff_domain);
-}
-
 /// Injects `report` JSON and vendored `i18next` bundles into `assets/template.html` safely.
 pub fn render_report_html(report: &Value) -> String {
     render_report_html_with_brand(report, "Open Estate", "open-estate.local")
@@ -895,8 +771,16 @@ pub fn render_report_html_with_brand(
     brand_name: &str,
     brand_domain: &str,
 ) -> String {
-    let eff_name = effective_brand_name(brand_name);
-    let eff_domain = effective_brand_domain(brand_domain);
+    let eff_name = if brand_name.trim().is_empty() {
+        "Open Estate"
+    } else {
+        brand_name.trim()
+    };
+    let eff_domain = if brand_domain.trim().is_empty() {
+        "open-estate.local"
+    } else {
+        brand_domain.trim()
+    };
     let display_addr = report
         .pointer("/meta/displayAddress")
         .and_then(|v| v.as_str())
@@ -915,7 +799,16 @@ pub fn render_report_html_with_brand(
     } else {
         sanitize_report_for_html(report)
     };
-    localize_report_value_for_brand(&mut sanitized, eff_name, eff_domain);
+    if let Some(obj) = sanitized.as_object_mut() {
+        let mut brand_obj = obj
+            .get("brand")
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default();
+        brand_obj.insert("name".to_string(), Value::String(eff_name.to_string()));
+        brand_obj.insert("domain".to_string(), Value::String(eff_domain.to_string()));
+        obj.insert("brand".to_string(), Value::Object(brand_obj));
+    }
     let wordmark_html = crate::shared::format_brand_wordmark_html(eff_name);
     let raw_json = serde_json::to_string(&sanitized).unwrap_or_else(|_| "{}".to_string());
     let safe_json = safe_inline_json(&raw_json);
@@ -926,19 +819,11 @@ pub fn render_report_html_with_brand(
     let safe_report_workspace = safe_inline_js(&combined_workspace_js);
     let safe_report_motion = safe_inline_js(REPORT_MOTION_JS);
     let safe_report_dashboard = safe_inline_js(REPORT_DASHBOARD_JS);
-    let safe_en = safe_inline_json(&localize_i18n_json_for_brand(I18N_EN_JSON, eff_name, eff_domain));
-    let safe_zh = safe_inline_json(&localize_i18n_json_for_brand(I18N_ZH_JSON, eff_name, eff_domain));
-    let safe_es = safe_inline_json(&localize_i18n_json_for_brand(I18N_ES_JSON, eff_name, eff_domain));
+    let safe_en = safe_inline_json(I18N_EN_JSON);
+    let safe_zh = safe_inline_json(I18N_ZH_JSON);
+    let safe_es = safe_inline_json(I18N_ES_JSON);
     let esc_title = encode_double_quoted_attribute(&title);
     let esc_desc = encode_double_quoted_attribute(&desc);
-    let esc_brand_name = encode_double_quoted_attribute(eff_name);
-    let esc_brand_domain = encode_double_quoted_attribute(eff_domain);
-    let brand_name_js = safe_inline_json(
-        &serde_json::to_string(eff_name).unwrap_or_else(|_| "\"Open Estate\"".into()),
-    );
-    let brand_domain_js = safe_inline_json(
-        &serde_json::to_string(eff_domain).unwrap_or_else(|_| "\"open-estate.local\"".into()),
-    );
 
     render_template_single_pass(
         REPORT_TEMPLATE_HTML,
@@ -946,10 +831,6 @@ pub fn render_report_html_with_brand(
             ("__REPORT_TITLE__", esc_title.as_ref()),
             ("__REPORT_DESC__", esc_desc.as_ref()),
             ("__REPORT_BRAND_WORDMARK__", wordmark_html.as_str()),
-            ("__REPORT_BRAND_NAME__", esc_brand_name.as_ref()),
-            ("__REPORT_BRAND_DOMAIN__", esc_brand_domain.as_ref()),
-            ("__REPORT_BRAND_NAME_JSON__", brand_name_js.as_str()),
-            ("__REPORT_BRAND_DOMAIN_JSON__", brand_domain_js.as_str()),
             ("__I18NEXT_JS__", safe_i18next.as_str()),
             ("__OPEN_ESTATE_CORE_JS__", safe_core_js.as_str()),
             ("__HOUSE3D_JS__", safe_house3d.as_str()),
@@ -980,7 +861,7 @@ mod tests {
                 "connectivity": {
                     "status": "offline_deterministic_fallback",
                     "fiberLikely": true,
-                    "broadbandCatalog": { "providers": ["Modeled Fiber"] },
+                    "broadbandCatalog": { "carriers": ["Modeled Fiber"] },
                     "fcc": { "status": "heuristic", "confidence": "high" }
                 }
             }
@@ -1019,16 +900,14 @@ mod tests {
             }
         });
 
-        // 1. Disabling `buyer_diligence` nulls top-level fields and marks module entries disabled
+        // 1. Disabling `buyer_diligence` nulls root & strips `/modules/` for titleLegalRadar + titleInsuranceAndDeed
         hub.set_module_enabled("buyer_diligence", false).unwrap();
         let mut r1 = base_report.clone();
         apply_runtime_module_filter(&mut r1, &hub.snapshot());
-        assert!(r1.get("titleLegalRadar").is_some_and(Value::is_null));
-        assert!(r1.get("titleInsuranceAndDeed").is_some_and(Value::is_null));
-        assert_eq!(r1.pointer("/modules/titleLegalRadar/disabled"), Some(&json!(true)));
-        assert!(r1.pointer("/modules/titleLegalRadar/data").is_some_and(Value::is_null));
-        assert_eq!(r1.pointer("/modules/titleInsuranceAndDeed/disabled"), Some(&json!(true)));
-        assert!(r1.pointer("/modules/titleInsuranceAndDeed/data").is_some_and(Value::is_null));
+        assert!(r1["titleLegalRadar"].is_null());
+        assert!(r1["titleInsuranceAndDeed"].is_null());
+        assert!(r1.pointer("/modules/titleLegalRadar").is_none());
+        assert!(r1.pointer("/modules/titleInsuranceAndDeed").is_none());
 
         // 2. Disabling `utilities_broadband` nulls mobile5gCoverage + electrificationPayback inside buyerLivingIntel
         hub.set_module_enabled("buyer_diligence", true).unwrap();
@@ -1039,12 +918,11 @@ mod tests {
         assert!(r2.pointer("/buyerLivingIntel/electrificationPayback").is_some_and(|v| v.is_null()));
         assert!(r2.pointer("/modules/buyerLivingIntel/data/mobile5gCoverage").is_some_and(|v| v.is_null()));
 
-        // 3. Disabling `neighborhood_livability` nulls buyerLivingIntel and marks its module entry disabled
+        // 3. Disabling `neighborhood_livability` nulls root & strips `/modules/` for buyerLivingIntel completely
         hub.set_module_enabled("neighborhood_livability", false).unwrap();
         let mut r3 = base_report;
         apply_runtime_module_filter(&mut r3, &hub.snapshot());
-        assert!(r3.get("buyerLivingIntel").is_some_and(Value::is_null));
-        assert_eq!(r3.pointer("/modules/buyerLivingIntel/disabled"), Some(&json!(true)));
-        assert!(r3.pointer("/modules/buyerLivingIntel/data").is_some_and(Value::is_null));
+        assert!(r3["buyerLivingIntel"].is_null());
+        assert!(r3.pointer("/modules/buyerLivingIntel").is_none());
     }
 }

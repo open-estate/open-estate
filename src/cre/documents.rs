@@ -11,9 +11,7 @@ use crate::ai::doc_pipeline::{
     append_scrubbed_lines_warning, clip_sanitized_text, redact_pii_string_array,
     resolve_report_display_address, stamp_ai_enhancement_meta,
 };
-use crate::ai::llm::{
-    resolve_model_specs_with_effort, responses_json_with_cache, LlmCache, LlmCallOptions,
-};
+use crate::ai::llm::{responses_json_with_cache, LlmCache, LlmCallOptions};
 use crate::ai::pdf::{extract_and_ocr_uploads_async, UploadedDocInput};
 use crate::ai::redact_title_pii;
 use crate::cre::build_cre_report_section;
@@ -2131,8 +2129,9 @@ pub async fn analyze_cre_documents(
             instructions,
             prompt,
             cre_review_schema(),
-        );
-        opts.models = resolve_model_specs_with_effort(env, Some("high"));
+        )
+        .with_task("cre_document_underwriting")
+        .with_profile("deep_analysis");
         opts.max_output_tokens = Some(8_192);
         opts.timeout_ms = Some(90_000);
 
@@ -2233,8 +2232,7 @@ pub async fn analyze_cre_documents(
         data: parsed,
         sources: vec![SourceItem::new(
             format!(
-                "{} CRE Document AI Reconciler & ASTM E1527-21 Cross-Checker over {}",
-                env.brand_name(),
+                "Open Estate CRE Document AI Reconciler & ASTM E1527-21 Cross-Checker over {}",
                 file_names.join(", ")
             ),
             "https://www.astm.org/e1527-21.html",

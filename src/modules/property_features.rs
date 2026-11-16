@@ -1276,9 +1276,6 @@ fn eval_layout_adu_category(report: &Value, facts: &Value, c: &SignalCorpus, st:
                 (st == "confirmed_fcc" || st == "confirmed_address") && dl >= 1000.0
             })
         });
-    let sonic_confirmed = report
-        .pointer("/buyerDiligence/connectivity/sonicAvailability")
-        .filter(|s| s.get("available").and_then(Value::as_bool) == Some(true));
     let fiber_carrier = fcc
         .and_then(|f| f.get("carriers").or_else(|| f.get("providers")))
         .and_then(Value::as_array)
@@ -1293,6 +1290,7 @@ fn eval_layout_adu_category(report: &Value, facts: &Value, c: &SignalCorpus, st:
                     st.as_str(),
                     "metro_footprint_verify_drop"
                         | "regional_footprint"
+                        | "regional_footprint_unverified"
                         | "not_available"
                         | "unavailable"
                         | "unverified"
@@ -1311,12 +1309,7 @@ fn eval_layout_adu_category(report: &Value, facts: &Value, c: &SignalCorpus, st:
                 .or_else(|| fc.get("carrierName"))
                 .and_then(Value::as_str)
         })
-        .map(clean_public_text)
-        .or_else(|| {
-            sonic_confirmed
-                .and_then(|s| s.get("carrierName").and_then(Value::as_str))
-                .map(clean_public_text)
-        });
+        .map(clean_public_text);
     if off_line.is_some() || fiber_name.is_some() {
         let has_fiber = fiber_name.is_some();
         let (badge, ev, sname, surl) = match (off_line, fiber_name) {

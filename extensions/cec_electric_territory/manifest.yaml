@@ -9,6 +9,17 @@ driver: native_adapter
 proto_message_type: "openestate.extension.v1.ElectricUtilityProto"
 priority: 320
 enabled_by_default: true
+tier: basic
+license_class: public_open_data
+execution_mode: eager
+requires_manual_approval: false
+min_plan_tier: ""
+metering:
+  dimensions:
+    - invocations
+    - wall_time_ms
+    - external_api_calls
+    - bytes_downloaded
 builtin: true
 provenance: live_verified
 homepage_url: "https://www.energy.ca.gov/"
@@ -26,6 +37,11 @@ rate_limit:
   timeout_ms: 6000
   max_retries: 1
 cache_ttl_secs: 86400
+sharing:
+  scope: geohash6
+  ttl_secs: 7776000
+  stale_while_revalidate_secs: 604800
+  background_refresh: true
 source_attribution:
   name: "California Energy Commission (CEC) Electric Service Territories"
   url: "https://services3.arcgis.com/bWPjFyq029ChCGur/arcgis/rest/services/ElectricLoadServingEntities_IOU_POU/FeatureServer/0"

@@ -20,10 +20,9 @@
 
   function brandInfo() {
     var r = (typeof R !== 'undefined' && R) || (typeof window !== 'undefined' && window.__OPEN_ESTATE_REPORT__) || null;
-    var rb = (r && r.brand) || {};
-    var wb = (typeof window !== 'undefined' && window.__OPEN_ESTATE_BRAND__) || {};
-    var name = (wb.name && String(wb.name).trim()) || (rb.name && String(rb.name).trim()) || 'Open Estate';
-    var domain = (wb.domain && String(wb.domain).trim()) || (rb.domain && String(rb.domain).trim()) || 'open-estate.local';
+    var b = (r && r.brand) || (typeof window !== 'undefined' && window.__OPEN_ESTATE_BRAND__) || {};
+    var name = (b.name && String(b.name).trim()) || 'Open Estate';
+    var domain = (b.domain && String(b.domain).trim()) || 'open-estate.local';
     var parts = name.replace(/([a-z])([A-Z])/g, '$1 $2').split(/[\s_-]+/).filter(Boolean);
     var monogram = parts.length >= 2
       ? (parts[0][0] + parts[1][0]).toUpperCase()
@@ -798,11 +797,11 @@
   var KINGCO_TILE_TMPL = 'https://gismaps.kingcounty.gov/arcgis/rest/services/BaseMaps/KingCo_Aerial_2023/MapServer/tile/{z}/{y}/{x}';
   var KINGCO_EXPORT = 'https://gismaps.kingcounty.gov/arcgis/rest/services/BaseMaps/KingCo_Aerial_2023/MapServer/export';
   var USGS_ATTR = 'Imagery © USGS The National Map / USDA NAIP (public domain)';
-  /** Default USGS cached tile ceiling; resolved high-res sources raise `zMax` up to 19. */
+  /** Default USGS cached tile ceiling; resolved high-res sources raise `zMax` up to 20. */
   var Z_MAX = 16;
-  var HIGH_RES_TILE_CEIL = 19;
+  var HIGH_RES_TILE_CEIL = 20;
   var AERIAL_EXPORT = 'https://basemap.nationalmap.gov/arcgis/rest/services/USGSImageryOnly/MapServer/export';
-  var DETAIL_HALF_M = 80, DETAIL_PX = 1280;
+  var DETAIL_HALF_M = 80, DETAIL_PX = 1600;
 
   function mercToLon(x) { return (x / R_MERC) * (180 / Math.PI); }
   function mercToLat(y) { return (2 * Math.atan(Math.exp(y / R_MERC)) - Math.PI / 2) * (180 / Math.PI); }
@@ -885,7 +884,10 @@
     var cx = mercX(c[1]), cy = mercY(c[0]), hm = DETAIL_HALF_M * k;
     var b = [cx - hm, cy - hm, cx + hm, cy + hm];
     var url;
-    if (cfg.exportUrl.indexOf('/api/media/satellite/export') === 0) {
+    if (
+      cfg.exportUrl.indexOf('/api/media/satellite/export') === 0 ||
+      cfg.exportUrl.indexOf('/api/satellite-export') === 0
+    ) {
       var wgs = [mercToLon(b[0]), mercToLat(b[1]), mercToLon(b[2]), mercToLat(b[3])];
       url = cfg.exportUrl + '?bbox=' + wgs.map(function (n) { return n.toFixed(6); }).join(',') +
         '&w=' + DETAIL_PX + '&h=' + DETAIL_PX + '&zoom=' + (cfg.zMax || HIGH_RES_TILE_CEIL);
@@ -2386,7 +2388,7 @@
   }
   function reportUrl(d) {
     var bi = brandInfo();
-    var host = bi.domain;
+    var host = bi.domain || 'open-estate.local';
     try {
       var h = typeof location !== 'undefined' && location.host ? String(location.host) : '';
       if (h && !/^(localhost|127\.0\.0\.1)(:|$)/i.test(h)) host = h.replace(/^www\./i, '');

@@ -10,6 +10,7 @@
 //   batched DB transactions (`db_flush_batch_size = 200`, `db_flush_interval_ms = 150`) with
 //   deterministic completion barriers.
 
+use crate::scanner::lazy_hook::PeriodicLazyEnqueueHook;
 use crate::scanner::tile_cache::SpatialTileCache;
 use crate::shared::{now_unix_ms, round_n, slugify, EnvConfig};
 use anyhow::{anyhow, Result};
@@ -574,6 +575,7 @@ struct EngineInner<R: HomeScanRunner> {
     config: ScanEngineConfig,
     runner: R,
     tile_cache: Arc<SpatialTileCache>,
+    lazy_hook: std::sync::RwLock<Option<Arc<dyn PeriodicLazyEnqueueHook>>>,
     interactive_sem: Semaphore,
     bulk_sem: Semaphore,
     queue_sem: Semaphore,
@@ -682,7 +684,8 @@ impl<R: HomeScanRunner> EngineInner<R> {
                 match &outcome_opt {
                     Some(Ok(outcome)) => {
                         let is_cached_or_dedup = !sub.is_primary || outcome.cached;
-                        slot.cached_flag.store(is_cached_or_dedup, Ordering::Release);
+                        slot.cached_flag
+                            .store(is_cached_or_dedup, Ordering::Release);
                         if !sub.is_primary {
                             slot.deduplicated_flag.store(true, Ordering::Release);
                         }
@@ -763,9 +766,10 @@ impl<R: HomeScanRunner> EngineInner<R> {
         }
 
         let now_ms = now_unix_ms() as u64;
-        let _ = batch
-            .finished_at_ms
-            .compare_exchange(0, now_ms, Ordering::AcqRel, Ordering::Relaxed);
+        let _ =
+            batch
+                .finished_at_ms
+                .compare_exchange(0, now_ms, Ordering::AcqRel, Ordering::Relaxed);
         if batch.counted_active.swap(false, Ordering::AcqRel) {
             self.active_batches.fetch_sub(1, Ordering::AcqRel);
         }
@@ -851,12 +855,28 @@ impl<R: HomeScanRunner> EngineInner<R> {
             return;
         }
         let count = buffer.len() as u64;
-        let chunk = std::mem::replace(buffer, Vec::with_capacity(self.config.db_flush_batch_size.max(1)));
+        let chunk = std::mem::replace(
+            buffer,
+            Vec::with_capacity(self.config.db_flush_batch_size.max(1)),
+        );
+        let hook = self
+            .lazy_hook
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let hook_chunk = hook.as_ref().map(|_| chunk.clone());
         if let Err(err) = self.runner.flush_batch(chunk).await {
-            tracing::warn!("ScanEngine micro-batch flush error ({} rows): {}", count, err);
+            tracing::warn!(
+                "ScanEngine micro-batch flush error ({} rows): {}",
+                count,
+                err
+            );
         } else {
             self.db_flushes_completed.fetch_add(1, Ordering::Relaxed);
             self.db_rows_flushed.fetch_add(count, Ordering::Relaxed);
+            if let (Some(h), Some(outcomes)) = (hook, hook_chunk) {
+                h.on_batch_flushed(&outcomes).await;
+            }
         }
     }
 }
@@ -891,6 +911,7 @@ impl<R: HomeScanRunner> ScanEngine<R> {
             config,
             runner,
             tile_cache,
+            lazy_hook: std::sync::RwLock::new(None),
             interactive_sem: Semaphore::new(interactive_permits),
             bulk_sem: Semaphore::new(bulk_permits),
             queue_sem: Semaphore::new(0),
@@ -959,6 +980,20 @@ impl<R: HomeScanRunner> ScanEngine<R> {
         Self::new(config, Arc::new(SpatialTileCache::default()), runner)
     }
 
+    pub fn set_lazy_hook(&self, hook: Option<Arc<dyn PeriodicLazyEnqueueHook>>) {
+        let mut guard = self
+            .inner
+            .lazy_hook
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        *guard = hook;
+    }
+
+    pub fn with_lazy_hook(self, hook: Arc<dyn PeriodicLazyEnqueueHook>) -> Self {
+        self.set_lazy_hook(Some(hook));
+        self
+    }
+
     pub fn tile_cache(&self) -> &Arc<SpatialTileCache> {
         &self.inner.tile_cache
     }
@@ -1003,7 +1038,9 @@ impl<R: HomeScanRunner> ScanEngine<R> {
 
         let total_submitted = normalized_tasks.len();
         if total_submitted == 0 {
-            return Err(anyhow!("BatchScanRequest must contain at least 1 valid address"));
+            return Err(anyhow!(
+                "BatchScanRequest must contain at least 1 valid address"
+            ));
         }
         if total_submitted > self.inner.config.max_batch_submission {
             return Err(anyhow!(
@@ -1243,8 +1280,10 @@ impl<R: HomeScanRunner> ScanEngine<R> {
 
         // Persist asynchronously via the Micro-Batch Persistence Task without delaying P0 caller.
         let outcome_for_db = outcome.clone();
-        if let Err(mpsc::error::TrySendError::Full(cmd)) =
-            self.inner.flush_tx.try_send(FlushCommand::Item(outcome_for_db))
+        if let Err(mpsc::error::TrySendError::Full(cmd)) = self
+            .inner
+            .flush_tx
+            .try_send(FlushCommand::Item(outcome_for_db))
         {
             let tx = self.inner.flush_tx.clone();
             tokio::spawn(async move {
@@ -1321,11 +1360,12 @@ impl<R: HomeScanRunner> ScanEngine<R> {
             .map(|(rel, s)| (safe_offset + rel, s))
         {
             let raw_code = slot.state_code.load(Ordering::Acquire);
-            let effective_code = if batch_cancelled && (raw_code == ITEM_QUEUED || raw_code == ITEM_RUNNING) {
-                ITEM_CANCELLED
-            } else {
-                raw_code
-            };
+            let effective_code =
+                if batch_cancelled && (raw_code == ITEM_QUEUED || raw_code == ITEM_RUNNING) {
+                    ITEM_CANCELLED
+                } else {
+                    raw_code
+                };
             let item_status = match effective_code {
                 ITEM_RUNNING => "running",
                 ITEM_SUCCEEDED => "succeeded",
@@ -1394,9 +1434,10 @@ impl<R: HomeScanRunner> ScanEngine<R> {
 
         batch.cancelled.store(true, Ordering::SeqCst);
         let now_ms = now_unix_ms() as u64;
-        let _ = batch
-            .finished_at_ms
-            .compare_exchange(0, now_ms, Ordering::AcqRel, Ordering::Relaxed);
+        let _ =
+            batch
+                .finished_at_ms
+                .compare_exchange(0, now_ms, Ordering::AcqRel, Ordering::Relaxed);
         if batch.counted_active.swap(false, Ordering::AcqRel) {
             self.inner.active_batches.fetch_sub(1, Ordering::AcqRel);
         }
@@ -1529,7 +1570,10 @@ fn build_primary_and_dup_subs(
 
 fn is_clean_whitespace(s: &str) -> bool {
     let bytes = s.as_bytes();
-    if bytes.is_empty() || bytes[0].is_ascii_whitespace() || bytes[bytes.len() - 1].is_ascii_whitespace() {
+    if bytes.is_empty()
+        || bytes[0].is_ascii_whitespace()
+        || bytes[bytes.len() - 1].is_ascii_whitespace()
+    {
         return false;
     }
     let mut prev_space = false;

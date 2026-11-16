@@ -9,6 +9,7 @@ pub mod aggregator;
 pub mod manifest;
 pub mod proto;
 pub mod registry;
+pub mod shared_cache;
 pub mod yaml_runner;
 
 pub use adapter::{BoxFuture, DataExtensionAdapter};
@@ -46,7 +47,6 @@ mod tests {
             "fema_nfhl",
             "usgs_asce7_seismic",
             "epa_sdwis_water",
-            "rentcast_property",
             "us_municipal_electric",
             "us_deregulated_electric",
             "us_iou_electric",
@@ -65,6 +65,7 @@ mod tests {
                 "Built-in extension '{id}' should be registered and enabled by default"
             );
         }
+        assert!(!hub.is_enabled("sonic_fiber_availability"));
     }
 
     #[test]
@@ -395,17 +396,17 @@ footprint_catalog:
         assert!(!unverified.fiber_available);
         assert!(!unverified.fiber_confirmed_fcc);
         assert_eq!(unverified.verification_status, "unverified");
-        assert!(!unverified.headline_verdict.contains("Sonic 10G Fiber"));
+        assert!(!unverified.headline_verdict.contains("Confirmed"));
 
         envs.push(ExtensionEnvelopeProto {
-            extension_id: "sonic_fiber_availability".to_string(),
+            extension_id: "sample_address_verified_fiber".to_string(),
             domain: CapabilityDomain::DomainBroadband as i32,
             priority: 450,
             geo_specificity: 500,
             attribution: Some(SourceAttributionProto {
-                extension_id: "sonic_fiber_availability".to_string(),
-                source_name: "Sonic.com Official Address Pre-Qualification".to_string(),
-                source_url: "https://www.sonic.com/availability".to_string(),
+                extension_id: "sample_address_verified_fiber".to_string(),
+                source_name: "Sample Official Address Pre-Qualification".to_string(),
+                source_url: "https://broadbandmap.fcc.gov/".to_string(),
                 provenance_tier: ProvenanceTier::ProvenanceLiveVerified as i32,
                 fetched_at_rfc3339: "2026-01-15T00:00:00Z".to_string(),
                 schedule_or_version: None,
@@ -415,7 +416,7 @@ footprint_catalog:
             cached: false,
             payload: Some(extension_envelope_proto::Payload::BroadbandOption(
                 BroadbandOptionProto {
-                    carrier_name: "Sonic".to_string(),
+                    carrier_name: "Sample Fiber".to_string(),
                     technology: "Fiber (FTTH)".to_string(),
                     tier_category: "fiber".to_string(),
                     max_download_mbps: 10000,
@@ -423,7 +424,7 @@ footprint_catalog:
                     symmetrical: true,
                     typical_monthly_usd: "$49.99/mo".to_string(),
                     availability_status: "confirmed_address".to_string(),
-                    check_url: "https://www.sonic.com/availability".to_string(),
+                    check_url: "https://broadbandmap.fcc.gov/".to_string(),
                 },
             )),
         });
@@ -434,7 +435,7 @@ footprint_catalog:
         assert!(verified.fiber_available);
         assert!(!verified.fiber_confirmed_fcc);
         assert_eq!(verified.verification_status, "address_verified");
-        assert!(verified.headline_verdict.contains("Sonic"));
+        assert!(verified.headline_verdict.contains("Sample Fiber"));
     }
 
     #[tokio::test]

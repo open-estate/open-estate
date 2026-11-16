@@ -872,6 +872,138 @@ pub fn mysql_ddl() -> &'static [&'static str] {
     MYSQL_DDL_STMTS
 }
 
+pub const LAZY_TABLE_NAMES: &[&str] = &[
+    "lazy_extension_jobs",
+    "property_lazy_artifacts",
+    "report_section_subscriptions",
+];
+
+const LAZY_SQLITE_DDL_STMTS: &[&str] = &[
+    r#"CREATE TABLE IF NOT EXISTS lazy_extension_jobs (
+        id VARCHAR(64) NOT NULL PRIMARY KEY,
+        slug VARCHAR(180) NOT NULL,
+        extension_id VARCHAR(128) NOT NULL,
+        section_id VARCHAR(128) NOT NULL,
+        status VARCHAR(32) NOT NULL DEFAULT 'queued',
+        attempts INTEGER NOT NULL DEFAULT 0,
+        max_attempts INTEGER NOT NULL DEFAULT 5,
+        next_attempt_at BIGINT NOT NULL DEFAULT 0,
+        lease_owner VARCHAR(128),
+        lease_expires_at BIGINT,
+        requested_by_user_id VARCHAR(128),
+        trigger_kind VARCHAR(48) NOT NULL DEFAULT 'first_visit',
+        query_json TEXT,
+        last_error TEXT,
+        started_at VARCHAR(32),
+        finished_at VARCHAR(32),
+        created_at VARCHAR(32) NOT NULL,
+        updated_at VARCHAR(32) NOT NULL,
+        UNIQUE (slug, extension_id)
+    )"#,
+    "CREATE INDEX IF NOT EXISTS idx_lazy_jobs_claim ON lazy_extension_jobs (status, next_attempt_at, lease_expires_at)",
+    "CREATE INDEX IF NOT EXISTS idx_lazy_jobs_slug_section ON lazy_extension_jobs (slug, section_id)",
+    r#"CREATE TABLE IF NOT EXISTS property_lazy_artifacts (
+        id VARCHAR(64) NOT NULL PRIMARY KEY,
+        slug VARCHAR(180) NOT NULL,
+        extension_id VARCHAR(128) NOT NULL,
+        section_id VARCHAR(128) NOT NULL,
+        status VARCHAR(32) NOT NULL DEFAULT 'ready',
+        payload_json TEXT NOT NULL,
+        source_fingerprint VARCHAR(128) NOT NULL,
+        required_tier VARCHAR(48),
+        fetched_at VARCHAR(32) NOT NULL,
+        expires_at BIGINT,
+        created_at VARCHAR(32) NOT NULL,
+        updated_at VARCHAR(32) NOT NULL,
+        UNIQUE (slug, extension_id)
+    )"#,
+    "CREATE INDEX IF NOT EXISTS idx_lazy_artifacts_slug_section ON property_lazy_artifacts (slug, section_id)",
+    r#"CREATE TABLE IF NOT EXISTS report_section_subscriptions (
+        id VARCHAR(64) NOT NULL PRIMARY KEY,
+        slug VARCHAR(180) NOT NULL,
+        section_id VARCHAR(128) NOT NULL,
+        user_id VARCHAR(128),
+        email VARCHAR(255) NOT NULL,
+        unsubscribe_token VARCHAR(96) NOT NULL UNIQUE,
+        status VARCHAR(32) NOT NULL DEFAULT 'active',
+        created_at VARCHAR(32) NOT NULL,
+        notified_at VARCHAR(32),
+        notified_event_key VARCHAR(255),
+        event_key VARCHAR(255) NOT NULL UNIQUE,
+        last_notes TEXT,
+        updated_at VARCHAR(32) NOT NULL
+    )"#,
+    "CREATE INDEX IF NOT EXISTS idx_report_sec_subs_slug_sec_status ON report_section_subscriptions (slug, section_id, status)",
+    "CREATE INDEX IF NOT EXISTS idx_report_sec_subs_email ON report_section_subscriptions (email)",
+];
+
+const LAZY_MYSQL_DDL_STMTS: &[&str] = &[
+    r#"CREATE TABLE IF NOT EXISTS lazy_extension_jobs (
+        id VARCHAR(64) NOT NULL PRIMARY KEY,
+        slug VARCHAR(180) NOT NULL,
+        extension_id VARCHAR(128) NOT NULL,
+        section_id VARCHAR(128) NOT NULL,
+        status VARCHAR(32) NOT NULL DEFAULT 'queued',
+        attempts INT NOT NULL DEFAULT 0,
+        max_attempts INT NOT NULL DEFAULT 5,
+        next_attempt_at BIGINT NOT NULL DEFAULT 0,
+        lease_owner VARCHAR(128) NULL,
+        lease_expires_at BIGINT NULL,
+        requested_by_user_id VARCHAR(128) NULL,
+        trigger_kind VARCHAR(48) NOT NULL DEFAULT 'first_visit',
+        query_json LONGTEXT NULL,
+        last_error LONGTEXT NULL,
+        started_at VARCHAR(32) NULL,
+        finished_at VARCHAR(32) NULL,
+        created_at VARCHAR(32) NOT NULL,
+        updated_at VARCHAR(32) NOT NULL,
+        UNIQUE KEY uq_lazy_jobs_slug_ext (slug, extension_id),
+        INDEX idx_lazy_jobs_claim (status, next_attempt_at, lease_expires_at),
+        INDEX idx_lazy_jobs_slug_section (slug, section_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci"#,
+    r#"CREATE TABLE IF NOT EXISTS property_lazy_artifacts (
+        id VARCHAR(64) NOT NULL PRIMARY KEY,
+        slug VARCHAR(180) NOT NULL,
+        extension_id VARCHAR(128) NOT NULL,
+        section_id VARCHAR(128) NOT NULL,
+        status VARCHAR(32) NOT NULL DEFAULT 'ready',
+        payload_json LONGTEXT NOT NULL,
+        source_fingerprint VARCHAR(128) NOT NULL,
+        required_tier VARCHAR(48) NULL,
+        fetched_at VARCHAR(32) NOT NULL,
+        expires_at BIGINT NULL,
+        created_at VARCHAR(32) NOT NULL,
+        updated_at VARCHAR(32) NOT NULL,
+        UNIQUE KEY uq_lazy_artifacts_slug_ext (slug, extension_id),
+        INDEX idx_lazy_artifacts_slug_section (slug, section_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci"#,
+    r#"CREATE TABLE IF NOT EXISTS report_section_subscriptions (
+        id VARCHAR(64) NOT NULL PRIMARY KEY,
+        slug VARCHAR(180) NOT NULL,
+        section_id VARCHAR(128) NOT NULL,
+        user_id VARCHAR(128) NULL,
+        email VARCHAR(255) NOT NULL,
+        unsubscribe_token VARCHAR(96) NOT NULL UNIQUE,
+        status VARCHAR(32) NOT NULL DEFAULT 'active',
+        created_at VARCHAR(32) NOT NULL,
+        notified_at VARCHAR(32) NULL,
+        notified_event_key VARCHAR(255) NULL,
+        event_key VARCHAR(255) NOT NULL UNIQUE,
+        last_notes LONGTEXT NULL,
+        updated_at VARCHAR(32) NOT NULL,
+        INDEX idx_report_sec_subs_slug_sec_status (slug, section_id, status),
+        INDEX idx_report_sec_subs_email (email)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci"#,
+];
+
+pub fn lazy_sqlite_ddl() -> &'static [&'static str] {
+    LAZY_SQLITE_DDL_STMTS
+}
+
+pub fn lazy_mysql_ddl() -> &'static [&'static str] {
+    LAZY_MYSQL_DDL_STMTS
+}
+
 pub fn assert_safe_ident(ident: &str) -> &str {
     let mut chars = ident.chars();
     let first_ok = chars
@@ -1341,15 +1473,31 @@ pub const WATCHED_ZIPS_UPGRADE_COLS: &[(&str, &str, &str)] = &[
     ("sync_lease_owner", "VARCHAR(128)", "VARCHAR(128) NULL"),
     ("sync_lease_until", "VARCHAR(32)", "VARCHAR(32) NULL"),
     ("next_sync_after", "VARCHAR(32)", "VARCHAR(32) NULL"),
-    ("consecutive_failures", "INTEGER NOT NULL DEFAULT 0", "INT NOT NULL DEFAULT 0"),
-    ("last_backoff_secs", "INTEGER NOT NULL DEFAULT 0", "INT NOT NULL DEFAULT 0"),
+    (
+        "consecutive_failures",
+        "INTEGER NOT NULL DEFAULT 0",
+        "INT NOT NULL DEFAULT 0",
+    ),
+    (
+        "last_backoff_secs",
+        "INTEGER NOT NULL DEFAULT 0",
+        "INT NOT NULL DEFAULT 0",
+    ),
 ];
 
 pub const SUBSCRIPTIONS_UPGRADE_COLS: &[(&str, &str, &str)] = &[
-    ("filter_schema_version", "INTEGER NOT NULL DEFAULT 1", "INT NOT NULL DEFAULT 1"),
+    (
+        "filter_schema_version",
+        "INTEGER NOT NULL DEFAULT 1",
+        "INT NOT NULL DEFAULT 1",
+    ),
     ("plan_tier", "VARCHAR(32)", "VARCHAR(32) NULL"),
     ("filters_refreshed_at", "VARCHAR(32)", "VARCHAR(32) NULL"),
-    ("frequency", "VARCHAR(24) NOT NULL DEFAULT 'instant'", "VARCHAR(24) NOT NULL DEFAULT 'instant'"),
+    (
+        "frequency",
+        "VARCHAR(24) NOT NULL DEFAULT 'instant'",
+        "VARCHAR(24) NOT NULL DEFAULT 'instant'",
+    ),
     ("digest_pending_json", "TEXT", "LONGTEXT NULL"),
 ];
 

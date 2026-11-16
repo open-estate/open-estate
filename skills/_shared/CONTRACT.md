@@ -21,7 +21,7 @@ declared in `src/modules/mod.rs` and wired into one of the orchestrator's waves.
      `nearest_on_polyline`, `point_in_ring`, `ring_area_centroid`, `dominant_axis_rect`, `compass8`, `compass16`,
      `round_n`, `MILE_M`, `FOOT_M`, ...
 3. **Keyless public sources first.** Optional keyed sources read keys from `EnvConfig` (e.g.
-   `env.get("RENTCAST_API_KEY")`, loaded from the process environment and `.env`) and are skipped silently when
+   `env.get("ATTOM_API_KEY")`, loaded from the process environment and `.env`) and are skipped silently when
    the key is absent.
 4. **Never fail for a single failed source.** Run sub-queries concurrently (`tokio::join!`), handle each `Result`,
    and push a human-readable string to `warnings`. Return `Err` only when the input itself is invalid (for

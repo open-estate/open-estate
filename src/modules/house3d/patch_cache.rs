@@ -12,13 +12,23 @@
 //! least-recently-used eviction; a read refreshes the file's modification time.
 
 use super::scene::{LidarPatch, LidarPoint};
-use crate::shared::EnvConfig;
+use crate::db::shared_cache_store::{
+    get_shared_blob_by_tile_key, put_shared_blob, query_shared_data_records_by_geo_col,
+    upsert_shared_data_record, GeoIndexColumns, PutSharedBlobInput, SharedDataRecordRow,
+    UpsertSharedDataRecordInput,
+};
+use crate::db::DbStore;
+use crate::extensions::shared_cache::{dataset_ids, encode_geohash};
+use crate::shared::{now_unix_secs, EnvConfig};
 use anyhow::{anyhow, Result};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
+
+pub const LIDAR_BLOB_MEDIA_TYPE: &str = "application/x-openestate-lidar-gz";
+pub const LIDAR_PATCH_TTL_SECS: u64 = 365 * 86_400;
 
 const MAGIC: &[u8; 8] = b"DBLIDAR1";
 const EXT: &str = "bin.gz";
@@ -251,13 +261,173 @@ pub fn evict_to_budget(dir: &Path, budget: u64) {
     }
 }
 
+/// Canonical `scope_key` under `shared_data_records` (`imagery_lidar_tile`) for a LiDAR window.
+pub fn lidar_scope_key(project: &str, lat: f64, lon: f64, half_m: f64) -> String {
+    format!("lidar:{}:{lat:.6},{lon:.6}:{half_m:.1}", project.trim())
+}
+
+fn lidar_geo_cols(lat: f64, lon: f64, half_m: f64) -> GeoIndexColumns {
+    let dlat = (half_m.max(1.0)) / 111_111.0;
+    let cos_lat = lat.to_radians().cos().abs().max(0.2);
+    let dlon = (half_m.max(1.0)) / (111_320.0 * cos_lat);
+    GeoIndexColumns {
+        geohash5: encode_geohash(lat, lon, 5),
+        geohash6: encode_geohash(lat, lon, 6),
+        geohash7: encode_geohash(lat, lon, 7),
+        bbox_south: Some((lat - dlat).clamp(-90.0, 90.0)),
+        bbox_west: Some((lon - dlon).clamp(-180.0, 180.0)),
+        bbox_north: Some((lat + dlat).clamp(-90.0, 90.0)),
+        bbox_east: Some((lon + dlon).clamp(-180.0, 180.0)),
+        ..Default::default()
+    }
+}
+
+/// Stores a decoded LiDAR window in content-addressed blob storage (`shared_blobs`), indexes
+/// its spatial metadata in `shared_data_records` (`imagery_lidar_tile`), and maintains the
+/// local disk cache under `data_dir/lidar/patches/` when `budget > 0`. Returns `content_hash`.
+pub async fn write_and_index(
+    db: &DbStore,
+    data_dir: Option<&Path>,
+    key_str: &str,
+    patch: &LidarPatch,
+    lat: f64,
+    lon: f64,
+    budget: u64,
+) -> Result<String> {
+    if budget == 0 {
+        return Ok(String::new());
+    }
+    let gz = encode(patch, lat, lon)?;
+    if gz.len() as u64 > budget {
+        return Err(anyhow!(
+            "LiDAR window larger than the whole disk-cache budget"
+        ));
+    }
+
+    let geo = lidar_geo_cols(lat, lon, patch.half_m);
+    let blob = put_shared_blob(
+        db,
+        data_dir,
+        &PutSharedBlobInput {
+            dataset_id: dataset_ids::IMAGERY_LIDAR_TILE.to_string(),
+            media_type: LIDAR_BLOB_MEDIA_TYPE.to_string(),
+            bytes: gz,
+            tile_key: Some(key_str.to_string()),
+            geo: geo.clone(),
+            source_url: (!patch.source_url.trim().is_empty()).then(|| patch.source_url.clone()),
+        },
+    )
+    .await?;
+
+    let meta = json!({
+        "kind": "lidar_patch",
+        "key": key_str,
+        "project": patch.project,
+        "surveyYear": patch.survey_year,
+        "sourceUrl": patch.source_url,
+        "halfM": patch.half_m,
+        "lat": lat,
+        "lon": lon,
+        "pointCount": patch.points.len(),
+        "nodesFetched": patch.nodes_fetched,
+        "bytesFetched": patch.bytes_fetched,
+        "blobHash": blob.content_hash,
+    });
+    let meta_bytes = serde_json::to_vec(&meta)?;
+    let now = now_unix_secs();
+
+    upsert_shared_data_record(
+        db,
+        &UpsertSharedDataRecordInput {
+            dataset_id: dataset_ids::IMAGERY_LIDAR_TILE.to_string(),
+            schema_version: "1.0.0".to_string(),
+            scope: "parcel".to_string(),
+            scope_key: lidar_scope_key(&patch.project, lat, lon, patch.half_m),
+            params_hash: key_str.to_string(),
+            geo,
+            payload_bytes: meta_bytes,
+            payload_json: Some(meta.to_string()),
+            provenance_json: Some(
+                json!({
+                    "sourceName": format!("USGS 3DEP — {}", patch.project),
+                    "sourceUrl": patch.source_url,
+                    "surveyYear": patch.survey_year,
+                })
+                .to_string(),
+            ),
+            blob_hash: Some(blob.content_hash.clone()),
+            fetched_at: now,
+            expires_at: now.saturating_add(LIDAR_PATCH_TTL_SECS as i64),
+        },
+    )
+    .await?;
+
+    if let Some(dir) = data_dir {
+        let legacy_dir = cache_dir(dir);
+        let key_owned = key_str.to_string();
+        let patch_copy = patch.clone();
+        tokio::task::spawn_blocking(move || {
+            let _ = write(&legacy_dir, &key_owned, &patch_copy, lat, lon, budget);
+        })
+        .await
+        .ok();
+    }
+
+    Ok(blob.content_hash)
+}
+
+/// Reads a LiDAR window from the DB-indexed content-addressed blob store (`shared_blobs`),
+/// falling back to legacy `data_dir/lidar/patches/` files if present.
+pub async fn read_indexed(
+    db: &DbStore,
+    data_dir: Option<&Path>,
+    key_str: &str,
+    expect_project: &str,
+) -> Result<Option<LidarPatch>> {
+    if let Some((_row, bytes)) =
+        get_shared_blob_by_tile_key(db, data_dir, dataset_ids::IMAGERY_LIDAR_TILE, key_str).await?
+    {
+        if let Some(patch) = decode(&bytes, expect_project) {
+            return Ok(Some(patch));
+        }
+    }
+    if let Some(dir) = data_dir {
+        let legacy_dir = cache_dir(dir);
+        let key_owned = key_str.to_string();
+        let proj_owned = expect_project.to_string();
+        if let Ok(Some(patch)) =
+            tokio::task::spawn_blocking(move || read(&legacy_dir, &key_owned, &proj_owned)).await
+        {
+            return Ok(Some(patch));
+        }
+    }
+    Ok(None)
+}
+
+/// Lists DB-indexed LiDAR patch records matching a `geohash6` cell.
+pub async fn list_indexed_patches_near(
+    db: &DbStore,
+    geohash6: &str,
+    limit: i64,
+) -> Result<Vec<SharedDataRecordRow>> {
+    query_shared_data_records_by_geo_col(
+        db,
+        dataset_ids::IMAGERY_LIDAR_TILE,
+        "geohash6",
+        geohash6,
+        false,
+        limit,
+    )
+    .await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::shared::HttpClient;
     use crate::modules::house3d::lidar::{
         lookup_patch, LidarLookup, LidarOptions, EPT_HOST_PREFIX,
     };
+    use crate::shared::HttpClient;
     use std::collections::HashMap;
 
     /// Fetches a USGS 3DEP `CA_SantaClaraCounty_2020` airborne LiDAR window over a

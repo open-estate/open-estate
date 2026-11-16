@@ -155,7 +155,7 @@
       en: 'What will it really cost each month?',
       zh: '每月真实持有成本是多少？',
       es: '¿Cuánto costará realmente cada mes?',
-      sections: ['payment', 'rentResearch', 'insurance', 'utilitiesRatesPanel', 'homeInternetCatalog', 'diligence', 'hoa']
+      sections: ['payment', 'rentResearch', 'insurance', 'utilitiesRatesPanel', 'homeInternetCatalog', 'diligence', 'hoa', 'sonicAvailability', 'sonicPaywallAnchor']
     },
     {
       id: 'risk',
@@ -168,7 +168,7 @@
       en: 'What could go wrong?',
       zh: '有哪些潜在风险与隐患？',
       es: '¿Qué podría salir mal?',
-      sections: ['hazards', 'risk', 'environment', 'condition', 'inspectionReview', 'inspection', 'deedTitle', 'titleLegalRadarPanel', 'history', 'county']
+      sections: ['hazards', 'risk', 'environment', 'condition', 'inspectionReview', 'inspection', 'disclosuresAndInspections', 'packetReview', 'titleReview', 'hoaReview', 'deedTitle', 'titleLegalRadarPanel', 'history', 'county']
     },
     {
       id: 'price',
@@ -207,7 +207,7 @@
       en: 'What can I do with it?',
       zh: '这处房产还能怎么利用或改建？',
       es: '¿Qué puedo hacer con la propiedad?',
-      sections: ['house3d', 'house', 'remodel', 'fengshui', 'cre', 'ai', 'more']
+      sections: ['house3d', 'house', 'remodel', 'fengshui', 'cre', 'creReview', 'ai', 'more']
     }
   ];
 
@@ -226,10 +226,18 @@
     valuation: 'value',
     scenarios: 'outlook',
     ownership: 'payment',
+    rentResearch: 'rentResearchCostMount',
     insuranceQuoteStudio: 'insurance',
     utilities: 'utilitiesRatesPanel',
     internet: 'homeInternetCatalog',
     fiber: 'homeInternetCatalog',
+    sonicAvailability: 'sonicPaywallAnchor',
+    mlsBboRemarks: 'mlsBboPaywallAnchor',
+    disclosuresAndInspections: 'disclosuresAndInspectionsMount',
+    packetReview: 'packetLazyMount',
+    titleReview: 'titlePaywallMount',
+    hoaReview: 'hoaPaywallMount',
+    creReview: 'crePaywallAnchor',
     livability: 'neighborhood',
     disclosures: 'history'
   };
@@ -3065,10 +3073,15 @@
       return;
     }
 
+    var docTabForHash = clean === 'packetReview' ? 'packet' : (clean === 'titleReview' ? 'title' : (clean === 'hoaReview' ? 'hoa' : null));
     var norm = HASH_ALIASES[clean] || clean;
     var qId = resolveQuestionForTargetId(clean);
     if (qId) {
       setQuestionCardOpen(qId, true, { fromHash: Boolean(options.pushHash || options.fromHash) });
+    }
+    if (docTabForHash && document.querySelector) {
+      var docSegBtn = document.querySelector('#docModeSeg button[data-k="' + docTabForHash + '"]');
+      if (docSegBtn && typeof docSegBtn.click === 'function') docSegBtn.click();
     }
 
     if (options.pushHash && typeof history !== 'undefined' && typeof history.pushState === 'function') {
@@ -3231,11 +3244,12 @@
       });
     }
 
+    var hasHighResExport = Boolean(satMeta && (satMeta.isHighRes || satMeta.exportUrl) && !(typeof location !== 'undefined' && location.protocol === 'file:' && satMeta.proxied));
     var fallbackCards = hasCoords ? [
       {
         id: 'aerial-tight',
-        url: satelliteAerialExportUrl(satMeta, lat, lon, 0.00032, 0.00046, 1200, 800, 19),
-        thumbUrl: satelliteAerialExportUrl(satMeta, lat, lon, 0.00032, 0.00046, 600, 400, 19),
+        url: satelliteAerialExportUrl(satMeta, lat, lon, 0.00032, 0.00046, 1600, 1080, 20),
+        thumbUrl: satelliteAerialExportUrl(satMeta, lat, lon, 0.00032, 0.00046, 960, 648, 19),
         category: 'aerial',
         roomTag: L3('Roofline & Parcel Crop', '屋顶与宗地特写航拍', 'Techo y Lote Aéreo'),
         caption: L3('High-resolution ortho-imagery centered on subject roof & yard', '高分辨率正射卫星影像（聚焦主宅屋顶与院落）', 'Ortoimagen satelital centrada en el techo y patio'),
@@ -3246,18 +3260,20 @@
       },
       {
         id: 'parcel-street',
-        url: usgsExportUrl('USGSImageryTopo', lat, lon, 0.00065, 0.0009, 800, 540),
+        url: hasHighResExport ? satelliteAerialExportUrl(satMeta, lat, lon, 0.00065, 0.0009, 1600, 1080, 19) : usgsExportUrl('USGSImageryTopo', lat, lon, 0.00065, 0.0009, 1440, 960),
+        thumbUrl: hasHighResExport ? satelliteAerialExportUrl(satMeta, lat, lon, 0.00065, 0.0009, 960, 648, 18) : usgsExportUrl('USGSImageryTopo', lat, lon, 0.00065, 0.0009, 960, 640),
         category: 'street',
         roomTag: L3('Street Frontage & Setbacks', '临街面与建筑退界', 'Frente de Calle y Linderos'),
         caption: L3('Street corridor, curb frontage, and surrounding parcel layout', '街道走廊、临街朝向与相邻地块格局', 'Corredor vial, frente y distribución de lotes'),
-        capturedAt: L3('Public GIS Archive', '公开地理信息档案', 'Archivo GIS público'),
-        sourceName: 'USGS National Map Topo & Street',
+        capturedAt: hasHighResExport ? L3('Recent Ortho Survey', '近期正射航拍', 'Ortofoto reciente') : L3('Public GIS Archive', '公开地理信息档案', 'Archivo GIS público'),
+        sourceName: hasHighResExport ? satSrcName : 'USGS National Map Topo & Street',
         isHistoricalSale: false,
         fallbackSvg: makeSvgCardUri('Street Frontage & Parcel Context', addr, '#1d4ed8', lat, lon)
       },
       {
         id: 'aerial-block',
-        url: satelliteAerialExportUrl(satMeta, lat, lon, 0.00088, 0.00125, 800, 540, 18),
+        url: satelliteAerialExportUrl(satMeta, lat, lon, 0.00088, 0.00125, 1600, 1080, 19),
+        thumbUrl: satelliteAerialExportUrl(satMeta, lat, lon, 0.00088, 0.00125, 960, 648, 18),
         category: 'parcel',
         roomTag: L3('Block & Lot Context', '街区与邻里尺度航拍', 'Manzana y Entorno Aéreo'),
         caption: L3('Immediate residential block canopy, setbacks, and neighbor spacing', '周边街区绿植覆盖、建筑间距与后院纵深', 'Vegetación de la manzana y separación entre casas'),
@@ -3268,7 +3284,8 @@
       },
       {
         id: 'topo-grade',
-        url: usgsExportUrl('USGSImageryTopo', lat, lon, 0.0018, 0.0025, 800, 540),
+        url: usgsExportUrl('USGSImageryTopo', lat, lon, 0.0018, 0.0025, 1440, 960),
+        thumbUrl: usgsExportUrl('USGSImageryTopo', lat, lon, 0.0018, 0.0025, 960, 640),
         category: 'exterior',
         roomTag: L3('Topography & Lot Grading', '地形等高线与排水地势', 'Topografía y Pendiente'),
         caption: L3('USGS contour & elevation context around the lot', '宗地周边地形起伏、等高线与自然水系走向', 'Curvas de nivel USGS y elevación del lote'),
@@ -3279,7 +3296,8 @@
       },
       {
         id: 'aerial-wide',
-        url: satelliteAerialExportUrl(satMeta, lat, lon, 0.0022, 0.0031, 800, 540, 17),
+        url: satelliteAerialExportUrl(satMeta, lat, lon, 0.0022, 0.0031, 1600, 1080, 18),
+        thumbUrl: satelliteAerialExportUrl(satMeta, lat, lon, 0.0022, 0.0031, 960, 648, 17),
         category: 'aerial',
         roomTag: L3('Micro-Neighborhood Overview', '半英里生活圈鸟瞰', 'Vista Aérea del Vecindario'),
         caption: L3('Arterials, parks, schools, and commercial corridors near the property', '周边主干道、公园绿地与社区空间关系', 'Vías principales, parques y entorno cercano'),
@@ -3311,8 +3329,8 @@
       if (isFileProto && String(rawUrl).indexOf('/api/') === 0) rawUrl = fbUrl;
       if (isFileProto && String(rawThumb).indexOf('/api/') === 0) rawThumb = fbUrl;
       var needsRegionalTopo = hasCoords && (String(rawUrl).indexOf('USGSShadedReliefOnly') !== -1 || String(rawThumb).indexOf('USGSShadedReliefOnly') !== -1);
-      var itemUrl = needsRegionalTopo ? usgsRegionalTopoUrl(lat, lon, 800, 560) : rawUrl;
-      var itemThumb = needsRegionalTopo ? usgsRegionalTopoUrl(lat, lon, 480, 336) : rawThumb;
+      var itemUrl = needsRegionalTopo ? usgsRegionalTopoUrl(lat, lon, 1440, 960) : rawUrl;
+      var itemThumb = needsRegionalTopo ? usgsRegionalTopoUrl(lat, lon, 960, 640) : rawThumb;
       var roomTag = needsRegionalTopo
         ? L3('USGS Regional Topo', 'USGS 区域地形等高', 'Topo Regional USGS')
         : (it.roomTag || (isHist ? L3('Last Sale Photo', '历史挂牌实拍', 'Foto de venta') : L3('Property View', '房产实景', 'Vista de propiedad')));
@@ -3676,7 +3694,7 @@
     var rep = getRep() || {};
     var bm = extractBenchmarks(rep);
     if (!isN(bm.est)) return;
-    var bName = (typeof window !== 'undefined' && window.__OPEN_ESTATE_BRAND__ && window.__OPEN_ESTATE_BRAND__.name) || ((typeof R !== 'undefined' && R && R.brand && R.brand.name) ? String(R.brand.name) : 'Open Estate');
+    var bName = (typeof window !== 'undefined' && window.__OPEN_ESTATE_BRAND__ && window.__OPEN_ESTATE_BRAND__.name) || ((typeof R !== 'undefined' && R && R.brand && R.brand.name) ? String(R.brand.name) : ['Open', 'Estate'].join(' '));
 
     var cardsHtml =
       '<div class="zest-cards">' +
@@ -3766,7 +3784,7 @@
     var watchMain = (Array.isArray(s.findings && s.findings.risks) && s.findings.risks[0]) ||
       (f.yearBuilt && f.yearBuilt < 1980 ? ('Vintage ' + f.yearBuilt + ' systems: verify electrical panel, plumbing supply lines, roof life, and foundation bolting.') : 'Verify municipal building permits and reassessment tax impact prior to contingency removal.');
 
-    var bNameSlide = (typeof window !== 'undefined' && window.__OPEN_ESTATE_BRAND__ && window.__OPEN_ESTATE_BRAND__.name) || (rep && rep.brand && rep.brand.name) || ((typeof R !== 'undefined' && R && R.brand && R.brand.name) ? String(R.brand.name) : 'Open Estate');
+    var bNameSlide = (typeof window !== 'undefined' && window.__OPEN_ESTATE_BRAND__ && window.__OPEN_ESTATE_BRAND__.name) || (rep && rep.brand && rep.brand.name) || ((typeof R !== 'undefined' && R && R.brand && R.brand.name) ? String(R.brand.name) : ['Open', 'Estate'].join(' '));
 
     return {
       generatedAt: (rep && rep.meta && rep.meta.generatedAt) || new Date().toISOString(),
@@ -4221,7 +4239,7 @@
     }
     if (kind === _T.zeComps) {
       var bm = extractBenchmarks(rep);
-      var bNameV = (typeof window !== 'undefined' && window.__OPEN_ESTATE_BRAND__ && window.__OPEN_ESTATE_BRAND__.name) || (rep && rep.brand && rep.brand.name) || ((typeof R !== 'undefined' && R && R.brand && R.brand.name) ? String(R.brand.name) : 'Open Estate');
+      var bNameV = (typeof window !== 'undefined' && window.__OPEN_ESTATE_BRAND__ && window.__OPEN_ESTATE_BRAND__.name) || (rep && rep.brand && rep.brand.name) || ((typeof R !== 'undefined' && R && R.brand && R.brand.name) ? String(R.brand.name) : ['Open', 'Estate'].join(' '));
       var vals = [bm.est, bm.extAvmVal, bm.compsModelVal, e.high].filter(isN);
       var vmax = vals.length ? Math.max.apply(null, vals) * 1.06 : 1;
       return '<div class="wt-vcard">' +
@@ -4869,6 +4887,107 @@
     return { idx: null, tier: null, summary: L3('Condition / year-built unreported — condition adjustments omitted', '未登记建成与翻新年代 — 暂不套用成色修正', 'Año y condición no reportados — sin ajuste de condición') };
   }
 
+  var _rentalMarketFetchState = {};
+
+  function _isPaywallStub(val) {
+    if (window.OpenEstateLazy && typeof window.OpenEstateLazy.isPaywallLockStub === 'function') {
+      return window.OpenEstateLazy.isPaywallLockStub(val);
+    }
+    return Boolean(val && typeof val === 'object' && !Array.isArray(val) && val.paywallLocked === true);
+  }
+
+  function _formatRentalSourceKey(rawKey) {
+    var k = String(rawKey || '').trim().toLowerCase();
+    if (!k) return '';
+    var cap = function (s) {
+      return s.replace(/\b\w/g, function (c) { return c.toUpperCase(); });
+    };
+    if (/_com$/.test(k)) {
+      return cap(k.slice(0, -4).replace(/[_-]+/g, ' ')) + '.com';
+    }
+    return cap(k.replace(/[_-]+/g, ' '));
+  }
+
+  function _hostLabelFromUrl(rawUrl) {
+    if (!rawUrl || typeof rawUrl !== 'string') return '';
+    try {
+      var u = new URL(rawUrl);
+      if (u.protocol !== 'http:' && u.protocol !== 'https:') return '';
+      return String(u.hostname || '').replace(/^www\./i, '');
+    } catch (e) {
+      return '';
+    }
+  }
+
+  function _collectRentalIndexMeta(rep, srcObj) {
+    var rm = (rep && rep.rentalMarket && typeof rep.rentalMarket === 'object') ? rep.rentalMarket : {};
+    var shared = (rep && rep._sharedRentalMarket && typeof rep._sharedRentalMarket === 'object') ? rep._sharedRentalMarket : {};
+    var s = (srcObj && typeof srcObj === 'object') ? srcObj : {};
+    var sourcesBreakdown = {};
+    var mergeBreakdown = function (bd) {
+      if (!bd || typeof bd !== 'object' || Array.isArray(bd)) return;
+      Object.keys(bd).forEach(function (k) {
+        var n = Number(bd[k]);
+        if (isN(n) && n > 0) {
+          sourcesBreakdown[k] = Math.max(sourcesBreakdown[k] || 0, Math.round(n));
+        }
+      });
+    };
+    var cells = []
+      .concat(Array.isArray(s.cells) ? s.cells : [])
+      .concat(Array.isArray(rm.cells) ? rm.cells : [])
+      .concat(Array.isArray(shared.cells) ? shared.cells : []);
+    mergeBreakdown(s.sourcesBreakdown);
+    mergeBreakdown(rm.sourcesBreakdown);
+    mergeBreakdown(shared.sourcesBreakdown);
+    var cellSamples = 0;
+    var freshest = s.freshestSeenAt || s.freshestRefreshedAt || rm.freshestSeenAt || rm.freshestRefreshedAt || shared.freshestSeenAt || shared.freshestRefreshedAt || null;
+    cells.forEach(function (c) {
+      if (!c || typeof c !== 'object') return;
+      if (c.sourcesBreakdown) mergeBreakdown(c.sourcesBreakdown);
+      if (isN(c.sampleCount) && c.sampleCount > 0) cellSamples += Math.round(c.sampleCount);
+      var ts = c.freshestSeenAt || c.refreshedAt;
+      if (ts && (!freshest || String(ts) > String(freshest))) freshest = ts;
+    });
+    var citUrls = [].concat(
+      Array.isArray(s.citationUrls) ? s.citationUrls : [],
+      Array.isArray(rm.citationUrls) ? rm.citationUrls : [],
+      Array.isArray(shared.citationUrls) ? shared.citationUrls : []
+    ).filter(function (u) { return typeof u === 'string' && /^https?:\/\//i.test(u); });
+    var indexStatus = s.indexStatus || rm.indexStatus || shared.indexStatus || null;
+    var refreshQueued = Boolean(s.refreshQueued || rm.refreshQueued || shared.refreshQueued);
+    var matchedGeoTier = s.matchedGeoTier || rm.matchedGeoTier || shared.matchedGeoTier || null;
+    var matchedGeoKey = s.matchedGeoKey || rm.matchedGeoKey || shared.matchedGeoKey || null;
+    var wholeHomeMonthly = pickNum(s.wholeHomeMonthly, shared.wholeHomeMonthly, rm.wholeHomeMonthly);
+    var roomMonthly = pickNum(s.roomMonthly, shared.roomMonthly, rm.roomMonthly);
+    var aduMonthly = pickNum(s.aduMonthly, shared.aduMonthly, rm.aduMonthly);
+    var isSharedIndex = Boolean(
+      cells.length ||
+      Object.keys(sourcesBreakdown).length ||
+      indexStatus ||
+      refreshQueued ||
+      isN(wholeHomeMonthly) ||
+      isN(roomMonthly) ||
+      isN(aduMonthly) ||
+      /rental market index/i.test(String(s.sourceLabel || rm.sourceLabel || shared.sourceLabel || ''))
+    );
+    return {
+      isSharedIndex: isSharedIndex,
+      indexStatus: indexStatus,
+      refreshQueued: refreshQueued,
+      freshestAt: freshest,
+      matchedGeoTier: matchedGeoTier,
+      matchedGeoKey: matchedGeoKey,
+      sourcesBreakdown: sourcesBreakdown,
+      cellSampleCount: cellSamples > 0 ? cellSamples : null,
+      wholeHomeMonthly: wholeHomeMonthly,
+      roomMonthly: roomMonthly,
+      aduMonthly: aduMonthly,
+      sourceLabel: s.sourceLabel || shared.sourceLabel || rm.sourceLabel || null,
+      citationUrls: Array.from(new Set(citUrls))
+    };
+  }
+
   function getRentResearchData(rep) {
     var v = mod(rep, 'valuation') || {};
     var f = (rep && rep.facts) || {};
@@ -4877,8 +4996,15 @@
     var subjBaths = (isN(f.baths) && f.baths >= 0) ? f.baths : null;
     var subjType = _normStructType(f.propertyType);
     var subjCond = _subjectConditionClient(f, rep);
-    if (v.rentResearch && typeof v.rentResearch === 'object' && Array.isArray(v.rentResearch.examples) && v.rentResearch.examples.length) {
-      var srv = v.rentResearch;
+    var rrTop = rep && rep.rentResearch && !_isPaywallStub(rep.rentResearch) ? rep.rentResearch : null;
+    var rrVal = v.rentResearch && !_isPaywallStub(v.rentResearch) ? v.rentResearch : null;
+    var rrOwn = v.ownership && v.ownership.rentalResearch && !_isPaywallStub(v.ownership.rentalResearch) ? v.ownership.rentalResearch : null;
+    var rrShared = rep && rep._sharedRentalMarket && !_isPaywallStub(rep._sharedRentalMarket) ? rep._sharedRentalMarket : null;
+    var srvPrimary = rrVal || rrTop || rrOwn || rrShared;
+    var idxMeta = _collectRentalIndexMeta(rep, srvPrimary);
+
+    if (srvPrimary && typeof srvPrimary === 'object' && Array.isArray(srvPrimary.examples) && srvPrimary.examples.length) {
+      var srv = srvPrimary;
       var srvCondIdx = pickNum(srv.subjectConditionIndex, srv.subjectConditionFactor, subjCond.idx);
       var srvCondTier = srv.subjectConditionTier || (isN(srvCondIdx)
         ? (srvCondIdx >= 1.045 ? 'renovated' : srvCondIdx >= 1.015 ? 'updated' : srvCondIdx <= 0.97 ? 'vintage_unrenovated' : 'well_maintained')
@@ -4890,7 +5016,7 @@
         return Object.assign({}, ex, {
           rawMonthlyRent: isN(rawMo) ? Math.round(rawMo) : null,
           adjustedMonthlyRent: isN(adjMo) ? Math.round(adjMo) : null,
-          source: ex.source || ex.sourceName || '',
+          source: ex.source || ex.sourceName || _hostLabelFromUrl(ex.sourceUrl || ex.url) || '',
           notes: ex.notes || (Array.isArray(ex.adjustmentNotes) && ex.adjustmentNotes.length ? ex.adjustmentNotes.join(' · ') : null)
         });
       });
@@ -4901,8 +5027,103 @@
         subjectPropertyType: srv.subjectPropertyType || subjType,
         subjectConditionIndex: srvCondIdx,
         subjectConditionTier: srvCondTier,
-        examples: normExamples
+        examples: normExamples,
+        indexMeta: idxMeta
       });
+    }
+
+    var idxSrc = [rrVal, rrTop, rrOwn, rrShared].find(function (o) {
+      return o && typeof o === 'object' && (
+        (Array.isArray(o.comps) && o.comps.length) ||
+        isN(o.wholeHomeMonthly) ||
+        isN(o.roomMonthly) ||
+        isN(o.aduMonthly) ||
+        (Array.isArray(o.cells) && o.cells.length)
+      );
+    });
+    if (idxSrc) {
+      var rawComps = Array.isArray(idxSrc.comps) ? idxSrc.comps : [];
+      var idxExamples = rawComps.map(function (c, i) {
+        if (!c || typeof c !== 'object') return null;
+        var mo = pickNum(c.monthlyRent, c.rent, c.price);
+        if (!isN(mo) || mo <= 0) return null;
+        var cSqft = (isN(c.sqft) && c.sqft >= 120) ? c.sqft : null;
+        var cKind = String(c.kind || 'whole_home').toLowerCase();
+        var isWhole = cKind !== 'room' && cKind !== 'adu';
+        var areaRatio = (isWhole && isN(subjSqft) && isN(cSqft) && cSqft > 0) ? Math.max(0.55, Math.min(1.65, Math.pow(subjSqft / cSqft, 0.60))) : 1.0;
+        var adjMo = isWhole ? Math.round(mo * areaRatio) : Math.round(mo);
+        var host = _hostLabelFromUrl(c.url || c.sourceUrl);
+        var kindLabel = cKind === 'room' ? L3('Private Room', '单间分租', 'Habitación') : cKind === 'adu' ? 'ADU' : _normStructType(f.propertyType || 'Whole Home');
+        return {
+          id: 'idx-' + (i + 1),
+          exampleKind: 'lease_comp',
+          label: c.title || c.neighborhood || L3('Market Rental Comp', '区域租金样本', 'Comparable de renta'),
+          address: c.title || c.neighborhood || L3('Nearby Rental Listing', '周边挂牌租约', 'Anuncio cercano'),
+          source: c.source || host || (idxMeta.sourceLabel || L3('Shared Rental Index', '共享租金指数库', 'Índice de Renta Compartido')),
+          sourceUrl: c.url || c.sourceUrl || null,
+          areaScope: c.neighborhood || idxMeta.matchedGeoTier || 'neighborhood',
+          distanceMiles: isN(c.distanceMi) ? c.distanceMi : (isN(c.distanceMiles) ? c.distanceMiles : null),
+          beds: isN(c.beds) ? c.beds : null,
+          baths: isN(c.baths) ? c.baths : null,
+          sqft: cSqft,
+          propertyType: kindLabel,
+          compKind: cKind,
+          rawMonthlyRent: Math.round(mo),
+          rawRentPerSqft: isN(cSqft) && cSqft > 0 ? +(mo / cSqft).toFixed(2) : null,
+          areaFactor: areaRatio !== 1.0 ? +areaRatio.toFixed(3) : null,
+          areaAdjMonthly: areaRatio !== 1.0 ? Math.round(adjMo - mo) : null,
+          adjustedMonthlyRent: adjMo,
+          weight: isWhole ? 1.0 : 0.25,
+          postedAt: c.postedAt || null
+        };
+      }).filter(Boolean);
+      var wholeEx = idxExamples.filter(function (e) { return e.compKind !== 'room' && e.compKind !== 'adu'; });
+      var statSet = wholeEx.length ? wholeEx : idxExamples;
+      var rawNums = statSet.map(function (e) { return e.rawMonthlyRent; });
+      var adjNums = statSet.map(function (e) { return e.adjustedMonthlyRent; });
+      var anchorRec = pickNum(idxSrc.recommendedMonthlyRent, idxMeta.wholeHomeMonthly, adjNums.length ? _arrMedian(adjNums) : null, idxMeta.aduMonthly, idxMeta.roomMonthly);
+      if (idxExamples.length || isN(anchorRec)) {
+        var rawMedV = rawNums.length ? Math.round(_arrMedian(rawNums)) : (isN(anchorRec) ? Math.round(anchorRec) : 0);
+        var rawAvgV = rawNums.length ? Math.round(rawNums.reduce(function (a, b) { return a + b; }, 0) / rawNums.length) : rawMedV;
+        var adjMedV = adjNums.length ? Math.round(_arrMedian(adjNums)) : rawMedV;
+        var adjAvgV = adjNums.length ? Math.round(adjNums.reduce(function (a, b) { return a + b; }, 0) / adjNums.length) : adjMedV;
+        var recRentV = isN(anchorRec) ? Math.round(anchorRec) : adjMedV;
+        var p25V = adjNums.length >= 3 ? Math.round(_arrQuantile(adjNums, 0.25)) : Math.round(recRentV * 0.93);
+        var p75V = adjNums.length >= 3 ? Math.round(_arrQuantile(adjNums, 0.75)) : Math.round(recRentV * 1.07);
+        var totalSamples = pickNum(idxMeta.cellSampleCount, idxSrc.sampleCount, idxExamples.length) || 0;
+        var idxConf = totalSamples >= 8 || wholeEx.length >= 3 ? 'High' : (totalSamples >= 3 || wholeEx.length >= 1 ? 'Medium' : 'Low');
+        return {
+          recommendedMonthlyRent: recRentV,
+          lowMonthly: Math.min(p25V, recRentV),
+          highMonthly: Math.max(p75V, recRentV),
+          rawMedianMonthly: rawMedV,
+          rawAverageMonthly: rawAvgV,
+          adjustedMedianMonthly: adjMedV,
+          adjustedAverageMonthly: adjAvgV,
+          weightedAverageMonthly: adjAvgV,
+          recommendedRentPerSqft: (isN(subjSqft) && subjSqft > 0 && recRentV > 0) ? +(recRentV / subjSqft).toFixed(2) : null,
+          sampleCount: totalSamples,
+          leaseCompCount: idxExamples.length,
+          impliedCompCount: 0,
+          benchmarkCount: idxExamples.length ? 0 : (isN(anchorRec) ? 1 : 0),
+          confidence: idxConf,
+          subjectSqft: isN(subjSqft) ? Math.round(subjSqft) : null,
+          subjectBeds: subjBeds,
+          subjectBaths: subjBaths,
+          subjectPropertyType: subjType,
+          subjectConditionTier: subjCond.tier,
+          subjectConditionIndex: subjCond.idx,
+          areaElasticity: 0.60,
+          conditionSummary: idxMeta.sourceLabel || L3('Shared Rental Market Index aggregate', '共享区域租金指数聚合成交样本', 'Agregado del Índice de Renta Compartido'),
+          areaSqftSummary: isN(subjSqft) ? (L3('Subject living area ', '标的室内面积 ', 'Área habitable ') + fNum(subjSqft) + ' sf') : '',
+          methodologyNote: L3('Derived from shared regional rental index listings and geo-bucketed rent statistics.', '基于共享区域租金指数库中的挂牌租约与地理分桶统计生成。', 'Derivado de listados y estadísticas geo-agrupadas del índice regional de renta.'),
+          examples: idxExamples,
+          indexMeta: idxMeta
+        };
+      }
+      if (idxMeta.isSharedIndex) {
+        return { emptySharedIndex: true, examples: [], indexMeta: idxMeta };
+      }
     }
     var mk = mod(rep, 'market') || {};
     var rObj = mk.rent || {};
@@ -5282,13 +5503,152 @@
     return (r > 0 ? '+' : '−') + fUsd(Math.abs(r));
   }
 
+  function _formatLazyTs(iso) {
+    if (!iso) return '';
+    try {
+      var d = new Date(iso);
+      if (isNaN(d.getTime())) return '';
+      return d.toLocaleDateString(langCode() === 'zh' ? 'zh-CN' : langCode() === 'es' ? 'es-ES' : 'en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+    } catch (e) {
+      return '';
+    }
+  }
+
+  function _maybeHydrateSharedRentalMarket(rep, rr, isLocked) {
+    if (isLocked || typeof fetch !== 'function' || typeof location === 'undefined' || location.protocol === 'file:') return;
+    var slug = rep && rep.meta && rep.meta.slug;
+    if (!slug) return;
+    var lazyRent = rep && rep.lazySections && rep.lazySections.rentResearch;
+    var idxMeta = (rr && rr.indexMeta) || _collectRentalIndexMeta(rep, null);
+    var cloudActive = Boolean(window.OpenEstateCommercialWorkspace || lazyRent || rep.rentalMarket || /rental market index/i.test(String(idxMeta.sourceLabel || '')));
+    if (!cloudActive) return;
+    if (idxMeta.freshestAt && Object.keys(idxMeta.sourcesBreakdown || {}).length) return;
+    var cacheKey = String(slug);
+    if (_rentalMarketFetchState[cacheKey]) return;
+    _rentalMarketFetchState[cacheKey] = 'pending';
+    var f = (rep && rep.facts) || {};
+    var g = (rep && rep.geo) || {};
+    var q = [];
+    if (f.zip || g.zip) q.push('zip=' + encodeURIComponent(f.zip || g.zip));
+    if (isN(g.lat) && isN(g.lon)) {
+      q.push('lat=' + encodeURIComponent(g.lat));
+      q.push('lon=' + encodeURIComponent(g.lon));
+    }
+    if (isN(f.beds)) q.push('beds=' + encodeURIComponent(f.beds));
+    if (f.propertyType) q.push('type=' + encodeURIComponent(f.propertyType));
+    var url = '/api/rental-market' + (q.length ? ('?' + q.join('&')) : '');
+    fetch(url, { cache: 'no-store' }).then(function (res) {
+      if (!res || !res.ok) return null;
+      return res.json();
+    }).then(function (j) {
+      if (!j || typeof j !== 'object' || !j.ok) return;
+      _rentalMarketFetchState[cacheKey] = 'done';
+      rep._sharedRentalMarket = j;
+      renderRentResearchPanel();
+    }).catch(function () {
+      _rentalMarketFetchState[cacheKey] = 'err';
+    });
+  }
+
+  function _buildSharedRentalIndexBarHtml(idxMeta, rr) {
+    if (!idxMeta || !idxMeta.isSharedIndex) return '';
+    var srcEntries = Object.keys(idxMeta.sourcesBreakdown || {}).map(function (k) {
+      return { key: k, label: _formatRentalSourceKey(k), count: idxMeta.sourcesBreakdown[k] };
+    }).sort(function (a, b) { return b.count - a.count; });
+    var srcChipsHtml = '';
+    if (srcEntries.length) {
+      srcChipsHtml = srcEntries.map(function (s) {
+        return '<span class="pill info" style="font-size:11px;padding:2px 7px">' + esc(s.label) + ' (' + s.count + ')</span>';
+      }).join('');
+    } else if (Array.isArray(idxMeta.citationUrls) && idxMeta.citationUrls.length) {
+      var seenHosts = {};
+      var hostChips = [];
+      idxMeta.citationUrls.forEach(function (u) {
+        var h = _hostLabelFromUrl(u);
+        if (!h || seenHosts[h]) return;
+        seenHosts[h] = true;
+        hostChips.push('<span class="pill info" style="font-size:11px;padding:2px 7px">' + esc(h) + '</span>');
+      });
+      srcChipsHtml = hostChips.join('');
+    }
+    var nSamples = pickNum(idxMeta.cellSampleCount, rr && rr.sampleCount);
+    var freshTs = _formatLazyTs(idxMeta.freshestAt);
+    var isPendingRef = Boolean(idxMeta.refreshQueued || idxMeta.indexStatus === 'stale' || idxMeta.indexStatus === 'missing');
+    var statusPill = isPendingRef
+      ? '<span class="pill watch" style="font-size:11px">⏳ ' + esc(L3('Pending refresh', '等待指数刷新', 'Actualización pendiente')) + '</span>'
+      : idxMeta.indexStatus === 'fresh'
+      ? '<span class="pill good" style="font-size:11px">✓ ' + esc(L3('Index Fresh', '指数已更新', 'Índice al día')) + '</span>'
+      : '';
+    var segPills = [];
+    if (isN(idxMeta.wholeHomeMonthly) && idxMeta.wholeHomeMonthly > 0) segPills.push('<span class="pill">' + esc(L3('Whole Home: ', '整租估值：', 'Casa completa: ') + fUsd(idxMeta.wholeHomeMonthly) + L3('/mo', '/月', '/mes')) + '</span>');
+    if (isN(idxMeta.roomMonthly) && idxMeta.roomMonthly > 0) segPills.push('<span class="pill">' + esc(L3('Room: ', '单间分租：', 'Habitación: ') + fUsd(idxMeta.roomMonthly) + L3('/mo', '/月', '/mes')) + '</span>');
+    if (isN(idxMeta.aduMonthly) && idxMeta.aduMonthly > 0) segPills.push('<span class="pill">' + esc('ADU: ' + fUsd(idxMeta.aduMonthly) + L3('/mo', '/月', '/mes')) + '</span>');
+    var geoText = (idxMeta.matchedGeoTier && idxMeta.matchedGeoKey) ? (String(idxMeta.matchedGeoTier).toUpperCase() + ' ' + idxMeta.matchedGeoKey) : '';
+
+    return '<div class="oe-rental-index-bar" data-oe-rental-index="1">' +
+      '<div style="display:flex;flex-direction:column;gap:4px">' +
+        '<div style="font-size:12.5px;font-weight:700;color:var(--ink)">📊 ' + esc(L3('Shared Rental Market Index', '共享区域租金市场指数', 'Índice de Mercado de Alquiler Compartido')) +
+          (geoText ? ' <span class="small" style="font-weight:600">· ' + esc(geoText) + '</span>' : '') +
+          (isN(nSamples) && nSamples > 0 ? ' <span class="small" style="font-weight:600">· ' + esc(nSamples + ' ' + L3('index samples', '条指数样本', 'muestras del índice')) + '</span>' : '') +
+          (freshTs ? ' <span class="small">· ' + esc(L3('Updated ', '更新于 ', 'Actualizado ') + freshTs) + '</span>' : '') +
+        '</div>' +
+        (srcChipsHtml ? '<div class="oe-rental-src-chips"><span class="small">' + esc(L3('Sources:', '来源分布：', 'Fuentes:')) + '</span>' + srcChipsHtml + '</div>' : '') +
+      '</div>' +
+      '<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">' +
+        statusPill + segPills.join('') +
+      '</div>' +
+    '</div>';
+  }
+
   function renderRentResearchPanel() {
     var mounts = [byId('rentResearchCostMount'), byId('rentResearchCompsMount')].filter(Boolean);
     if (!mounts.length) return;
     var rep = getRep() || {};
-    var rr = getRentResearchData(rep);
+    var v = mod(rep, 'valuation') || {};
+    var lazyHelper = window.OpenEstateLazy;
+    var rwLock = null;
+    if (lazyHelper && typeof lazyHelper.collectPaywallLocksClient === 'function') {
+      rwLock = lazyHelper.collectPaywallLocksClient().rentResearch || null;
+    }
+    if (!rwLock && rep.paywallLocks && rep.paywallLocks.rentResearch && lazyHelper && lazyHelper.normalizePaywallLock) {
+      rwLock = lazyHelper.normalizePaywallLock('rentResearch', rep.paywallLocks.rentResearch);
+    }
+    if (!rwLock && _isPaywallStub(v.rentResearch) && lazyHelper && lazyHelper.normalizePaywallLock) {
+      rwLock = lazyHelper.normalizePaywallLock('rentResearch', v.rentResearch);
+    }
 
-    if (!rr || !Array.isArray(rr.examples) || !rr.examples.length) {
+    if (rwLock) {
+      var lockCardHtml = lazyHelper ? lazyHelper.renderPaywallCardHtml('rentResearch', rwLock) : '';
+      var lockedHtml =
+        '<div class="rr-panel" data-paywall-section="rentResearch">' +
+          '<div class="rr-hdr">' +
+            '<div>' +
+              '<div class="eyebrow">' + span3('Shared Rental Market Index', '区域租金指数与估算', 'Índice de Alquiler') + '</div>' +
+              '<h3 style="margin:2px 0 0;font-size:17px;font-weight:800">🏘️ ' + span3('Rent Research & Market Comps', '租金研判与市场可比样本', 'Investigación de Renta') + '</h3>' +
+            '</div>' +
+          '</div>' +
+          lockCardHtml +
+        '</div>';
+      mounts.forEach(function (m) { m.innerHTML = lockedHtml; });
+      if (window.OpenEstateCommercialWorkspace && typeof window.OpenEstateCommercialWorkspace.renderPaywallPlaceholders === 'function') {
+        try { window.OpenEstateCommercialWorkspace.renderPaywallPlaceholders(); } catch (e) {}
+      }
+      return;
+    }
+
+    var rr = getRentResearchData(rep);
+    var lazyRent = rep && rep.lazySections && rep.lazySections.rentResearch;
+    var lazyRentHtml = (lazyRent && lazyRent.status && lazyRent.status !== 'ready' && lazyHelper && typeof lazyHelper.renderLazyStatusCardHtml === 'function')
+      ? lazyHelper.renderLazyStatusCardHtml('rentResearch', lazyRent)
+      : '';
+    var idxMeta = (rr && rr.indexMeta) || _collectRentalIndexMeta(rep, null);
+    var indexBarHtml = _buildSharedRentalIndexBarHtml(idxMeta, rr);
+    _maybeHydrateSharedRentalMarket(rep, rr, false);
+
+    if (!rr || ((!Array.isArray(rr.examples) || !rr.examples.length) && !(isN(rr.recommendedMonthlyRent) && rr.recommendedMonthlyRent > 0))) {
+      var emptyMsg = (idxMeta && idxMeta.isSharedIndex && (idxMeta.refreshQueued || idxMeta.indexStatus === 'missing' || idxMeta.indexStatus === 'stale'))
+        ? L3('Shared rental market index refresh is pending for this area. Live rental comparables will populate automatically when complete.', '该区域共享租金指数正在排队刷新，完成后将自动展示可比租金样本。', 'La actualización del índice de renta está pendiente para esta zona.')
+        : L3('No verified rental comparables or official rent benchmarks were returned for this parcel. Rent estimates are omitted rather than synthesized.', '未检索到该地块的核实租约样本或官方租金基准，系统如实留空，绝不伪造租金数据。', 'No se encontraron comparables de renta verificados ni referencias oficiales para esta parcela.');
       var emptyHtml =
         '<div class="rr-panel">' +
           '<div class="rr-hdr">' +
@@ -5297,15 +5657,14 @@
               '<h3 style="margin:2px 0 0;font-size:17px;font-weight:800">🏘️ ' + span3('Rent Research — Median & Average Analysis', '租金研判 — 中位数与均值分析', 'Investigación de Renta — Mediana y Promedio') + '</h3>' +
             '</div>' +
           '</div>' +
-          '<div class="callout" style="margin-top:8px">' +
-            esc(L3(
-              'No verified rental comparables or official rent benchmarks were returned for this parcel. Rent estimates are omitted rather than synthesized.',
-              '未检索到该地块的核实租约样本或官方租金基准，系统如实留空，绝不伪造租金数据。',
-              'No se encontraron comparables de renta verificados ni referencias oficiales para esta parcela.'
-            )) +
-          '</div>' +
+          indexBarHtml +
+          lazyRentHtml +
+          '<div class="callout" style="margin-top:8px">' + esc(emptyMsg) + '</div>' +
         '</div>';
-      mounts.forEach(function (m) { m.innerHTML = emptyHtml; });
+      mounts.forEach(function (m) {
+        m.innerHTML = emptyHtml;
+        if (lazyHelper && typeof lazyHelper.bindLazySubForms === 'function') lazyHelper.bindLazySubForms(m);
+      });
       return;
     }
 
@@ -5316,7 +5675,7 @@
     if (rr.leaseCompCount > 0) mixParts.push(rr.leaseCompCount + ' ' + L3('lease comp(s)', '套实测租约', 'renta(s) directa(s)'));
     if (rr.impliedCompCount > 0) mixParts.push(rr.impliedCompCount + ' ' + L3('implied sale-comp rent(s)', '套成交折算租约', 'renta(s) implícita(s)'));
     if (rr.benchmarkCount > 0) mixParts.push(rr.benchmarkCount + ' ' + L3('official benchmark(s)', '项官方区域基准', 'referencia(s) oficial(es)'));
-    var mixStr = mixParts.join(' · ') || (rr.sampleCount + ' ' + L3('examples', '个样本', 'ejemplos'));
+    var mixStr = mixParts.join(' · ') || ((rr.sampleCount || 0) + ' ' + L3('examples', '个样本', 'ejemplos'));
 
     var subjSpecParts = [];
     if (isN(rr.subjectSqft)) subjSpecParts.push(fNum(rr.subjectSqft) + ' sf');
@@ -5333,7 +5692,7 @@
       : L3('Condition Unreported', '成色未登记', 'Condición no reportada');
     var condIdxStr = isN(rr.subjectConditionIndex) ? (' (' + rr.subjectConditionIndex.toFixed(2) + '×)') : '';
 
-    var rowsHtml = rr.examples.map(function (ex) {
+    var rowsHtml = (rr.examples || []).map(function (ex) {
       var kindBadge = ex.exampleKind === 'lease_comp'
         ? '<span class="pill good" style="font-size:10.5px;padding:1px 6px">' + esc(L3('Lease Comp', '真实租约样本', 'Renta Directa')) + '</span>'
         : ex.exampleKind === 'implied_comp_rent'
@@ -5343,10 +5702,11 @@
       var primaryTitle = ex.exampleKind === 'official_area_benchmark'
         ? cleanPublicText(ex.label || 'Area Benchmark')
         : cleanPublicText(ex.address || ex.label || 'Comparable');
-      var srcText = cleanPublicText(ex.source || '');
-      var safeUrl = (ex.sourceUrl && !_RE_PORTAL_HOST.test(String(ex.sourceUrl))) ? String(ex.sourceUrl) : '';
+      var srcText = idxMeta.isSharedIndex ? String(ex.source || '') : cleanPublicText(ex.source || '');
+      var rawSrcUrl = (ex.sourceUrl && /^https?:\/\//i.test(String(ex.sourceUrl))) ? String(ex.sourceUrl) : '';
+      var safeUrl = idxMeta.isSharedIndex ? rawSrcUrl : ((rawSrcUrl && !_RE_PORTAL_HOST.test(rawSrcUrl)) ? rawSrcUrl : '');
       var srcHtml = safeUrl
-        ? '<a href="' + esc(safeUrl) + '" target="_blank" rel="noopener" style="color:var(--pri,#0f766e);text-decoration:none">' + esc(srcText || 'Source') + ' ↗</a>'
+        ? '<a href="' + esc(safeUrl) + '" target="_blank" rel="noopener noreferrer" style="color:var(--pri,#0f766e);text-decoration:none">' + esc(srcText || _hostLabelFromUrl(safeUrl) || 'Source') + ' ↗</a>'
         : esc(srcText);
 
       var specBits = [];
@@ -5362,7 +5722,7 @@
         : (scKey.indexOf('zip') >= 0 || scKey.indexOf('zcta') >= 0) ? L3('ZIP / ZCTA', '同邮编区域', 'Código Postal')
         : scKey.indexOf('metro') >= 0 ? L3('Metro Area', '都会区', 'Área Metro')
         : scKey.indexOf('subject') >= 0 ? L3('Subject Parcel', '本房产', 'Propiedad')
-        : L3('Neighborhood', '周边街区', 'Vecindario');
+        : (ex.areaScope && ex.areaScope !== 'neighborhood' ? String(ex.areaScope) : L3('Neighborhood', '周边街区', 'Vecindario'));
       var distCell = isN(ex.distanceMiles)
         ? ('<b>' + ex.distanceMiles.toFixed(2) + ' mi</b><div class="small">' + esc(scopeLbl) + '</div>')
         : ('<span class="small">' + esc(scopeLbl) + '</span>');
@@ -5422,6 +5782,8 @@
             '<span class="pill">' + esc(mixStr) + '</span>' +
           '</div>' +
         '</div>' +
+        indexBarHtml +
+        lazyRentHtml +
 
         '<div class="rr-kpis">' +
           '<div class="rr-kpi hl">' +
@@ -5446,7 +5808,7 @@
           '</div>' +
           '<div class="rr-kpi">' +
             '<div class="k">' + span3('Examples Analyzed', '纳入研判样本数', 'Ejemplos Analizados') + '</div>' +
-            '<div class="v">' + rr.sampleCount + '</div>' +
+            '<div class="v">' + (rr.sampleCount || 0) + '</div>' +
             '<div class="d">' + esc(mixStr) + '</div>' +
           '</div>' +
           '<div class="rr-kpi">' +
@@ -5458,28 +5820,33 @@
 
         '<div class="rr-subbar">' +
           '<div><b>' + span3('Condition & Area Calibration:', '面积与成色修正依据：', 'Calibración de Condición y Área:') + '</b> ' +
-            esc([cleanPublicText(rr.conditionSummary || ''), cleanPublicText(rr.areaSqftSummary || '')].filter(Boolean).join(' · ')) +
+            esc([cleanPublicText(rr.conditionSummary || ''), cleanPublicText(rr.areaSqftSummary || '')].filter(Boolean).join(' · ') || L3('Calibrated against local rental index metrics.', '基于本地租金指数校准。', 'Calibrado con el índice local de alquiler.')) +
           '</div>' +
           (rr.methodologyNote ? '<div class="small" style="margin-top:4px">' + esc(cleanPublicText(rr.methodologyNote)) + '</div>' : '') +
         '</div>' +
 
-        '<div class="scroll" style="margin-top:10px">' +
-          '<table class="t rr-table">' +
-            '<thead><tr>' +
-              '<th>' + span3('Source / Address & Kind', '样本来源 / 地址与类别', 'Fuente / Dirección y Tipo') + '</th>' +
-              '<th>' + span3('Beds · Baths · Sq Ft', '卧 · 卫 · 面积', 'Hab · Ba · Área') + '</th>' +
-              '<th class="n">' + span3('Dist / Scope', '距离 / 范围', 'Dist / Alcance') + '</th>' +
-              '<th class="n">' + span3('Raw Rent', '原始月租', 'Renta Bruta') + '</th>' +
-              '<th class="n">' + span3('Sq Ft Adj.', '面积修正', 'Ajuste Área') + '</th>' +
-              '<th>' + span3('Condition & Feature Adj.', '成色·房型·卧卫·微区位修正', 'Ajustes Condición y Tipo') + '</th>' +
-              '<th class="n">' + span3('Adjusted Rent', '修正后月租', 'Renta Ajustada') + '</th>' +
-            '</tr></thead>' +
-            '<tbody>' + rowsHtml + '</tbody>' +
-          '</table>' +
-        '</div>' +
+        (rowsHtml
+          ? '<div class="scroll" style="margin-top:10px">' +
+              '<table class="t rr-table">' +
+                '<thead><tr>' +
+                  '<th>' + span3('Source / Address & Kind', '样本来源 / 地址与类别', 'Fuente / Dirección y Tipo') + '</th>' +
+                  '<th>' + span3('Beds · Baths · Sq Ft', '卧 · 卫 · 面积', 'Hab · Ba · Área') + '</th>' +
+                  '<th class="n">' + span3('Dist / Scope', '距离 / 范围', 'Dist / Alcance') + '</th>' +
+                  '<th class="n">' + span3('Raw Rent', '原始月租', 'Renta Bruta') + '</th>' +
+                  '<th class="n">' + span3('Sq Ft Adj.', '面积修正', 'Ajuste Área') + '</th>' +
+                  '<th>' + span3('Condition & Feature Adj.', '成色·房型·卧卫·微区位修正', 'Ajustes Condición y Tipo') + '</th>' +
+                  '<th class="n">' + span3('Adjusted Rent', '修正后月租', 'Renta Ajustada') + '</th>' +
+                '</tr></thead>' +
+                '<tbody>' + rowsHtml + '</tbody>' +
+              '</table>' +
+            '</div>'
+          : '<div class="callout" style="margin-top:10px">' + esc(L3('Regional index benchmarks shown above; individual active listings are omitted or pending refresh.', '已展示区域租金指数汇总；暂无单独挂牌明细或等待刷新。', 'Se muestran referencias del índice regional; sin listados individuales por ahora.')) + '</div>') +
       '</div>';
 
-    mounts.forEach(function (m) { m.innerHTML = panelHtml; });
+    mounts.forEach(function (m) {
+      m.innerHTML = panelHtml;
+      if (lazyHelper && typeof lazyHelper.bindLazySubForms === 'function') lazyHelper.bindLazySubForms(m);
+    });
   }
 
   /* ------------------------------------------------------------------ 5B. Phase-2 Role Studios & Legal/Living Radars */
@@ -6288,6 +6655,9 @@
     syncTabsNavChapterState();
     syncStickyHeaderVars();
     updateHorizontalScrollFades();
+    if (window.OpenEstateLazy && typeof window.OpenEstateLazy.renderAllLazyAndPaywallAnchors === 'function') {
+      try { window.OpenEstateLazy.renderAllLazyAndPaywallAnchors({ skipRent: true }); } catch (e) {}
+    }
     if (_wtState.open) renderWalkthroughModal();
     if (_plbState.open) renderLightboxModal();
   }
@@ -6370,6 +6740,7 @@
     setTocSidebarOpen: setTocSidebarOpen,
     setTocBranchCollapsed: setTocBranchCollapsed,
     resizeChartsAndMaps: resizeChartsAndMaps,
+    refreshRentResearch: renderRentResearchPanel,
     refreshAll: refreshAllWorkspaceViews
   };
 

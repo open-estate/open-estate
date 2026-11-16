@@ -4,18 +4,25 @@
 //! raw municipal/aggregator permit retrieval (`DOMAIN_PERMITS`) from domain-specific extraction
 //! (`DOMAIN_PERMIT_INTEL`: Roof, Solar PV, MEP, Remodel/Addition, Code Enforcement).
 
+use crate::db::shared_cache_store::compute_sha256_hex;
+use crate::db::DbStore;
 use crate::extensions::adapter::{BoxFuture, DataExtensionAdapter};
 use crate::extensions::proto::{
-    extension_envelope_proto::Payload, CapabilityDomain, CodeEnforcementIntelProto, DriverKind,
-    ExtensionEnvelopeProto, ExtensionManifestProto, ExtensionQueryProto, GeoScopeProto,
-    MepIntelProto, PermitRecordProto, PermitsHistoryProto, ProvenanceTier, RemodelIntelProto,
-    RoofIntelProto, SolarIntelProto, SourceAttributionProto,
+    extension_envelope_proto::Payload, AuthSpecProto, CapabilityDomain,
+    CodeEnforcementIntelProto, DriverKind, ExtensionEnvelopeProto, ExtensionManifestProto,
+    ExtensionQueryProto, GeoScopeProto, MepIntelProto, PermitRecordProto, PermitsHistoryProto,
+    ProvenanceTier, RemodelIntelProto, RoofIntelProto, SolarIntelProto, SourceAttributionProto,
+};
+use crate::extensions::registry::ExtensionHub;
+use crate::extensions::shared_cache::{
+    dataset_ids, derive_geo_index_columns, derive_scope_key, get_shared_dataset_proto,
+    put_shared_dataset_proto, shared_v1, ShareScope, SharedExtensionCache,
 };
 use crate::property::deep_research::fetch_municipal_open_data_stage1;
 use crate::property::permits_condition::{classify_permit_category, normalize_permit_record};
 use crate::property::public_records::{parse_street, street_keyword_of, with_data_point_anchor};
 use crate::shared::{round_n, EnvConfig, HttpClient, SourceItem};
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use chrono::Datelike;
 use once_cell::sync::Lazy;
 use regex::Regex;
@@ -182,8 +189,8 @@ pub fn extract_solar_specs(text: &str) -> (Option<f64>, Option<u32>) {
 }
 
 /// Matches a Campbell MGO or municipal street address against `(house_number, street_keyword)`,
-/// supporting multi-unit/building strings like `"114 PLATFORM WAY -126 BLDG 3"` and `"114-128 PLATFORM WAY"`
-/// while rejecting prefix false positives like `"1260 PLATFORM WAY"` or `"BLDG 126"`.
+/// supporting multi-unit/building strings like `"114 SYNTHPLATFORM WAY -126 BLDG 3"` and `"114-128 SYNTHPLATFORM WAY"`
+/// while rejecting prefix false positives like `"1260 SYNTHPLATFORM WAY"` or `"BLDG 126"`.
 pub fn campbell_address_matches(raw_addr: &str, target_number: &str, target_street_kw: &str) -> bool {
     let raw_up = raw_addr.trim().to_ascii_uppercase();
     let num_trim = target_number.trim().to_ascii_uppercase();
@@ -366,6 +373,17 @@ pub async fn fetch_campbell_mgo_bundle(
     address: &str,
     parent_addresses: &[String],
 ) -> CampbellMgoBundle {
+    fetch_campbell_mgo_bundle_with_env(http, None, address, parent_addresses).await
+}
+
+/// Variant of [`fetch_campbell_mgo_bundle`] honoring an optional `CAMPBELL_MGO_BASE_URL`
+/// override in `EnvConfig` for staging/unavailability verification.
+pub async fn fetch_campbell_mgo_bundle_with_env(
+    http: &HttpClient,
+    env: Option<&EnvConfig>,
+    address: &str,
+    parent_addresses: &[String],
+) -> CampbellMgoBundle {
     let mut bundle = CampbellMgoBundle::default();
     let (subj_num, subj_core) = parse_street(address);
     let subj_kw = street_keyword_of(&subj_core);
@@ -397,44 +415,66 @@ pub async fn fetch_campbell_mgo_bundle(
         ("outFields", p_fields.to_string()),
         ("returnGeometry", "false".to_string()),
     ];
+    let base_ov = env
+        .and_then(|e| e.get("CAMPBELL_MGO_BASE_URL"))
+        .map(|u| u.trim_end_matches('/').to_string());
+    let resolve_layer_url = |default_url: &str| -> String {
+        match &base_ov {
+            Some(ov) => default_url.replacen(CAMPBELL_MGO_BASE, ov, 1),
+            None => default_url.to_string(),
+        }
+    };
 
-    let bld_futs: Vec<_> = CAMPBELL_BUILDING_LAYERS
+    let bld_urls: Vec<(&'static str, String)> = CAMPBELL_BUILDING_LAYERS
         .iter()
-        .map(|&(name, url)| {
+        .map(|&(name, url)| (name, resolve_layer_url(url)))
+        .collect();
+    let pln_urls: Vec<(&'static str, String)> = CAMPBELL_PLANNING_LAYERS
+        .iter()
+        .map(|&(name, url)| (name, resolve_layer_url(url)))
+        .collect();
+    let ce_urls: Vec<(&'static str, bool, String)> = CAMPBELL_CODE_ENF_LAYERS
+        .iter()
+        .map(|&(name, is_open, url)| (name, is_open, resolve_layer_url(url)))
+        .collect();
+
+    let bld_futs: Vec<_> = bld_urls
+        .iter()
+        .map(|(name, url)| {
             let params_ref = &base_params;
             async move {
                 (
-                    name,
-                    url,
+                    *name,
+                    url.as_str(),
                     "Building Division",
                     http.arcgis_query(url, params_ref, 4500).await,
                 )
             }
         })
         .collect();
-    let pln_futs: Vec<_> = CAMPBELL_PLANNING_LAYERS
+    let pln_futs: Vec<_> = pln_urls
         .iter()
-        .map(|&(name, url)| {
+        .map(|(name, url)| {
             let params_ref = &base_params;
             async move {
                 (
-                    name,
-                    url,
+                    *name,
+                    url.as_str(),
                     "Planning Division",
                     http.arcgis_query(url, params_ref, 4000).await,
                 )
             }
         })
         .collect();
-    let ce_futs: Vec<_> = CAMPBELL_CODE_ENF_LAYERS
+    let ce_futs: Vec<_> = ce_urls
         .iter()
-        .map(|&(name, is_open, url)| {
+        .map(|(name, is_open, url)| {
             let params_ref = &base_params;
             async move {
                 (
-                    name,
-                    is_open,
-                    url,
+                    *name,
+                    *is_open,
+                    url.as_str(),
                     http.arcgis_query(url, params_ref, 4000).await,
                 )
             }
@@ -1446,7 +1486,7 @@ impl DataExtensionAdapter for CampbellMgoPermitsAdapter {
         &'a self,
         query: &'a ExtensionQueryProto,
         http: &'a HttpClient,
-        _env: &'a EnvConfig,
+        env: &'a EnvConfig,
     ) -> BoxFuture<'a, Result<Vec<ExtensionEnvelopeProto>>> {
         Box::pin(async move {
             let is_campbell = query.city.eq_ignore_ascii_case("campbell")
@@ -1459,7 +1499,19 @@ impl DataExtensionAdapter for CampbellMgoPermitsAdapter {
             if let Some(pa) = query.parent_address.as_deref().filter(|s| !s.trim().is_empty()) {
                 parent_addrs.push(pa.trim().to_string());
             }
-            let bundle = fetch_campbell_mgo_bundle(http, &query.address, &parent_addrs).await;
+            let bundle = fetch_campbell_mgo_bundle_with_env(
+                http,
+                Some(env),
+                &query.address,
+                &parent_addrs,
+            )
+            .await;
+            if bundle.queried_layers.is_empty() && !bundle.code_checked && bundle.permits.is_empty()
+            {
+                return Err(anyhow!(
+                    "CAMPBELL_MGO_UNAVAILABLE: municipal GIS permit layers could not be reached"
+                ));
+            }
             let mut records: Vec<PermitRecordProto> =
                 bundle.permits.iter().map(permit_value_to_proto).collect();
             let open_ce = bundle
@@ -1473,6 +1525,21 @@ impl DataExtensionAdapter for CampbellMgoPermitsAdapter {
                 rec.category = "code_enforcement".to_string();
                 records.push(rec);
             }
+            let mut city_q = query.clone();
+            if city_q.city.trim().is_empty() {
+                city_q.city = "Campbell".to_string();
+            }
+            if city_q.state.trim().is_empty() {
+                city_q.state = "CA".to_string();
+            }
+            persist_city_permit_dataset_page(
+                &city_q,
+                "City of Campbell MGO GIS",
+                "https://www.campbellca.gov/161/Building",
+                &records,
+                !bundle.queried_layers.is_empty(),
+            )
+            .await;
             let m = self.manifest();
             Ok(vec![wrap_envelope(
                 &m,
@@ -1533,8 +1600,18 @@ impl DataExtensionAdapter for MunicipalOpenDataPermitsAdapter {
                 "lon": query.lon,
             });
             let facts = json!({ "address": query.address, "streetAddress": query.street });
-            let (raw_permits, raw_violations, _sources, portal_name) =
+            let (raw_permits, raw_violations, sources, portal_name) =
                 fetch_municipal_open_data_stage1(http, env, &geo, &facts).await;
+            if env.get("MUNICIPAL_OPENDATA_BASE_URL").is_some()
+                && portal_name.is_some()
+                && raw_permits.is_empty()
+                && raw_violations.is_empty()
+                && sources.is_empty()
+            {
+                return Err(anyhow!(
+                    "MUNICIPAL_OPENDATA_UNAVAILABLE: municipal open-data endpoint returned no usable response"
+                ));
+            }
             if raw_permits.is_empty() && raw_violations.is_empty() {
                 return Ok(Vec::new());
             }
@@ -1578,7 +1655,7 @@ pub struct ShovelsPermitsAdapter;
 
 impl DataExtensionAdapter for ShovelsPermitsAdapter {
     fn manifest(&self) -> ExtensionManifestProto {
-        build_stage1_manifest(
+        let mut m = build_stage1_manifest(
             "shovels_permits",
             "Shovels v2 Nationwide Building Permits",
             "Resolves address geo_id via Shovels v2 and fetches standardized permit & contractor history.",
@@ -1587,7 +1664,15 @@ impl DataExtensionAdapter for ShovelsPermitsAdapter {
                 ..Default::default()
             },
             300,
-        )
+        );
+        m.auth = Some(AuthSpecProto {
+            auth_type: "api_key_header".into(),
+            env_var: "SHOVELS_API_KEY".into(),
+            header_name: "X-API-Key".into(),
+            optional_key: true,
+            ..Default::default()
+        });
+        m
     }
 
     fn execute_async<'a>(
@@ -1597,10 +1682,19 @@ impl DataExtensionAdapter for ShovelsPermitsAdapter {
         env: &'a EnvConfig,
     ) -> BoxFuture<'a, Result<Vec<ExtensionEnvelopeProto>>> {
         Box::pin(async move {
+            if env.get("SHOVELS_API_KEY").is_none() {
+                return Err(anyhow!("AUTH_MISSING: SHOVELS_API_KEY is not configured"));
+            }
             let t0 = std::time::Instant::now();
-            let (permits, ok, _warn) =
+            let (permits, ok, warn_opt) =
                 fetch_shovels_v2_permits(http, env, &query.address, None).await;
-            if !ok || permits.is_empty() {
+            if !ok {
+                return Err(anyhow!(
+                    "SHOVELS_UNAVAILABLE: {}",
+                    warn_opt.unwrap_or_else(|| "Shovels v2 permit endpoint unavailable".into())
+                ));
+            }
+            if permits.is_empty() {
                 return Ok(Vec::new());
             }
             let records: Vec<PermitRecordProto> =
@@ -1777,6 +1871,125 @@ impl DataExtensionAdapter for PermitCodeEnforcementExtractorAdapter {
     }
 }
 
+/// Persists a resolved municipal building permit page as a typed
+/// `openestate.shared.v1.CityPermitDatasetPageProto` record in `shared_data_records`
+/// (`dataset_ids::CITY_PERMIT_DATASET`, `ShareScope::City`, 24h TTL) via an explicit [`DbStore`].
+pub(crate) async fn persist_city_permit_dataset_page_with_db(
+    db: &DbStore,
+    query: &ExtensionQueryProto,
+    portal_name: &str,
+    portal_url: &str,
+    page_cursor: &str,
+    permits: &[PermitRecordProto],
+    complete: bool,
+) -> Result<()> {
+    if permits.is_empty() {
+        return Ok(());
+    }
+    let Some(scope_key) = derive_scope_key(ShareScope::City, query) else {
+        return Ok(());
+    };
+    let page = shared_v1::CityPermitDatasetPageProto {
+        city: query.city.trim().to_string(),
+        state: query.state.trim().to_ascii_uppercase(),
+        portal_name: portal_name.to_string(),
+        portal_url: portal_url.to_string(),
+        page_cursor: page_cursor.to_string(),
+        permits: permits.to_vec(),
+        complete,
+        fetched_at_rfc3339: chrono::Utc::now().to_rfc3339(),
+    };
+    let geo = derive_geo_index_columns(query);
+    let prov = json!({
+        "portalName": portal_name,
+        "portalUrl": portal_url,
+        "scopeKey": scope_key,
+        "permitCount": permits.len(),
+    })
+    .to_string();
+    put_shared_dataset_proto(
+        Some(SharedExtensionCache::global()),
+        db,
+        dataset_ids::CITY_PERMIT_DATASET,
+        ShareScope::City,
+        &scope_key,
+        page_cursor,
+        geo,
+        &page,
+        None,
+        Some(prov),
+        None,
+        86_400,
+    )
+    .await?;
+    Ok(())
+}
+
+/// Computes the canonical `CityPermitDatasetPageProto` page cursor key for a parcel/street slice.
+pub(crate) fn city_permit_page_cursor(portal_url: &str, query: &ExtensionQueryProto) -> String {
+    compute_sha256_hex(
+        format!(
+            "{}|{}|{}",
+            portal_url.trim(),
+            query.street.trim().to_ascii_uppercase(),
+            query.address.trim().to_ascii_uppercase()
+        )
+        .as_bytes(),
+    )
+}
+
+/// Persists resolved city permit pages to `shared_data_records` when an active [`DbStore`] is bound.
+pub(crate) async fn persist_city_permit_dataset_page(
+    query: &ExtensionQueryProto,
+    portal_name: &str,
+    portal_url: &str,
+    permits: &[PermitRecordProto],
+    complete: bool,
+) {
+    if permits.is_empty() {
+        return;
+    }
+    let Some(db) = ExtensionHub::global().active_db() else {
+        return;
+    };
+    let cursor = city_permit_page_cursor(portal_url, query);
+    if let Err(err) = persist_city_permit_dataset_page_with_db(
+        &db,
+        query,
+        portal_name,
+        portal_url,
+        &cursor,
+        permits,
+        complete,
+    )
+    .await
+    {
+        tracing::warn!("permit_pipeline: failed writing CITY_PERMIT_DATASET ({err})");
+    }
+}
+
+/// Reads back a typed `CityPermitDatasetPageProto` record from `shared_data_records`.
+#[allow(dead_code)]
+pub(crate) async fn read_city_permit_dataset_page(
+    db: &DbStore,
+    query: &ExtensionQueryProto,
+    page_cursor: &str,
+) -> Result<Option<shared_v1::CityPermitDatasetPageProto>> {
+    let Some(scope_key) = derive_scope_key(ShareScope::City, query) else {
+        return Ok(None);
+    };
+    let hit = get_shared_dataset_proto::<shared_v1::CityPermitDatasetPageProto>(
+        Some(SharedExtensionCache::global()),
+        db,
+        dataset_ids::CITY_PERMIT_DATASET,
+        ShareScope::City,
+        &scope_key,
+        page_cursor,
+    )
+    .await?;
+    Ok(hit.map(|(_, page)| page))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1943,5 +2156,64 @@ mod tests {
         assert!(solar.has_solar);
         assert_eq!(solar.total_kw, Some(2.87));
         assert_eq!(solar.panel_count, Some(7));
+    }
+
+    #[tokio::test]
+    async fn city_permit_dataset_persists_and_reads_via_shared_data_records() {
+        let db = DbStore::connect_url(":memory:", Some("sqlite"))
+            .await
+            .expect("sqlite memory db");
+        crate::extensions::shared_cache::seed_builtin_shared_datasets(&db)
+            .await
+            .expect("seed builtin shared datasets");
+
+        let query = ExtensionQueryProto {
+            address: "126 Synthplatform Way, Campbell, CA 95008".into(),
+            street: "126 Synthplatform Way".into(),
+            city: "Campbell".into(),
+            state: "CA".into(),
+            zip: "95008".into(),
+            county_fips: "06085".into(),
+            lat: Some(37.2872),
+            lon: Some(-121.9500),
+            ..Default::default()
+        };
+        let portal_url = "https://www.campbellca.gov/161/Building";
+        let cursor = city_permit_page_cursor(portal_url, &query);
+        let permits = vec![PermitRecordProto {
+            permit_number: "BLD-SYNTH-2026-1".into(),
+            category: "remodel_addition".into(),
+            raw_type: "Tenant Improvement".into(),
+            description: "Interior kitchen remodel".into(),
+            status: "Finaled".into(),
+            year: Some(2026),
+            finaled: true,
+            verified: true,
+            source_verified: true,
+            ..Default::default()
+        }];
+
+        persist_city_permit_dataset_page_with_db(
+            &db,
+            &query,
+            "City of Campbell MGO GIS",
+            portal_url,
+            &cursor,
+            &permits,
+            true,
+        )
+        .await
+        .expect("persist CITY_PERMIT_DATASET");
+
+        let loaded = read_city_permit_dataset_page(&db, &query, &cursor)
+            .await
+            .expect("read CITY_PERMIT_DATASET")
+            .expect("persisted CityPermitDatasetPageProto");
+        assert_eq!(loaded.city, "Campbell");
+        assert_eq!(loaded.state, "CA");
+        assert_eq!(loaded.portal_name, "City of Campbell MGO GIS");
+        assert!(loaded.complete);
+        assert_eq!(loaded.permits.len(), 1);
+        assert_eq!(loaded.permits[0].permit_number, "BLD-SYNTH-2026-1");
     }
 }

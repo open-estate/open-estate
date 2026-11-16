@@ -2,8 +2,16 @@
 //! peril county/state sets, property tax + CA Prop 13 constants, electricity rates,
 //! county/state `WhoPaysRule` closing custom table, and progressive transfer-tax calculator.
 
+use crate::db::{shared_cache_store::GeoIndexColumns, DbStore};
+use crate::extensions::proto::shared_v1::{
+    InsuranceBenchmarkProto, TaxRateAreaProto, TransferTaxTableProto,
+};
+use crate::extensions::shared_cache::{
+    dataset_ids, get_shared_dataset_proto, put_shared_dataset_proto, ShareScope,
+};
 use crate::registry::us_geo::census_division_and_region;
-use crate::shared::round_n;
+use crate::shared::{now_iso, round_n};
+use anyhow::Result;
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -297,7 +305,10 @@ pub fn calibrate_regional_cost_multiplier_from_report(
         || metro_or_city.contains("santa clara")
         || metro_or_city.contains("san mateo")
     {
-        return (1.50, "Bay Area / Silicon Valley, CA (1.50x US avg)".to_string());
+        return (
+            1.50,
+            "Bay Area / Silicon Valley, CA (1.50x US avg)".to_string(),
+        );
     }
     if metro_or_city.contains("los angeles")
         || metro_or_city.contains("san diego")
@@ -321,7 +332,10 @@ pub fn calibrate_regional_cost_multiplier_from_report(
         return (1.00, "US National Baseline (1.00x)".to_string());
     }
     let mult = state_cost_multiplier(&state);
-    (mult, format!("{state} Licensed Trade Index ({mult:.2}x US avg)"))
+    (
+        mult,
+        format!("{state} Licensed Trade Index ({mult:.2}x US avg)"),
+    )
 }
 
 // =================================================================================================
@@ -476,12 +490,23 @@ pub fn lookup_state_eia_benchmark_kwh(state: &str) -> (f64, &'static str) {
     match state.trim().to_ascii_uppercase().as_str() {
         "HI" => (0.422, "EIA State Residential Average Fallback (HI)"),
         "CA" => (0.302, "EIA State Residential Average Fallback (CA)"),
-        "CT" | "MA" | "NH" | "RI" | "ME" => (0.285, "EIA State Residential Average Fallback (New England)"),
+        "CT" | "MA" | "NH" | "RI" | "ME" => (
+            0.285,
+            "EIA State Residential Average Fallback (New England)",
+        ),
         "NY" | "AK" => (0.245, "EIA State Residential Average Fallback (NY/AK)"),
         "NJ" | "VT" => (0.205, "EIA State Residential Average Fallback (NJ/VT)"),
-        "MI" | "PA" | "MD" | "DC" => (0.180, "EIA State Residential Average Fallback (Mid-Atlantic/MI)"),
-        "FL" | "AZ" | "TX" | "CO" | "NV" => (0.150, "EIA State Residential Average Fallback (Sunbelt)"),
-        "WA" | "OR" | "ID" | "UT" => (0.125, "EIA State Residential Average Fallback (PNW/Mountain)"),
+        "MI" | "PA" | "MD" | "DC" => (
+            0.180,
+            "EIA State Residential Average Fallback (Mid-Atlantic/MI)",
+        ),
+        "FL" | "AZ" | "TX" | "CO" | "NV" => {
+            (0.150, "EIA State Residential Average Fallback (Sunbelt)")
+        }
+        "WA" | "OR" | "ID" | "UT" => (
+            0.125,
+            "EIA State Residential Average Fallback (PNW/Mountain)",
+        ),
         _ => (0.168, "EIA National Residential Average Fallback (US)"),
     }
 }
@@ -1026,46 +1051,45 @@ pub fn lookup_who_pays(geo: &Value) -> &'static WhoPaysRule {
         .trim()
         .to_ascii_lowercase();
     if !county_lc.is_empty() {
-        let inferred_fips = if st == "CA"
-            || county_lc.contains("santa clara")
-            || county_lc.contains("los angeles")
-        {
-            if county_lc.contains("santa clara") {
-                Some("06085")
-            } else if county_lc.contains("los angeles") {
-                Some("06037")
-            } else if county_lc.contains("san francisco") {
-                Some("06075")
-            } else if county_lc.contains("alameda") {
-                Some("06001")
-            } else if county_lc.contains("contra costa") {
-                Some("06013")
-            } else if county_lc.contains("san mateo") {
-                Some("06081")
-            } else if county_lc.contains("marin") {
-                Some("06041")
-            } else if county_lc.contains("orange") {
-                Some("06059")
-            } else if county_lc.contains("san diego") {
-                Some("06073")
-            } else if county_lc.contains("riverside") {
-                Some("06065")
-            } else if county_lc.contains("san bernardino") {
-                Some("06071")
-            } else if county_lc.contains("ventura") {
-                Some("06111")
-            } else if county_lc.contains("sacramento") {
-                Some("06067")
+        let inferred_fips =
+            if st == "CA" || county_lc.contains("santa clara") || county_lc.contains("los angeles")
+            {
+                if county_lc.contains("santa clara") {
+                    Some("06085")
+                } else if county_lc.contains("los angeles") {
+                    Some("06037")
+                } else if county_lc.contains("san francisco") {
+                    Some("06075")
+                } else if county_lc.contains("alameda") {
+                    Some("06001")
+                } else if county_lc.contains("contra costa") {
+                    Some("06013")
+                } else if county_lc.contains("san mateo") {
+                    Some("06081")
+                } else if county_lc.contains("marin") {
+                    Some("06041")
+                } else if county_lc.contains("orange") {
+                    Some("06059")
+                } else if county_lc.contains("san diego") {
+                    Some("06073")
+                } else if county_lc.contains("riverside") {
+                    Some("06065")
+                } else if county_lc.contains("san bernardino") {
+                    Some("06071")
+                } else if county_lc.contains("ventura") {
+                    Some("06111")
+                } else if county_lc.contains("sacramento") {
+                    Some("06067")
+                } else {
+                    None
+                }
+            } else if st == "FL" && county_lc.contains("miami-dade") {
+                Some("12086")
+            } else if st == "FL" && county_lc.contains("broward") {
+                Some("12011")
             } else {
                 None
-            }
-        } else if st == "FL" && county_lc.contains("miami-dade") {
-            Some("12086")
-        } else if st == "FL" && county_lc.contains("broward") {
-            Some("12011")
-        } else {
-            None
-        };
+            };
         if let Some(ifips) = inferred_fips {
             if let Some(rule) = WHO_PAYS_TABLE.iter().find(|r| r.county_fips == Some(ifips)) {
                 return rule;
@@ -1247,7 +1271,10 @@ pub fn estimate_transfer_tax_schedule(
             } else {
                 "California baseline documentary transfer tax is $1.10 per $1,000 (0.11%), customarily seller-paid in most counties (check charter city conveyance taxes).".into()
             },
-            breakdown: vec![format!("County Doc Transfer Tax @ 0.11%: ${}", county_tax.round() as i64)],
+            breakdown: vec![format!(
+                "County Doc Transfer Tax @ 0.11%: ${}",
+                county_tax.round() as i64
+            )],
         };
     }
 
@@ -1259,7 +1286,11 @@ pub fn estimate_transfer_tax_schedule(
             || city_lc.contains("bronx")
             || city_lc.contains("staten")
             || matches!(fips, "36005" | "36047" | "36061" | "36081" | "36085");
-        let nys_rate = if is_nyc && p >= 3_000_000.0 { 0.0065 } else { 0.0040 };
+        let nys_rate = if is_nyc && p >= 3_000_000.0 {
+            0.0065
+        } else {
+            0.0040
+        };
         let nys_transfer = p * nys_rate;
         let mansion_rate = if p >= 1_000_000.0 {
             if !is_nyc || p < 2_000_000.0 {
@@ -1289,7 +1320,11 @@ pub fn estimate_transfer_tax_schedule(
             0.0
         };
         let mrt_rate = if is_nyc {
-            if base_loan_for_mrt >= 500_000.0 { 0.01925 } else { 0.0180 }
+            if base_loan_for_mrt >= 500_000.0 {
+                0.01925
+            } else {
+                0.0180
+            }
         } else {
             0.0075
         };
@@ -1325,11 +1360,12 @@ pub fn estimate_transfer_tax_schedule(
             let b4 = (p - 3_025_000.0).max(0.0) * 0.0300;
             b1 + b2 + b3 + b4
         };
-        let local_rate = if city_lc.contains("seattle") || county_lc.contains("king") || fips == "53033" {
-            0.0050
-        } else {
-            0.0025
-        };
+        let local_rate =
+            if city_lc.contains("seattle") || county_lc.contains("king") || fips == "53033" {
+                0.0050
+            } else {
+                0.0025
+            };
         let local_reet = p * local_rate;
         let total = state_reet + local_reet;
         return TransferTaxEstimate {
@@ -1396,7 +1432,11 @@ pub fn estimate_transfer_tax_schedule(
     }
 
     if st_ref == "FL" {
-        let deed_rate = if county_lc.contains("miami") || fips == "12086" { 0.0060 } else { 0.0070 };
+        let deed_rate = if county_lc.contains("miami") || fips == "12086" {
+            0.0060
+        } else {
+            0.0070
+        };
         let deed_stamps = p * deed_rate;
         let note_stamps = base_loan_for_mrt * 0.0035;
         let intang = base_loan_for_mrt * 0.0020;
@@ -1477,7 +1517,10 @@ pub fn estimate_transfer_tax_schedule(
             } else {
                 "Illinois baseline state + county transfer tax is $1.50/$1,000 (0.15%, seller-paid); check municipal home-rule transfer stamps.".into()
             },
-            breakdown: vec![format!("IL Transfer Stamps Total: ${}", total.round() as i64)],
+            breakdown: vec![format!(
+                "IL Transfer Stamps Total: ${}",
+                total.round() as i64
+            )],
         };
     }
 
@@ -1518,7 +1561,8 @@ pub fn estimate_transfer_tax_schedule(
         effective_rate_pct: round_n(base_rate * 100.0, 3),
         is_high_transfer_tax: base_rate >= 0.010,
         payer_custom_note: if base_rate == 0.0 {
-            "No state documentary/real estate transfer tax (nominal deed recording fees only).".into()
+            "No state documentary/real estate transfer tax (nominal deed recording fees only)."
+                .into()
         } else {
             "Estimated statutory baseline rate; confirm county/municipal transfer stamps and split custom with escrow/title.".into()
         },
@@ -1528,4 +1572,342 @@ pub fn estimate_transfer_tax_schedule(
             total.round() as i64
         )],
     }
+}
+
+// =================================================================================================
+// 6. Database-First Shared Datasets (`tax_rate_area`, `transfer_tax_table`, `insurance_benchmark`)
+// =================================================================================================
+
+pub const TAX_RATE_AREA_TTL_SECS: u64 = 30 * 86_400;
+pub const TRANSFER_TAX_TABLE_TTL_SECS: u64 = 90 * 86_400;
+pub const INSURANCE_BENCHMARK_TTL_SECS: u64 = 30 * 86_400;
+
+#[derive(Debug, Clone, Default)]
+pub struct RatesAndCostsPersistInput {
+    pub state: String,
+    pub county: String,
+    pub county_fips: String,
+    pub city: String,
+    pub zip: String,
+    pub purchase_price: f64,
+    pub effective_property_tax_rate: Option<f64>,
+    pub tra_code: Option<String>,
+    pub has_special_tax_district: bool,
+    pub special_tax_district_label: Option<String>,
+    pub point_of_sale_mandates: Vec<String>,
+    pub annual_insurance_usd: Option<f64>,
+    pub flood_base_annual_usd: Option<i64>,
+    pub earthquake_base_annual_usd: Option<i64>,
+    pub carrier_market_status: Option<String>,
+}
+
+fn county_scope_key(state: &str, county_fips: &str) -> Option<String> {
+    let fips = county_fips.trim();
+    if !fips.is_empty() {
+        return Some(fips.to_string());
+    }
+    let st = state.trim().to_ascii_uppercase();
+    if !st.is_empty() {
+        return Some(format!("state:{st}"));
+    }
+    None
+}
+
+fn city_params_key(city: &str) -> String {
+    let slug = city.trim().to_ascii_lowercase();
+    if slug.is_empty() {
+        "county_default".to_string()
+    } else {
+        slug
+    }
+}
+
+fn zip_params_key(zip: &str) -> String {
+    let z = zip.trim();
+    if z.is_empty() {
+        "county_default".to_string()
+    } else {
+        format!("zip:{z}")
+    }
+}
+
+pub fn build_tax_rate_area_proto(input: &RatesAndCostsPersistInput) -> TaxRateAreaProto {
+    let st = input.state.trim().to_ascii_uppercase();
+    let eff = input
+        .effective_property_tax_rate
+        .filter(|r| r.is_finite() && *r > 0.0)
+        .unwrap_or_else(|| state_effective_property_tax_rate(&st));
+    let base_ad_valorem_pct = if st == "CA" {
+        round_n(CA_PROP13_CONSTITUTIONAL_BASE_RATE * 100.0, 3)
+    } else {
+        round_n(eff * 100.0, 3)
+    };
+    let homestead = match st.as_str() {
+        "CA" => Some("Prop 13 base $7,000 homeowners exemption ($70/yr)".to_string()),
+        "FL" => Some("FL Homestead Exemption up to $50,000 + Save Our Homes 3% cap".to_string()),
+        "TX" => Some("TX $100,000 School District Homestead Exemption".to_string()),
+        _ => None,
+    };
+    let source_url = if st == "CA" {
+        "https://www.boe.ca.gov/proptaxes/taxrateareas.htm"
+    } else {
+        "https://www.census.gov/programs-surveys/gov-finance.html"
+    };
+    TaxRateAreaProto {
+        state: st,
+        county_fips: input.county_fips.trim().to_string(),
+        city: (!input.city.trim().is_empty()).then(|| input.city.trim().to_string()),
+        tra_code: input
+            .tra_code
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(String::from),
+        base_ad_valorem_pct,
+        effective_property_tax_rate: round_n(eff, 5),
+        has_special_tax_district: input.has_special_tax_district,
+        special_tax_district_label: input.special_tax_district_label.clone(),
+        homestead_exemption_summary: homestead,
+        point_of_sale_mandates: input.point_of_sale_mandates.clone(),
+        source_url: source_url.to_string(),
+        fetched_at_rfc3339: now_iso(),
+    }
+}
+
+pub fn build_transfer_tax_table_proto(input: &RatesAndCostsPersistInput) -> TransferTaxTableProto {
+    let st = input.state.trim().to_ascii_uppercase();
+    let price = if input.purchase_price.is_finite() && input.purchase_price > 10_000.0 {
+        input.purchase_price
+    } else {
+        1_000_000.0
+    };
+    let tt = estimate_transfer_tax_schedule(
+        &st,
+        &input.county,
+        &input.county_fips,
+        &input.city,
+        price,
+        price * 0.80,
+    );
+    let (state_pct, county_pct, city_pct) = if st == "CA" {
+        let county = 0.11;
+        let city = (tt.effective_rate_pct - county).max(0.0);
+        (0.0, county, round_n(city, 3))
+    } else {
+        (tt.effective_rate_pct, 0.0, 0.0)
+    };
+    let source_url = match st.as_str() {
+        "CA" => "https://www.boe.ca.gov/proptaxes/proptax.htm",
+        "NY" => "https://www.tax.ny.gov/pit/property/transfer/",
+        "WA" => "https://dor.wa.gov/taxes-rates/other-taxes/real-estate-excise-tax",
+        _ => "https://www.ncsl.org/fiscal/real-estate-transfer-taxes",
+    };
+    TransferTaxTableProto {
+        state: st,
+        county_fips: (!input.county_fips.trim().is_empty())
+            .then(|| input.county_fips.trim().to_string()),
+        city: (!input.city.trim().is_empty()).then(|| input.city.trim().to_string()),
+        state_transfer_tax_pct: state_pct,
+        county_transfer_tax_pct: county_pct,
+        city_transfer_tax_pct: city_pct,
+        custom_payer_split: tt.payer_custom_note,
+        source_url: source_url.to_string(),
+        fetched_at_rfc3339: now_iso(),
+    }
+}
+
+pub fn build_insurance_benchmark_proto(
+    input: &RatesAndCostsPersistInput,
+) -> InsuranceBenchmarkProto {
+    let st = input.state.trim().to_ascii_uppercase();
+    let fips_opt =
+        (!input.county_fips.trim().is_empty()).then(|| input.county_fips.trim().to_string());
+    let geo_key = county_scope_key(&st, &input.county_fips).unwrap_or_else(|| "US".to_string());
+    let price = if input.purchase_price.is_finite() && input.purchase_price > 10_000.0 {
+        input.purchase_price
+    } else {
+        1_000_000.0
+    };
+    let annual = input
+        .annual_insurance_usd
+        .filter(|x| x.is_finite() && *x > 0.0)
+        .unwrap_or_else(|| {
+            estimate_baseline_annual_insurance(price, None, &st, fips_opt.as_deref())
+        });
+    let pct = if price > 0.0 && input.annual_insurance_usd.is_some() {
+        round_n(annual / price, 5)
+    } else {
+        state_effective_insurance_pct_of_price(&st)
+    };
+    let carrier_status = input.carrier_market_status.clone().or_else(|| {
+        if st == "CA" {
+            Some(
+                "Admitted carriers selective in WUI/coastal ZIPs; CA FAIR Plan available as wrap"
+                    .to_string(),
+            )
+        } else if fips_opt
+            .as_deref()
+            .is_some_and(|f| TIER1_COASTAL_WIND_FIPS.contains(f))
+        {
+            Some("Tier-1 coastal wind pool / Citizens market exposure".to_string())
+        } else {
+            Some("Standard admitted HO-3 market".to_string())
+        }
+    });
+    let source_url = if st == "CA" {
+        "https://www.insurance.ca.gov/01-consumers/105-type/5-residential/"
+    } else {
+        "https://content.naic.org/cipr-topics/homeowners-insurance"
+    };
+    InsuranceBenchmarkProto {
+        geo_key,
+        state: st,
+        county_fips: fips_opt,
+        zip: (!input.zip.trim().is_empty()).then(|| input.zip.trim().to_string()),
+        effective_pct_of_value: pct,
+        median_annual_premium_usd: Some(annual.round() as i64),
+        flood_base_annual_usd: input.flood_base_annual_usd,
+        earthquake_base_annual_usd: input.earthquake_base_annual_usd,
+        carrier_market_status: carrier_status,
+        source_name: "NAIC / State DOI & FAIR Plan Homeowners Benchmark".to_string(),
+        source_url: source_url.to_string(),
+        fetched_at_rfc3339: now_iso(),
+    }
+}
+
+pub async fn persist_rates_and_tax_datasets(
+    db: &DbStore,
+    input: &RatesAndCostsPersistInput,
+) -> Result<()> {
+    let Some(scope_key) = county_scope_key(&input.state, &input.county_fips) else {
+        return Ok(());
+    };
+    let geo = GeoIndexColumns {
+        zip: (!input.zip.trim().is_empty()).then(|| input.zip.trim().to_string()),
+        county: (!input.county_fips.trim().is_empty())
+            .then(|| input.county_fips.trim().to_string())
+            .or_else(|| (!input.county.trim().is_empty()).then(|| input.county.trim().to_string())),
+        state: (!input.state.trim().is_empty()).then(|| input.state.trim().to_ascii_uppercase()),
+        ..Default::default()
+    };
+    let city_param = city_params_key(&input.city);
+    let zip_param = zip_params_key(&input.zip);
+
+    let tra = build_tax_rate_area_proto(input);
+    let ttax = build_transfer_tax_table_proto(input);
+    let ins = build_insurance_benchmark_proto(input);
+
+    let tra_json = serde_json::to_string(&tra).ok();
+    let ttax_json = serde_json::to_string(&ttax).ok();
+    let ins_json = serde_json::to_string(&ins).ok();
+
+    put_shared_dataset_proto(
+        None,
+        db,
+        dataset_ids::TAX_RATE_AREA,
+        ShareScope::County,
+        &scope_key,
+        &city_param,
+        geo.clone(),
+        &tra,
+        tra_json,
+        None,
+        None,
+        TAX_RATE_AREA_TTL_SECS,
+    )
+    .await?;
+    put_shared_dataset_proto(
+        None,
+        db,
+        dataset_ids::TRANSFER_TAX_TABLE,
+        ShareScope::County,
+        &scope_key,
+        &city_param,
+        geo.clone(),
+        &ttax,
+        ttax_json,
+        None,
+        None,
+        TRANSFER_TAX_TABLE_TTL_SECS,
+    )
+    .await?;
+    put_shared_dataset_proto(
+        None,
+        db,
+        dataset_ids::INSURANCE_BENCHMARK,
+        ShareScope::County,
+        &scope_key,
+        &zip_param,
+        geo,
+        &ins,
+        ins_json,
+        None,
+        None,
+        INSURANCE_BENCHMARK_TTL_SECS,
+    )
+    .await?;
+    Ok(())
+}
+
+pub async fn load_tax_rate_area_shared(
+    db: &DbStore,
+    state: &str,
+    county_fips: &str,
+    city: &str,
+) -> Result<Option<TaxRateAreaProto>> {
+    let Some(scope_key) = county_scope_key(state, county_fips) else {
+        return Ok(None);
+    };
+    let hit = get_shared_dataset_proto::<TaxRateAreaProto>(
+        None,
+        db,
+        dataset_ids::TAX_RATE_AREA,
+        ShareScope::County,
+        &scope_key,
+        &city_params_key(city),
+    )
+    .await?;
+    Ok(hit.map(|(_, p)| p))
+}
+
+pub async fn load_transfer_tax_table_shared(
+    db: &DbStore,
+    state: &str,
+    county_fips: &str,
+    city: &str,
+) -> Result<Option<TransferTaxTableProto>> {
+    let Some(scope_key) = county_scope_key(state, county_fips) else {
+        return Ok(None);
+    };
+    let hit = get_shared_dataset_proto::<TransferTaxTableProto>(
+        None,
+        db,
+        dataset_ids::TRANSFER_TAX_TABLE,
+        ShareScope::County,
+        &scope_key,
+        &city_params_key(city),
+    )
+    .await?;
+    Ok(hit.map(|(_, p)| p))
+}
+
+pub async fn load_insurance_benchmark_shared(
+    db: &DbStore,
+    state: &str,
+    county_fips: &str,
+    zip: &str,
+) -> Result<Option<InsuranceBenchmarkProto>> {
+    let Some(scope_key) = county_scope_key(state, county_fips) else {
+        return Ok(None);
+    };
+    let hit = get_shared_dataset_proto::<InsuranceBenchmarkProto>(
+        None,
+        db,
+        dataset_ids::INSURANCE_BENCHMARK,
+        ShareScope::County,
+        &scope_key,
+        &zip_params_key(zip),
+    )
+    .await?;
+    Ok(hit.map(|(_, p)| p))
 }

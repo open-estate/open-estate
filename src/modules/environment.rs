@@ -13,11 +13,85 @@ use std::collections::{HashMap, HashSet};
 use std::io::Read;
 use url::Url;
 
+use crate::db::shared_cache_store::{
+    compute_sha256_hex, get_shared_blob_by_tile_key, put_shared_blob, GeoIndexColumns,
+    PutSharedBlobInput,
+};
+use crate::db::DbStore;
+use crate::extensions::shared_cache::{
+    dataset_ids, decode_geohash_bbox, decode_geohash_center, encode_geohash,
+    get_shared_dataset_proto, put_shared_dataset_proto,
+    shared_v1::{AirQualityCellProto, GeoBoundingBoxProto, NoiseTileProto, TractIndicatorsProto},
+    ShareScope, SharedExtensionCache,
+};
+use crate::extensions::ExtensionHub;
 use crate::shared::{
     arcgis_representative_point, arcgis_to_geojson_geometry, bearing_deg, compass16, haversine_m,
-    haversine_mi, miles_to_meters, nearest_on_polyline, point_in_ring, round_n, EnvConfig,
+    haversine_mi, miles_to_meters, nearest_on_polyline, now_iso, point_in_ring, round_n, EnvConfig,
     HttpClient, ModuleOutput, SourceItem, MILE_M,
 };
+
+const TRACT_INDICATORS_TTL_SECS: u64 = 90 * 86_400;
+const NOISE_TILE_TTL_SECS: u64 = 180 * 86_400;
+const AIR_QUALITY_CELL_TTL_SECS: u64 = 86_400;
+
+fn env_digits_only(raw: &str) -> String {
+    raw.chars().filter(|c| c.is_ascii_digit()).collect()
+}
+
+fn env_geo_str(geo: &Value, key: &str) -> Option<String> {
+    geo.get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+fn env_tract11(geo: &Value) -> Option<String> {
+    for k in ["tractGeoid", "censusTract", "tract"] {
+        if let Some(s) = env_geo_str(geo, k) {
+            let d = env_digits_only(&s);
+            if d.len() == 11 {
+                return Some(d);
+            }
+            if k == "tract" && d.len() == 6 {
+                let cf = env_digits_only(env_geo_str(geo, "countyFips").as_deref().unwrap_or(""));
+                if cf.len() == 5 {
+                    return Some(format!("{cf}{d}"));
+                }
+            }
+        }
+    }
+    None
+}
+
+fn env_block_group12(geo: &Value) -> Option<String> {
+    for k in ["blockGroup", "censusBlockGroup", "blockGroupGeoid"] {
+        if let Some(s) = env_geo_str(geo, k) {
+            let d = env_digits_only(&s);
+            if d.len() == 12 {
+                return Some(d);
+            }
+        }
+    }
+    None
+}
+
+fn env_geo_index_cols(lat: f64, lon: f64, geo: &Value, tract: Option<String>, bbox: Option<(f64, f64, f64, f64)>) -> GeoIndexColumns {
+    GeoIndexColumns {
+        geohash5: encode_geohash(lat, lon, 5),
+        geohash6: encode_geohash(lat, lon, 6),
+        geohash7: encode_geohash(lat, lon, 7),
+        tract,
+        zip: env_geo_str(geo, "zip").or_else(|| env_geo_str(geo, "postalCode")),
+        county: env_geo_str(geo, "county"),
+        state: env_geo_str(geo, "state"),
+        bbox_south: bbox.map(|(s, _, _, _)| s),
+        bbox_west: bbox.map(|(_, w, _, _)| w),
+        bbox_north: bbox.map(|(_, _, n, _)| n),
+        bbox_east: bbox.map(|(_, _, _, e)| e),
+    }
+}
 
 const EPA_SERVICES: &str = "https://services.arcgis.com/cJ9YHowT8TU7DUyn/ArcGIS/rest/services";
 const EPA_FRS_MAPSERVER: &str =
@@ -790,6 +864,91 @@ fn pct_val(v: Option<&Value>) -> Option<f64> {
     val_f64(v).filter(|&x| x >= 0.0).map(|x| round_n(x, 1))
 }
 
+async fn fetch_calenviroscreen_with_db(
+    http: &HttpClient,
+    db: Option<&DbStore>,
+    lat: f64,
+    lon: f64,
+    geo: &Value,
+) -> Result<Option<Value>> {
+    let hint_tract = env_tract11(geo);
+    if !http.is_bypassing_cache_reads() {
+        if let (Some(db), Some(ref tract)) = (db, &hint_tract) {
+            if let Ok(Some((row, _proto))) = get_shared_dataset_proto::<TractIndicatorsProto>(
+                Some(SharedExtensionCache::global()),
+                db,
+                dataset_ids::TRACT_INDICATORS,
+                ShareScope::CensusTract,
+                tract,
+                "ces4",
+            )
+            .await
+            {
+                if let Some(val) = row
+                    .payload_json
+                    .as_deref()
+                    .and_then(|s| serde_json::from_str::<Value>(s).ok())
+                    .filter(|v| v.is_object())
+                {
+                    return Ok(Some(val));
+                }
+            }
+        }
+    }
+
+    let res = fetch_calenviroscreen(http, lat, lon).await?;
+    if let (Some(db), Some(ref val)) = (db, &res) {
+        let tract_key = val
+            .get("tract")
+            .and_then(Value::as_str)
+            .map(env_digits_only)
+            .filter(|d| d.len() == 11)
+            .or(hint_tract);
+        if let Some(tract) = tract_key {
+            let proto = TractIndicatorsProto {
+                tract_geoid: tract.clone(),
+                state_fips: tract.get(..2).unwrap_or("").to_string(),
+                county_fips: tract.get(..5).unwrap_or("").to_string(),
+                calenviroscreen_percentile: val_f64(val.get("overallPercentile")),
+                calenviroscreen_pollution_percentile: val_f64(
+                    val.get("pollutionBurdenPercentile"),
+                ),
+                vintage: "CalEnviroScreen 4.0".to_string(),
+                fetched_at_rfc3339: now_iso(),
+                ..Default::default()
+            };
+            let geo_cols = env_geo_index_cols(lat, lon, geo, Some(tract.clone()), None);
+            let provenance_json = serde_json::to_string(&json!({
+                "dataset": dataset_ids::TRACT_INDICATORS,
+                "scope": "census_tract",
+                "scopeKey": tract,
+                "sourceName": "OEHHA CalEnviroScreen 4.0",
+                "sourceUrl": CES_URL,
+            }))
+            .ok();
+            if let Err(err) = put_shared_dataset_proto(
+                Some(SharedExtensionCache::global()),
+                db,
+                dataset_ids::TRACT_INDICATORS,
+                ShareScope::CensusTract,
+                &tract,
+                "ces4",
+                geo_cols,
+                &proto,
+                serde_json::to_string(val).ok(),
+                provenance_json,
+                None,
+                TRACT_INDICATORS_TTL_SECS,
+            )
+            .await
+            {
+                tracing::warn!(tract = %tract, error = %err, "environment: failed to persist TRACT_INDICATORS (ces4)");
+            }
+        }
+    }
+    Ok(res)
+}
+
 async fn fetch_calenviroscreen(http: &HttpClient, lat: f64, lon: f64) -> Result<Option<Value>> {
     let mut fields = vec!["tract", "TractTXT", "CIscore", "CIscoreP", "PollutionScore", "PollutionP"]
         .into_iter()
@@ -825,6 +984,99 @@ async fn fetch_calenviroscreen(http: &HttpClient, lat: f64, lon: f64) -> Result<
         "indicators": indicators,
         "note": "Statewide percentiles among ~8,000 California census tracts (higher = more burdened). The overall score also includes population health/socioeconomic factors, which are not itemized here.",
     })))
+}
+
+async fn fetch_ejscreen_with_db(
+    http: &HttpClient,
+    db: Option<&DbStore>,
+    lat: f64,
+    lon: f64,
+    geo: &Value,
+) -> Result<Option<Value>> {
+    let hint_bg = env_block_group12(geo);
+    if !http.is_bypassing_cache_reads() {
+        if let (Some(db), Some(ref bg)) = (db, &hint_bg) {
+            if let Ok(Some((row, _proto))) = get_shared_dataset_proto::<TractIndicatorsProto>(
+                Some(SharedExtensionCache::global()),
+                db,
+                dataset_ids::TRACT_INDICATORS,
+                ShareScope::CensusBlockGroup,
+                bg,
+                "ejscreen23",
+            )
+            .await
+            {
+                if let Some(val) = row
+                    .payload_json
+                    .as_deref()
+                    .and_then(|s| serde_json::from_str::<Value>(s).ok())
+                    .filter(|v| v.is_object())
+                {
+                    return Ok(Some(val));
+                }
+            }
+        }
+    }
+
+    let res = fetch_ejscreen(http, lat, lon).await?;
+    if let (Some(db), Some(ref val)) = (db, &res) {
+        let bg_key = val
+            .get("blockGroup")
+            .and_then(Value::as_str)
+            .map(env_digits_only)
+            .filter(|d| d.len() == 12)
+            .or(hint_bg);
+        if let Some(bg) = bg_key {
+            let pct_by_key = |target_key: &str| -> Option<f64> {
+                val.get("nationalPercentiles")
+                    .and_then(Value::as_array)
+                    .and_then(|arr| {
+                        arr.iter()
+                            .find(|item| item.get("key").and_then(Value::as_str) == Some(target_key))
+                    })
+                    .and_then(|item| val_f64(item.get("percentile")))
+            };
+            let tract_key = bg.get(..11).map(str::to_string).or_else(|| env_tract11(geo));
+            let proto = TractIndicatorsProto {
+                tract_geoid: bg.clone(),
+                state_fips: bg.get(..2).unwrap_or("").to_string(),
+                county_fips: bg.get(..5).unwrap_or("").to_string(),
+                ejscreen_pm25_percentile: pct_by_key("PM25"),
+                ejscreen_traffic_percentile: pct_by_key("PTRAF"),
+                vintage: "EPA EJScreen 2.3".to_string(),
+                fetched_at_rfc3339: now_iso(),
+                ..Default::default()
+            };
+            let geo_cols = env_geo_index_cols(lat, lon, geo, tract_key, None);
+            let provenance_json = serde_json::to_string(&json!({
+                "dataset": dataset_ids::TRACT_INDICATORS,
+                "scope": "census_block_group",
+                "scopeKey": bg,
+                "sourceName": "EPA EJScreen 2.3",
+                "sourceUrl": EJSCREEN_URL,
+            }))
+            .ok();
+            if let Err(err) = put_shared_dataset_proto(
+                Some(SharedExtensionCache::global()),
+                db,
+                dataset_ids::TRACT_INDICATORS,
+                ShareScope::CensusBlockGroup,
+                &bg,
+                "ejscreen23",
+                geo_cols,
+                &proto,
+                serde_json::to_string(val).ok(),
+                provenance_json,
+                None,
+                TRACT_INDICATORS_TTL_SECS,
+            )
+            .await
+            {
+                tracing::warn!(block_group = %bg, error = %err, "environment: failed to persist TRACT_INDICATORS (ejscreen23)");
+            }
+        }
+    }
+    Ok(res)
 }
 
 async fn fetch_ejscreen(http: &HttpClient, lat: f64, lon: f64) -> Result<Option<Value>> {
@@ -1002,6 +1254,138 @@ pub fn compute_air_stats(raw: &Value, airnow: Option<Vec<Value>>) -> Result<Valu
         }
     }
     Ok(out)
+}
+
+async fn fetch_air_quality_with_db(
+    http: &HttpClient,
+    env: &EnvConfig,
+    db: Option<&DbStore>,
+    lat: f64,
+    lon: f64,
+    geo: &Value,
+) -> (Option<Value>, Vec<SourceItem>, Vec<String>) {
+    let airnow_key_present = !env.get("AIRNOW_API_KEY").unwrap_or("").trim().is_empty();
+    let params_hash = if airnow_key_present {
+        "air_cams_airnow"
+    } else {
+        "air_cams"
+    };
+    let gh5 = encode_geohash(lat, lon, 5);
+    if !http.is_bypassing_cache_reads() {
+        if let (Some(db), Some(ref gh5)) = (db, &gh5) {
+            if let Ok(Some((row, _proto))) = get_shared_dataset_proto::<AirQualityCellProto>(
+                Some(SharedExtensionCache::global()),
+                db,
+                dataset_ids::AIR_QUALITY_CELL,
+                ShareScope::Geohash5,
+                gh5,
+                params_hash,
+            )
+            .await
+            {
+                if let Some(payload) = row
+                    .payload_json
+                    .as_deref()
+                    .and_then(|s| serde_json::from_str::<Value>(s).ok())
+                {
+                    let air = payload.get("air").cloned().filter(|v| !v.is_null());
+                    let sources: Vec<SourceItem> = payload
+                        .get("sources")
+                        .and_then(Value::as_array)
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|s| {
+                                    Some(SourceItem::new(
+                                        s.get("name")?.as_str()?,
+                                        s.get("url")?.as_str()?,
+                                    ))
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    let warns: Vec<String> = payload
+                        .get("warnings")
+                        .and_then(Value::as_array)
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(Value::as_str)
+                                .map(str::to_string)
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    if air.is_some() {
+                        return (air, sources, warns);
+                    }
+                }
+            }
+        }
+    }
+
+    let (q_lat, q_lon) = if db.is_some() && !http.is_offline_external_blocked() {
+        gh5.as_deref()
+            .and_then(decode_geohash_center)
+            .unwrap_or((lat, lon))
+    } else {
+        (lat, lon)
+    };
+    let (air_opt, sources, warns) = fetch_air_quality(http, env, q_lat, q_lon).await;
+    if let (Some(db), Some(ref gh5), Some(ref air)) = (db, &gh5, &air_opt) {
+        let bbox = decode_geohash_bbox(gh5);
+        let current_us_aqi = air
+            .pointer("/airnow/aqi")
+            .and_then(|v| val_f64(Some(v)))
+            .or_else(|| air.pointer("/usAqi/meanDailyMax").and_then(|v| val_f64(Some(v))))
+            .map(|v| v.round() as i32);
+        let unhealthy_days_30d = air
+            .pointer("/usAqi/unhealthyDays")
+            .and_then(|v| val_f64(Some(v)))
+            .map(|v| v.round() as i32);
+        let proto = AirQualityCellProto {
+            grid_key: gh5.clone(),
+            center_lat: q_lat,
+            center_lon: q_lon,
+            current_us_aqi,
+            pm25_mean_30d_ug_m3: air.pointer("/pm25/mean").and_then(|v| val_f64(Some(v))),
+            pm10_mean_30d_ug_m3: air.pointer("/pm10/mean").and_then(|v| val_f64(Some(v))),
+            ozone_mean_30d: air.get("ozoneMeanUgM3").and_then(|v| val_f64(Some(v))),
+            unhealthy_days_30d,
+            source_url: OPEN_METEO_AQ_URL.to_string(),
+            fetched_at_rfc3339: now_iso(),
+        };
+        let payload_json = serde_json::to_string(&json!({
+            "air": air,
+            "sources": sources.iter().map(|s| json!({ "name": s.name, "url": s.url })).collect::<Vec<_>>(),
+            "warnings": warns,
+        }))
+        .ok();
+        let provenance_json = serde_json::to_string(&json!({
+            "dataset": dataset_ids::AIR_QUALITY_CELL,
+            "scope": "geohash5",
+            "scopeKey": gh5,
+            "sourceUrl": OPEN_METEO_AQ_URL,
+        }))
+        .ok();
+        let geo_cols = env_geo_index_cols(lat, lon, geo, env_tract11(geo), bbox);
+        if let Err(err) = put_shared_dataset_proto(
+            Some(SharedExtensionCache::global()),
+            db,
+            dataset_ids::AIR_QUALITY_CELL,
+            ShareScope::Geohash5,
+            gh5,
+            params_hash,
+            geo_cols,
+            &proto,
+            payload_json,
+            provenance_json,
+            None,
+            AIR_QUALITY_CELL_TTL_SECS,
+        )
+        .await
+        {
+            tracing::warn!(geohash5 = %gh5, error = %err, "environment: failed to persist AIR_QUALITY_CELL");
+        }
+    }
+    (air_opt, sources, warns)
 }
 
 async fn fetch_air_quality(http: &HttpClient, env: &EnvConfig, lat: f64, lon: f64) -> (Option<Value>, Vec<SourceItem>, Vec<String>) {
@@ -1769,6 +2153,20 @@ pub fn model_osm_noise_db(
 }
 
 async fn sample_bts_service(http: &HttpClient, service: &str, lat: f64, lon: f64, radius_m: f64) -> Result<(isize, isize, i64)> {
+    let (c0, max_c, m_per_px, _, _, _) =
+        sample_bts_service_inner(http, None, service, lat, lon, radius_m, &Value::Null).await?;
+    Ok((c0, max_c, m_per_px))
+}
+
+async fn sample_bts_service_inner(
+    http: &HttpClient,
+    db: Option<&DbStore>,
+    service: &str,
+    lat: f64,
+    lon: f64,
+    radius_m: f64,
+    geo: &Value,
+) -> Result<(isize, isize, i64, u32, u32, Option<String>)> {
     let z = 12u32;
     let n = 256.0 * (1u64 << z) as f64;
     let phi = lat.clamp(-85.05, 85.05).to_radians();
@@ -1777,6 +2175,7 @@ async fn sample_bts_service(http: &HttpClient, service: &str, lat: f64, lon: f64
     let m_per_px = (156543.03392 * lat.to_radians().cos()) / (1u64 << z) as f64;
     let r = (radius_m / m_per_px).ceil().max(1.0) as i64;
     let (px, py) = (wx.floor() as i64, wy.floor() as i64);
+    let center_tile = (px.div_euclid(256), py.div_euclid(256));
 
     let mut needed: Vec<(i64, i64)> = Vec::new();
     for dy in -r..=r {
@@ -1790,21 +2189,73 @@ async fn sample_bts_service(http: &HttpClient, service: &str, lat: f64, lon: f64
         }
     }
     let mut tiles: HashMap<(i64, i64), Option<DecodedPng>> = HashMap::new();
+    let mut center_blob_hash: Option<String> = None;
     for (tx, ty) in needed {
+        let tile_key = format!("{service}/{z}/{ty}/{tx}");
         let url = format!("{NOISE_BASE_URL}/{service}/MapServer/tile/{z}/{ty}/{tx}");
-        let resp = http
-            .scrape_get(&url)
-            .timeout_ms(8_500)
-            .header("Accept", "image/png,*/*")
-            .allow_status(404)
-            .max_bytes(4 * 1024 * 1024)
-            .send_buffered()
-            .await?;
-        if resp.status_code() == 404 {
-            tiles.insert((tx, ty), None);
-            continue;
+        let cached_blob = if !http.is_bypassing_cache_reads() {
+            if let Some(db) = db {
+                get_shared_blob_by_tile_key(db, None, dataset_ids::NOISE_TILE, &tile_key)
+                    .await
+                    .ok()
+                    .flatten()
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let (bytes, blob_hash) = if let Some((row, b)) = cached_blob {
+            (b, Some(row.content_hash))
+        } else {
+            let resp = http
+                .scrape_get(&url)
+                .timeout_ms(8_500)
+                .header("Accept", "image/png,*/*")
+                .allow_status(404)
+                .max_bytes(4 * 1024 * 1024)
+                .send_buffered()
+                .await?;
+            let (raw_bytes, media_type) = if resp.status_code() == 404 {
+                (b"BTS_NO_TILE".to_vec(), "application/octet-stream")
+            } else {
+                let b = resp.bytes().to_vec();
+                let mt = if b.len() >= 8 && &b[0..4] == b"\x89PNG" {
+                    "image/png"
+                } else {
+                    "application/octet-stream"
+                };
+                (b, mt)
+            };
+            let stored_hash = if let Some(db) = db {
+                match put_shared_blob(
+                    db,
+                    None,
+                    &PutSharedBlobInput {
+                        dataset_id: dataset_ids::NOISE_TILE.to_string(),
+                        media_type: media_type.to_string(),
+                        bytes: raw_bytes.clone(),
+                        tile_key: Some(tile_key.clone()),
+                        geo: env_geo_index_cols(lat, lon, geo, env_tract11(geo), None),
+                        source_url: Some(url.clone()),
+                    },
+                )
+                .await
+                {
+                    Ok(row) => Some(row.content_hash),
+                    Err(err) => {
+                        tracing::warn!(tile_key = %tile_key, error = %err, "environment: put_shared_blob NOISE_TILE failed");
+                        Some(compute_sha256_hex(&raw_bytes))
+                    }
+                }
+            } else {
+                None
+            };
+            (raw_bytes, stored_hash)
+        };
+        if (tx, ty) == center_tile {
+            center_blob_hash = blob_hash;
         }
-        let bytes = resp.bytes();
         let decoded = if bytes.len() >= 8 && &bytes[0..4] == b"\x89PNG" {
             Some(decode_png_rgba(&bytes)?)
         } else {
@@ -1829,10 +2280,39 @@ async fn sample_bts_service(http: &HttpClient, service: &str, lat: f64, lon: f64
             }
         }
     }
-    Ok((c0, max_c, m_per_px.round() as i64))
+    Ok((
+        c0,
+        max_c,
+        m_per_px.round() as i64,
+        center_tile.0.max(0) as u32,
+        center_tile.1.max(0) as u32,
+        center_blob_hash,
+    ))
+}
+
+async fn fetch_noise_with_db(
+    http: &HttpClient,
+    db: Option<&DbStore>,
+    lat: f64,
+    lon: f64,
+    state: &str,
+    geo: &Value,
+) -> (Value, Vec<SourceItem>, Vec<String>) {
+    fetch_noise_inner(http, db, lat, lon, state, geo).await
 }
 
 async fn fetch_noise(http: &HttpClient, lat: f64, lon: f64, state: &str) -> (Value, Vec<SourceItem>, Vec<String>) {
+    fetch_noise_inner(http, None, lat, lon, state, &Value::Null).await
+}
+
+async fn fetch_noise_inner(
+    http: &HttpClient,
+    db: Option<&DbStore>,
+    lat: f64,
+    lon: f64,
+    state: &str,
+    geo: &Value,
+) -> (Value, Vec<SourceItem>, Vec<String>) {
     let mut sources = Vec::new();
     let mut warnings = Vec::new();
     let region = match state {
@@ -1847,31 +2327,32 @@ async fn fetch_noise(http: &HttpClient, lat: f64, lon: f64, state: &str) -> (Val
     let svc_rail = format!("NTAD_Noise_2022_{region}_rail");
 
     let (r_all, r_road, r_av, r_rail) = tokio::join!(
-        sample_bts_service(http, &svc_all, lat, lon, 150.0),
-        sample_bts_service(http, &svc_road, lat, lon, 150.0),
-        sample_bts_service(http, &svc_av, lat, lon, 150.0),
+        sample_bts_service_inner(http, db, &svc_all, lat, lon, 150.0, geo),
+        sample_bts_service_inner(http, db, &svc_road, lat, lon, 150.0, geo),
+        sample_bts_service_inner(http, db, &svc_av, lat, lon, 150.0, geo),
         async {
             if region == "Hawaii" {
-                Ok((-1isize, -1isize, 30i64))
+                Ok((-1isize, -1isize, 30i64, 0u32, 0u32, None))
             } else {
-                sample_bts_service(http, &svc_rail, lat, lon, 150.0).await
+                sample_bts_service_inner(http, db, &svc_rail, lat, lon, 150.0, geo).await
             }
         }
     );
 
-    if let Ok((c_all, m_all, mpp)) = r_all {
+    if let Ok((c_all, m_all, mpp, tile_x, tile_y, blob_hash)) = r_all {
+        let source_url = format!("{NOISE_BASE_URL}/{svc_all}/MapServer");
         sources.push(SourceItem::new(
             "US DOT BTS — National Transportation Noise Map 2022",
-            format!("{NOISE_BASE_URL}/{svc_all}/MapServer"),
+            source_url.clone(),
         ));
         let (all_at, est_db) = class_to_json(c_all);
         let (all_mx, _) = class_to_json(m_all);
-        let (road_at, road_db) = r_road.as_ref().map(|&(c, _, _)| class_to_json(c)).unwrap_or_else(|_| class_to_json(-1));
-        let (road_mx, _) = r_road.ok().map(|(_, m, _)| class_to_json(m)).unwrap_or_else(|| class_to_json(-1));
-        let (av_at, av_db) = r_av.as_ref().map(|&(c, _, _)| class_to_json(c)).unwrap_or_else(|_| class_to_json(-1));
-        let (av_mx, _) = r_av.ok().map(|(_, m, _)| class_to_json(m)).unwrap_or_else(|| class_to_json(-1));
-        let (rail_at, rail_db) = r_rail.as_ref().map(|&(c, _, _)| class_to_json(c)).unwrap_or_else(|_| class_to_json(-1));
-        let (rail_mx, _) = r_rail.ok().map(|(_, m, _)| class_to_json(m)).unwrap_or_else(|| class_to_json(-1));
+        let (road_at, road_db) = r_road.as_ref().map(|&(c, _, _, _, _, _)| class_to_json(c)).unwrap_or_else(|_| class_to_json(-1));
+        let (road_mx, _) = r_road.ok().map(|(_, m, _, _, _, _)| class_to_json(m)).unwrap_or_else(|| class_to_json(-1));
+        let (av_at, av_db) = r_av.as_ref().map(|&(c, _, _, _, _, _)| class_to_json(c)).unwrap_or_else(|_| class_to_json(-1));
+        let (av_mx, _) = r_av.ok().map(|(_, m, _, _, _, _)| class_to_json(m)).unwrap_or_else(|| class_to_json(-1));
+        let (rail_at, rail_db) = r_rail.as_ref().map(|&(c, _, _, _, _, _)| class_to_json(c)).unwrap_or_else(|_| class_to_json(-1));
+        let (rail_mx, _) = r_rail.ok().map(|(_, m, _, _, _, _)| class_to_json(m)).unwrap_or_else(|| class_to_json(-1));
 
         let val = json!({
             "checked": true,
@@ -1890,6 +2371,53 @@ async fn fetch_noise(http: &HttpClient, lat: f64, lon: f64, state: &str) -> (Val
             "maxWithinRadius": { "all": all_mx, "road": road_mx, "aviation": av_mx, "rail": rail_mx },
             "note": "Modeled 24-h average transportation noise (LAeq,24h) from US DOT BTS 30 m grid; '<45 dB' means below mapped threshold.",
         });
+        if let (Some(db), Some(gh6)) = (db, encode_geohash(lat, lon, 6)) {
+            let bbox_tup = decode_geohash_bbox(&gh6);
+            let proto = NoiseTileProto {
+                tile_key: format!("{svc_all}/12/{tile_y}/{tile_x}"),
+                zoom: 12,
+                tile_x,
+                tile_y,
+                bbox: bbox_tup.map(|(south, west, north, east)| GeoBoundingBoxProto {
+                    south,
+                    west,
+                    north,
+                    east,
+                }),
+                mean_road_dba: Some(road_db),
+                mean_aviation_dba: Some(av_db),
+                mean_rail_dba: Some(rail_db),
+                blob_hash: blob_hash.clone(),
+                source_url: source_url.clone(),
+                fetched_at_rfc3339: now_iso(),
+            };
+            let geo_cols = env_geo_index_cols(lat, lon, geo, env_tract11(geo), bbox_tup);
+            let provenance_json = serde_json::to_string(&json!({
+                "dataset": dataset_ids::NOISE_TILE,
+                "scope": "geohash6",
+                "scopeKey": gh6,
+                "sourceUrl": source_url,
+            }))
+            .ok();
+            if let Err(err) = put_shared_dataset_proto(
+                Some(SharedExtensionCache::global()),
+                db,
+                dataset_ids::NOISE_TILE,
+                ShareScope::Geohash6,
+                &gh6,
+                "bts_2022_v1",
+                geo_cols,
+                &proto,
+                serde_json::to_string(&val).ok(),
+                provenance_json,
+                blob_hash,
+                NOISE_TILE_TTL_SECS,
+            )
+            .await
+            {
+                tracing::warn!(geohash6 = %gh6, error = %err, "environment: failed to persist NOISE_TILE metadata");
+            }
+        }
         return (val, sources, warnings);
     }
 
@@ -2221,6 +2749,18 @@ pub async fn run_environment(
     lon: f64,
     geo: &Value,
 ) -> Result<ModuleOutput> {
+    let hub_db = ExtensionHub::global().active_db();
+    run_environment_with_db(http, env, hub_db.as_ref(), lat, lon, geo).await
+}
+
+pub async fn run_environment_with_db(
+    http: &HttpClient,
+    env: &EnvConfig,
+    db: Option<&DbStore>,
+    lat: f64,
+    lon: f64,
+    geo: &Value,
+) -> Result<ModuleOutput> {
     if !lat.is_finite() || !lon.is_finite() || lat.abs() > 90.0 || lon.abs() > 180.0 {
         return Err(anyhow!("environment: lat/lon must be valid WGS84 coordinates"));
     }
@@ -2294,9 +2834,13 @@ pub async fn run_environment(
 
     let screening_fut = async {
         let ces_f = async {
-            if is_ca { Some(fetch_calenviroscreen(http, lat, lon).await) } else { None }
+            if is_ca {
+                Some(fetch_calenviroscreen_with_db(http, db, lat, lon, geo).await)
+            } else {
+                None
+            }
         };
-        tokio::join!(ces_f, fetch_ejscreen(http, lat, lon))
+        tokio::join!(ces_f, fetch_ejscreen_with_db(http, db, lat, lon, geo))
     };
 
     let (
@@ -2308,9 +2852,9 @@ pub async fn run_environment(
     ) = tokio::join!(
         Box::pin(sites_fut),
         Box::pin(screening_fut),
-        Box::pin(fetch_air_quality(http, env, lat, lon)),
+        Box::pin(fetch_air_quality_with_db(http, env, db, lat, lon, geo)),
         Box::pin(fetch_drinking_water(http, lat, lon, &state, city.as_deref())),
-        Box::pin(fetch_noise(http, lat, lon, &state)),
+        Box::pin(fetch_noise_with_db(http, db, lat, lon, &state, geo)),
     );
 
     let mut sources = Vec::new();

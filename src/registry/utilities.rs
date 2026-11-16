@@ -542,8 +542,6 @@ fn carrier_address_check_url(name: &str, fcc_fallback: &str) -> String {
     let low = name.to_ascii_lowercase();
     if low.contains("at&t") || low.contains("att") {
         "https://www.att.com/internet/fiber/".to_string()
-    } else if low.contains("sonic") {
-        "https://www.sonic.com/".to_string()
     } else if low.contains("google") {
         "https://fiber.google.com/".to_string()
     } else if low.contains("fios") || (low.contains("verizon") && !low.contains("5g")) {

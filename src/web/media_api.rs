@@ -9,6 +9,14 @@
 //! - Every cached or uploaded image is verified by magic bytes (`JPEG`, `PNG`, `WebP`, `AVIF`) and
 //!   written atomically via temporary file + rename.
 
+use crate::db::shared_cache_store::{
+    get_shared_blob, put_shared_blob, GeoIndexColumns, PutSharedBlobInput,
+};
+use crate::db::{DbBackend, DbStore};
+use crate::extensions::proto::shared_v1::{GeoBoundingBoxProto, ImageryLidarTileRefProto};
+use crate::extensions::shared_cache::{
+    dataset_ids, encode_geohash, get_shared_dataset_proto, put_shared_dataset_proto, ShareScope,
+};
 use crate::guardrails::{
     apply_security_headers, clean_untrusted_text, enforce_allowed_body_keys,
     enforce_json_depth_and_size, validate_slug_param, verify_same_origin, GuardrailError,
@@ -400,12 +408,12 @@ fn parse_satellite_export_params(raw_query: &str) -> Result<SatelliteExportParam
             "bbox" => bbox_raw = Some(v.into_owned()),
             "w" | "width" => {
                 if let Ok(n) = v.parse::<u32>() {
-                    width = n.clamp(64, 1600);
+                    width = n.clamp(64, 2048);
                 }
             }
             "h" | "height" => {
                 if let Ok(n) = v.parse::<u32>() {
-                    height = n.clamp(64, 1600);
+                    height = n.clamp(64, 2048);
                 }
             }
             "zoom" | "z" => {
@@ -463,10 +471,14 @@ fn parse_satellite_export_params(raw_query: &str) -> Result<SatelliteExportParam
     })
 }
 
+fn strip_internal_satellite_export_query(raw: &str) -> Option<&str> {
+    raw.strip_prefix("/api/media/satellite/export?")
+        .or_else(|| raw.strip_prefix("/api/satellite-export?"))
+}
+
 fn is_internal_satellite_export_path(raw_url: &str) -> Option<String> {
     let trimmed = raw_url.trim();
-    if !trimmed.starts_with("/api/media/satellite/export?")
-        || trimmed.len() > 512
+    if trimmed.len() > 512
         || trimmed.contains("..")
         || trimmed.contains("//")
         || trimmed.contains('\\')
@@ -475,7 +487,7 @@ fn is_internal_satellite_export_path(raw_url: &str) -> Option<String> {
     {
         return None;
     }
-    let query = trimmed.strip_prefix("/api/media/satellite/export?")?;
+    let query = strip_internal_satellite_export_query(trimmed)?;
     parse_satellite_export_params(query).ok()?;
     Some(trimmed.to_string())
 }
@@ -1921,8 +1933,15 @@ pub async fn handle_media_file_get(
     };
 
     // 2. Cache miss: fetch internal satellite proxy export or permitted remote URL outside mutex
-    let (bytes, fmt) = if let Some(sat_query) = remote_url.strip_prefix("/api/media/satellite/export?") {
-        match fetch_satellite_export_for_query(&state.env, sat_query).await {
+    let (bytes, fmt) = if let Some(sat_query) = strip_internal_satellite_export_query(&remote_url) {
+        match fetch_satellite_export_for_query(
+            &state.env,
+            Some(&state.db),
+            state.data_dir.as_deref(),
+            sat_query,
+        )
+        .await
+        {
             Ok((b, fmt, _hit)) => (b, fmt),
             Err(ge) => return guardrail_error_to_response(ge),
         }
@@ -2541,17 +2560,23 @@ fn non_empty_sat_key<'a>(env: &'a EnvConfig, keys: &[&str]) -> Option<&'a str> {
         .find_map(|k| env.get(k).map(str::trim).filter(|v| !v.is_empty()))
 }
 
-fn validated_loopback_test_url(env: &EnvConfig, env_key: &str) -> Option<String> {
-    if !allow_loopback_media_cache(env) {
-        return None;
-    }
-    let raw = env.get(env_key).map(str::trim).filter(|s| !s.is_empty())?;
-    let parsed = Url::parse(raw).ok()?;
-    let host = parsed.host_str()?.to_ascii_lowercase();
-    if host == "127.0.0.1" || host == "localhost" || host == "::1" || host == "[::1]" {
-        Some(raw.trim_end_matches('/').to_string())
-    } else {
-        None
+fn sat_key_fingerprint(env: &EnvConfig, kind: SatelliteProviderKind) -> String {
+    let raw = match kind {
+        SatelliteProviderKind::ArcGisCommercial => non_empty_sat_key(env, &["ARCGIS_API_KEY"]),
+        SatelliteProviderKind::MapboxCommercial => {
+            non_empty_sat_key(env, &["MAPBOX_ACCESS_TOKEN", "MAPBOX_API_KEY"])
+        }
+        SatelliteProviderKind::GoogleCommercial => non_empty_sat_key(env, &["GOOGLE_MAPS_API_KEY"]),
+        _ => None,
+    };
+    match raw {
+        Some(key) => {
+            let mut hasher = Sha256::new();
+            hasher.update(key.as_bytes());
+            let hex_digest = hex::encode(hasher.finalize());
+            hex_digest[..12].to_string()
+        }
+        None => "public".to_string(),
     }
 }
 
@@ -2614,7 +2639,11 @@ fn satellite_image_response(bytes: Bytes, fmt: ImageFormat, cache_hit: bool) -> 
     resp
 }
 
-async fn fetch_bounded_satellite_image(url: &str) -> Result<(Bytes, ImageFormat), GuardrailError> {
+async fn fetch_bounded_satellite_image(
+    env: &EnvConfig,
+    url: &str,
+) -> Result<(Bytes, ImageFormat), GuardrailError> {
+    crate::metering::add_external_call_with_env(Some(env), url);
     let resp = SAT_HTTP_CLIENT
         .get(url)
         .header(header::ACCEPT, "image/avif,image/webp,image/png,image/jpeg,*/*;q=0.5")
@@ -2659,6 +2688,7 @@ async fn fetch_bounded_satellite_image(url: &str) -> Result<(Bytes, ImageFormat)
             502,
         )
     })?;
+    crate::metering::add_bytes_downloaded(bytes.len() as u64);
     if bytes.is_empty() || bytes.len() > MAX_IMAGE_BYTES {
         return Err(GuardrailError::new(
             "MEDIA_INVALID_IMAGE_BYTES",
@@ -2684,11 +2714,10 @@ async fn fetch_google_tile_session(api_key: &str, env: &EnvConfig) -> Option<Str
         return Some(tok);
     }
 
-    let session_base = validated_loopback_test_url(env, "SATELLITE_TEST_GOOGLE_SESSION_URL")
-        .unwrap_or_else(|| GOOGLE_MAP_TILES_SESSION_URL.to_string());
-    let mut parsed = Url::parse(&session_base).ok()?;
+    let mut parsed = Url::parse(GOOGLE_MAP_TILES_SESSION_URL).ok()?;
     parsed.query_pairs_mut().append_pair("key", api_key);
 
+    crate::metering::add_external_call_with_env(Some(env), GOOGLE_MAP_TILES_SESSION_URL);
     let resp = SAT_HTTP_CLIENT
         .post(parsed)
         .json(&json!({
@@ -2722,29 +2751,6 @@ async fn build_tile_url_for_provider(
     y: u32,
     x: u32,
 ) -> Option<String> {
-    if let Some(test_base) = validated_loopback_test_url(env, "SATELLITE_TEST_TILE_BASE_URL") {
-        let mut url = Url::parse(&format!("{test_base}/{z}/{y}/{x}")).ok()?;
-        match kind {
-            SatelliteProviderKind::ArcGisCommercial => {
-                if let Some(k) = non_empty_sat_key(env, &["ARCGIS_API_KEY"]) {
-                    url.query_pairs_mut().append_pair("token", k);
-                }
-            }
-            SatelliteProviderKind::MapboxCommercial => {
-                if let Some(k) = non_empty_sat_key(env, &["MAPBOX_ACCESS_TOKEN", "MAPBOX_API_KEY"]) {
-                    url.query_pairs_mut().append_pair("access_token", k);
-                }
-            }
-            SatelliteProviderKind::GoogleCommercial => {
-                if let Some(k) = non_empty_sat_key(env, &["GOOGLE_MAPS_API_KEY"]) {
-                    url.query_pairs_mut().append_pair("key", k);
-                }
-            }
-            _ => {}
-        }
-        return Some(url.to_string());
-    }
-
     match kind {
         SatelliteProviderKind::ArcGisCommercial => {
             let key = non_empty_sat_key(env, &["ARCGIS_API_KEY"])?;
@@ -2793,7 +2799,7 @@ async fn fetch_satellite_tile_bytes(
     lon: f64,
 ) -> Result<(Bytes, ImageFormat), GuardrailError> {
     if let Some(primary_url) = build_tile_url_for_provider(env, resolved.provider, z, y, x).await {
-        if let Ok(pair) = fetch_bounded_satellite_image(&primary_url).await {
+        if let Ok(pair) = fetch_bounded_satellite_image(env, &primary_url).await {
             return Ok(pair);
         }
     }
@@ -2807,7 +2813,7 @@ async fn fetch_satellite_tile_bytes(
                 RegionalOrthoRegion::KingCountyWa => SatelliteProviderKind::KingCountyOrtho2023,
             };
             if let Some(reg_url) = build_tile_url_for_provider(env, regional_kind, z, y, x).await {
-                if let Ok(pair) = fetch_bounded_satellite_image(&reg_url).await {
+                if let Ok(pair) = fetch_bounded_satellite_image(env, &reg_url).await {
                     return Ok(pair);
                 }
             }
@@ -2824,7 +2830,7 @@ async fn fetch_satellite_tile_bytes(
         )
         .await
         {
-            return fetch_bounded_satellite_image(&usgs_url).await;
+            return fetch_bounded_satellite_image(env, &usgs_url).await;
         }
     }
 
@@ -2846,6 +2852,24 @@ fn regional_export_url_for_coords(lat: f64, lon: f64, params: &SatelliteExportPa
     ))
 }
 
+/// Scales `(width / 2, height / 2)` proportionally to fit inside `max_logical` so `@2x` / `scale=2`
+/// static map APIs preserve exact bbox aspect ratio without squishing wide crops like `1600x1080`.
+fn scaled_2x_static_dimensions(width: u32, height: u32, max_logical: u32) -> (u32, u32) {
+    let hw = (width / 2).max(64);
+    let hh = (height / 2).max(64);
+    let peak = hw.max(hh);
+    if peak <= max_logical {
+        return (hw, hh);
+    }
+    let sw = ((u64::from(hw) * u64::from(max_logical)) / u64::from(peak))
+        .max(64)
+        .min(u64::from(max_logical)) as u32;
+    let sh = ((u64::from(hh) * u64::from(max_logical)) / u64::from(peak))
+        .max(64)
+        .min(u64::from(max_logical)) as u32;
+    (sw, sh)
+}
+
 async fn try_commercial_export_candidates(
     env: &EnvConfig,
     kind: SatelliteProviderKind,
@@ -2853,31 +2877,6 @@ async fn try_commercial_export_candidates(
     lat: f64,
     lon: f64,
 ) -> Option<(Bytes, ImageFormat)> {
-    if let Some(test_export) = validated_loopback_test_url(env, "SATELLITE_TEST_EXPORT_BASE_URL") {
-        let mut u = Url::parse(&test_export).ok()?;
-        u.query_pairs_mut()
-            .append_pair(
-                "bbox",
-                &format!(
-                    "{:.6},{:.6},{:.6},{:.6}",
-                    params.lon1, params.lat1, params.lon2, params.lat2
-                ),
-            )
-            .append_pair("w", &params.width.to_string())
-            .append_pair("h", &params.height.to_string())
-            .append_pair("zoom", &params.zoom.to_string());
-        if let Some(k) = non_empty_sat_key(env, &["ARCGIS_API_KEY"]) {
-            u.query_pairs_mut().append_pair("token", k);
-        } else if let Some(k) = non_empty_sat_key(env, &["MAPBOX_ACCESS_TOKEN", "MAPBOX_API_KEY"]) {
-            u.query_pairs_mut().append_pair("access_token", k);
-        } else if let Some(k) = non_empty_sat_key(env, &["GOOGLE_MAPS_API_KEY"]) {
-            u.query_pairs_mut().append_pair("key", k);
-        }
-        if let Ok(pair) = fetch_bounded_satellite_image(u.as_str()).await {
-            return Some(pair);
-        }
-    }
-
     match kind {
         SatelliteProviderKind::ArcGisCommercial => {
             let key = non_empty_sat_key(env, &["ARCGIS_API_KEY"])?;
@@ -2901,7 +2900,7 @@ async fn try_commercial_export_candidates(
                     .append_pair("format", "jpg")
                     .append_pair("f", "image")
                     .append_pair("token", key);
-                if let Ok(pair) = fetch_bounded_satellite_image(u.as_str()).await {
+                if let Ok(pair) = fetch_bounded_satellite_image(env, u.as_str()).await {
                     return Some(pair);
                 }
             }
@@ -2909,8 +2908,7 @@ async fn try_commercial_export_candidates(
         }
         SatelliteProviderKind::MapboxCommercial => {
             let key = non_empty_sat_key(env, &["MAPBOX_ACCESS_TOKEN", "MAPBOX_API_KEY"])?;
-            let sw = (params.width / 2).clamp(64, 640);
-            let sh = (params.height / 2).clamp(64, 640);
+            let (sw, sh) = scaled_2x_static_dimensions(params.width, params.height, 640);
             let url_base = format!(
                 "{MAPBOX_SATELLITE_STATIC_BASE_URL}/[{:.6},{:.6},{:.6},{:.6}]/{}x{}@2x",
                 params.lon1, params.lat1, params.lon2, params.lat2, sw, sh
@@ -2920,12 +2918,11 @@ async fn try_commercial_export_candidates(
                 .append_pair("attribution", "false")
                 .append_pair("logo", "false")
                 .append_pair("access_token", key);
-            fetch_bounded_satellite_image(u.as_str()).await.ok()
+            fetch_bounded_satellite_image(env, u.as_str()).await.ok()
         }
         SatelliteProviderKind::GoogleCommercial => {
             let key = non_empty_sat_key(env, &["GOOGLE_MAPS_API_KEY"])?;
-            let sw = (params.width / 2).clamp(64, 640);
-            let sh = (params.height / 2).clamp(64, 640);
+            let (sw, sh) = scaled_2x_static_dimensions(params.width, params.height, 640);
             let z_fit = fit_mercator_zoom_for_bbox(params, sw);
             let mut u = Url::parse(GOOGLE_STATIC_MAPS_URL).ok()?;
             u.query_pairs_mut()
@@ -2936,27 +2933,221 @@ async fn try_commercial_export_candidates(
                 .append_pair("maptype", "satellite")
                 .append_pair("format", "jpg")
                 .append_pair("key", key);
-            fetch_bounded_satellite_image(u.as_str()).await.ok()
+            fetch_bounded_satellite_image(env, u.as_str()).await.ok()
         }
         _ => None,
     }
 }
 
+const IMAGERY_TILE_TTL_SECS: u64 = 365 * 86_400;
+
+fn sat_db_namespace(db: &DbStore) -> String {
+    match &db.backend {
+        DbBackend::Sqlite(pool) => {
+            let file = pool
+                .connect_options()
+                .get_filename()
+                .to_string_lossy()
+                .into_owned();
+            if file == ":memory:" || file.is_empty() {
+                format!("sqlite:mem:{:p}", db)
+            } else {
+                format!("sqlite:{file}")
+            }
+        }
+        DbBackend::MySql { .. } => format!("mysql:{}", db.provider),
+    }
+}
+
+fn tile_bbox_lat_lon(z: u8, x: u32, y: u32) -> (f64, f64, f64, f64) {
+    let n = 2.0_f64.powi(i32::from(z));
+    let lon_at = |xf: f64| (xf / n) * 360.0 - 180.0;
+    let lat_at = |yf: f64| {
+        (std::f64::consts::PI * (1.0 - 2.0 * yf / n))
+            .sinh()
+            .atan()
+            .to_degrees()
+    };
+    let west = lon_at(f64::from(x));
+    let east = lon_at(f64::from(x.saturating_add(1)));
+    let north = lat_at(f64::from(y));
+    let south = lat_at(f64::from(y.saturating_add(1)));
+    (south, west, north, east)
+}
+
+fn sat_tile_params_hash(tile_key: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(tile_key.as_bytes());
+    hex::encode(hasher.finalize())
+}
+
+fn sat_tile_scope_key(lat: f64, lon: f64) -> String {
+    encode_geohash(lat, lon, 7).unwrap_or_else(|| format!("coord:{lat:.5},{lon:.5}"))
+}
+
+async fn load_satellite_tile_shared_record(
+    db: &DbStore,
+    data_dir: Option<&Path>,
+    tile_key: &str,
+    lat: f64,
+    lon: f64,
+) -> Option<(Bytes, ImageFormat)> {
+    let scope_key = sat_tile_scope_key(lat, lon);
+    let params_hash = sat_tile_params_hash(tile_key);
+    let (_row, tile_ref) = get_shared_dataset_proto::<ImageryLidarTileRefProto>(
+        None,
+        db,
+        dataset_ids::IMAGERY_LIDAR_TILE,
+        ShareScope::Geohash7,
+        &scope_key,
+        &params_hash,
+    )
+    .await
+    .ok()??;
+    let blob_hash = tile_ref.blob_hash.as_deref()?.trim();
+    if blob_hash.is_empty() {
+        return None;
+    }
+    let (_blob_row, raw) = get_shared_blob(db, data_dir, blob_hash).await.ok()??;
+    let fmt = detect_image_format(&raw)?;
+    Some((Bytes::from(raw), fmt))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn persist_satellite_tile_shared_record(
+    db: &DbStore,
+    data_dir: Option<&Path>,
+    tile_key: &str,
+    asset_kind: &str,
+    resolved: &ResolvedSatelliteSource,
+    lat: f64,
+    lon: f64,
+    bbox: (f64, f64, f64, f64),
+    bytes: &[u8],
+    fmt: ImageFormat,
+) {
+    let geo = GeoIndexColumns {
+        geohash5: encode_geohash(lat, lon, 5),
+        geohash6: encode_geohash(lat, lon, 6),
+        geohash7: encode_geohash(lat, lon, 7),
+        bbox_south: Some(bbox.0),
+        bbox_west: Some(bbox.1),
+        bbox_north: Some(bbox.2),
+        bbox_east: Some(bbox.3),
+        ..Default::default()
+    };
+    let blob = match put_shared_blob(
+        db,
+        data_dir,
+        &PutSharedBlobInput {
+            dataset_id: dataset_ids::IMAGERY_LIDAR_TILE.to_string(),
+            media_type: fmt.mime_type().to_string(),
+            bytes: bytes.to_vec(),
+            tile_key: Some(tile_key.to_string()),
+            geo: geo.clone(),
+            source_url: Some(resolved.source_url.to_string()),
+        },
+    )
+    .await
+    {
+        Ok(b) => b,
+        Err(err) => {
+            tracing::warn!(error = %err, tile_key, "media_api: failed storing satellite blob");
+            return;
+        }
+    };
+
+    let resolution_m = match resolved.provider {
+        SatelliteProviderKind::SantaClaraSanJoseOrtho2025 => Some(0.10),
+        SatelliteProviderKind::KingCountyOrtho2023 => Some(0.15),
+        SatelliteProviderKind::UsgsImageryOnlyFallback => Some(1.0),
+        _ => Some(0.30),
+    };
+    let capture_year = match resolved.provider {
+        SatelliteProviderKind::SantaClaraSanJoseOrtho2025 => Some(2025),
+        SatelliteProviderKind::KingCountyOrtho2023 => Some(2023),
+        _ => None,
+    };
+    let fetched_at = Utc::now().to_rfc3339();
+    let tile_ref = ImageryLidarTileRefProto {
+        tile_key: tile_key.to_string(),
+        asset_kind: asset_kind.to_string(),
+        provider: resolved.provider_id.to_string(),
+        bbox: Some(GeoBoundingBoxProto {
+            south: bbox.0,
+            west: bbox.1,
+            north: bbox.2,
+            east: bbox.3,
+        }),
+        resolution_m,
+        capture_year,
+        source_url: resolved.source_url.to_string(),
+        blob_hash: Some(blob.content_hash.clone()),
+        byte_size: Some(bytes.len() as u64),
+        fetched_at_rfc3339: fetched_at.clone(),
+    };
+    let payload_json = json!({
+        "tileKey": tile_ref.tile_key,
+        "assetKind": tile_ref.asset_kind,
+        "source": tile_ref.provider,
+        "resolutionM": tile_ref.resolution_m,
+        "captureYear": tile_ref.capture_year,
+        "blobHash": tile_ref.blob_hash,
+        "byteSize": tile_ref.byte_size,
+        "fetchedAt": fetched_at,
+    })
+    .to_string();
+    let provenance_json = json!({
+        "sourceName": resolved.source_name,
+        "sourceUrl": resolved.source_url,
+        "attribution": resolved.attribution,
+    })
+    .to_string();
+    let scope_key = sat_tile_scope_key(lat, lon);
+    let params_hash = sat_tile_params_hash(tile_key);
+    if let Err(err) = put_shared_dataset_proto(
+        None,
+        db,
+        dataset_ids::IMAGERY_LIDAR_TILE,
+        ShareScope::Geohash7,
+        &scope_key,
+        &params_hash,
+        geo,
+        &tile_ref,
+        Some(payload_json),
+        Some(provenance_json),
+        Some(blob.content_hash),
+        IMAGERY_TILE_TTL_SECS,
+    )
+    .await
+    {
+        tracing::warn!(error = %err, tile_key, "media_api: failed indexing shared satellite tile row");
+    }
+}
+
+/// Invalidates in-memory satellite L1 caches (forcing DB-backed `shared_data_records` /
+/// `shared_blobs` lookup on the next request).
+pub async fn clear_satellite_memory_caches() {
+    SAT_TILE_CACHE.invalidate_all();
+    SAT_EXPORT_CACHE.invalidate_all();
+    SAT_TILE_CACHE.run_pending_tasks().await;
+    SAT_EXPORT_CACHE.run_pending_tasks().await;
+}
+
 async fn fetch_satellite_export_for_query(
     env: &EnvConfig,
+    db: Option<&DbStore>,
+    data_dir: Option<&Path>,
     raw_query: &str,
 ) -> Result<(Bytes, ImageFormat, bool), GuardrailError> {
     let params = parse_satellite_export_params(raw_query)?;
     let lat = (params.lat1 + params.lat2) * 0.5;
     let lon = (params.lon1 + params.lon2) * 0.5;
     let resolved = resolve_satellite_source(env, Some((lat, lon)));
-    let test_suffix = validated_loopback_test_url(env, "SATELLITE_TEST_EXPORT_BASE_URL")
-        .or_else(|| validated_loopback_test_url(env, "SATELLITE_TEST_TILE_BASE_URL"))
-        .unwrap_or_default();
-    let cache_key = format!(
-        "{}:{}:{:.6},{:.6},{:.6},{:.6}:{}x{}:z{}",
+    let key_fp = sat_key_fingerprint(env, resolved.provider);
+    let tile_key = format!(
+        "{}:{key_fp}:{:.6},{:.6},{:.6},{:.6}:{}x{}:z{}",
         resolved.provider_id,
-        test_suffix,
         params.lon1,
         params.lat1,
         params.lon2,
@@ -2965,8 +3156,22 @@ async fn fetch_satellite_export_for_query(
         params.height,
         params.zoom
     );
-    if let Some((b, fmt)) = SAT_EXPORT_CACHE.get(&cache_key).await {
+    let l1_key = format!(
+        "{}:{tile_key}",
+        db.map(sat_db_namespace).unwrap_or_else(|| "mem_only".to_string())
+    );
+    if let Some((b, fmt)) = SAT_EXPORT_CACHE.get(&l1_key).await {
+        crate::metering::mark_cached();
         return Ok((b, fmt, true));
+    }
+    if let Some(store) = db {
+        if let Some((b, fmt)) =
+            load_satellite_tile_shared_record(store, data_dir, &tile_key, lat, lon).await
+        {
+            SAT_EXPORT_CACHE.insert(l1_key, (b.clone(), fmt)).await;
+            crate::metering::mark_cached();
+            return Ok((b, fmt, true));
+        }
     }
 
     let result: Result<(Bytes, ImageFormat), GuardrailError> = async {
@@ -2977,22 +3182,26 @@ async fn fetch_satellite_export_for_query(
                 return Ok(pair);
             }
             if let Some(reg_export) = regional_export_url_for_coords(lat, lon, &params) {
-                if let Ok(pair) = fetch_bounded_satellite_image(&reg_export).await {
+                if let Ok(pair) = fetch_bounded_satellite_image(env, &reg_export).await {
                     return Ok(pair);
                 }
             }
-            for z_try in [params.zoom.min(19), 18, 17] {
+            let z_top = params.zoom.min(resolved.max_native_zoom).min(21);
+            for z_try in [z_top, 19, 18, 17] {
+                if z_try > z_top {
+                    continue;
+                }
                 let (tx, ty) = lat_lon_to_tile_xy(lat, lon, z_try);
                 if let Some(tile_url) =
                     build_tile_url_for_provider(env, resolved.provider, z_try, ty, tx).await
                 {
-                    if let Ok(pair) = fetch_bounded_satellite_image(&tile_url).await {
+                    if let Ok(pair) = fetch_bounded_satellite_image(env, &tile_url).await {
                         return Ok(pair);
                     }
                 }
             }
         } else if let Some(reg_export) = regional_export_url_for_coords(lat, lon, &params) {
-            if let Ok(pair) = fetch_bounded_satellite_image(&reg_export).await {
+            if let Ok(pair) = fetch_bounded_satellite_image(env, &reg_export).await {
                 return Ok(pair);
             }
         }
@@ -3001,18 +3210,34 @@ async fn fetch_satellite_export_for_query(
             "{USGS_IMAGERY_ONLY_EXPORT_URL}?bbox={:.6},{:.6},{:.6},{:.6}&bboxSR=4326&imageSR=3857&size={},{}&format=jpg&f=image",
             params.lon1, params.lat1, params.lon2, params.lat2, params.width, params.height
         );
-        fetch_bounded_satellite_image(&usgs_export).await
+        fetch_bounded_satellite_image(env, &usgs_export).await
     }
     .await;
 
     let (bytes, fmt) = result?;
+    if let Some(store) = db {
+        let bbox = (params.lat1, params.lon1, params.lat2, params.lon2);
+        persist_satellite_tile_shared_record(
+            store,
+            data_dir,
+            &tile_key,
+            "ortho_export",
+            &resolved,
+            lat,
+            lon,
+            bbox,
+            &bytes,
+            fmt,
+        )
+        .await;
+    }
     SAT_EXPORT_CACHE
-        .insert(cache_key, (bytes.clone(), fmt))
+        .insert(l1_key, (bytes.clone(), fmt))
         .await;
     Ok((bytes, fmt, false))
 }
 
-/// `GET /api/media/satellite/tile/:z/:y/:x` — server-side proxy + in-memory cache for commercial
+/// `GET /api/media/satellite/tile/:z/:y/:x` — server-side proxy + DB/L1 cache for commercial
 /// high-resolution satellite tiles (never leaking API keys) with regional `.gov` / USGS fallback.
 pub async fn handle_satellite_tile_get(
     State(state): State<AppState>,
@@ -3020,6 +3245,7 @@ pub async fn handle_satellite_tile_get(
     Query(q): Query<SatelliteTileQuery>,
 ) -> Response {
     if z > 21 {
+        crate::metering::mark_failed();
         return guardrail_error_to_response(GuardrailError::new(
             "INVALID_TILE_COORDS",
             "Satellite tile zoom exceeds supported range.",
@@ -3028,6 +3254,7 @@ pub async fn handle_satellite_tile_get(
     }
     let max_coord = 1u32 << z;
     if x >= max_coord || y >= max_coord {
+        crate::metering::mark_failed();
         return guardrail_error_to_response(GuardrailError::new(
             "INVALID_TILE_COORDS",
             "Satellite tile x/y out of range for zoom level.",
@@ -3045,34 +3272,75 @@ pub async fn handle_satellite_tile_get(
     };
 
     let resolved = resolve_satellite_source(&state.env, Some((lat, lon)));
-    let test_suffix = validated_loopback_test_url(&state.env, "SATELLITE_TEST_TILE_BASE_URL")
-        .unwrap_or_default();
-    let cache_key = format!("{}:{test_suffix}:{z}:{y}:{x}", resolved.provider_id);
-    if let Some((bytes, fmt)) = SAT_TILE_CACHE.get(&cache_key).await {
+    let key_fp = sat_key_fingerprint(&state.env, resolved.provider);
+    let tile_key = format!("{}:{key_fp}:{z}:{y}:{x}", resolved.provider_id);
+    let l1_key = format!("{}:{tile_key}", sat_db_namespace(&state.db));
+    if let Some((bytes, fmt)) = SAT_TILE_CACHE.get(&l1_key).await {
+        crate::metering::mark_cached();
+        return satellite_image_response(bytes, fmt, true);
+    }
+    if let Some((bytes, fmt)) = load_satellite_tile_shared_record(
+        &state.db,
+        state.data_dir.as_deref(),
+        &tile_key,
+        lat,
+        lon,
+    )
+    .await
+    {
+        SAT_TILE_CACHE.insert(l1_key, (bytes.clone(), fmt)).await;
+        crate::metering::mark_cached();
         return satellite_image_response(bytes, fmt, true);
     }
 
     match fetch_satellite_tile_bytes(&state.env, &resolved, z, y, x, lat, lon).await {
         Ok((bytes, fmt)) => {
+            let bbox = tile_bbox_lat_lon(z, x, y);
+            persist_satellite_tile_shared_record(
+                &state.db,
+                state.data_dir.as_deref(),
+                &tile_key,
+                "ortho_tile",
+                &resolved,
+                lat,
+                lon,
+                bbox,
+                &bytes,
+                fmt,
+            )
+            .await;
             SAT_TILE_CACHE
-                .insert(cache_key, (bytes.clone(), fmt))
+                .insert(l1_key, (bytes.clone(), fmt))
                 .await;
             satellite_image_response(bytes, fmt, false)
         }
-        Err(ge) => guardrail_error_to_response(ge),
+        Err(ge) => {
+            crate::metering::mark_failed();
+            guardrail_error_to_response(ge)
+        }
     }
 }
 
-/// `GET /api/media/satellite/export` — server-side proxy + cache for crisp bounding-box aerial
+/// `GET /api/media/satellite/export` — server-side proxy + DB/L1 cache for crisp bounding-box aerial
 /// exports when commercial keys are configured, falling back cleanly to regional `.gov` / USGS.
 pub async fn handle_satellite_export_get(
     State(state): State<AppState>,
     RawQuery(raw_query): RawQuery,
 ) -> Response {
     let query_str = raw_query.as_deref().unwrap_or("");
-    match fetch_satellite_export_for_query(&state.env, query_str).await {
+    match fetch_satellite_export_for_query(
+        &state.env,
+        Some(&state.db),
+        state.data_dir.as_deref(),
+        query_str,
+    )
+    .await
+    {
         Ok((bytes, fmt, hit)) => satellite_image_response(bytes, fmt, hit),
-        Err(ge) => guardrail_error_to_response(ge),
+        Err(ge) => {
+            crate::metering::mark_failed();
+            guardrail_error_to_response(ge)
+        }
     }
 }
 
@@ -3143,7 +3411,11 @@ mod tests {
     #[test]
     fn satellite_export_path_validation_and_manifest_upgrade() {
         assert!(is_internal_satellite_export_path(
-            "/api/media/satellite/export?bbox=-121.962000,37.282000,-121.961000,37.283000&w=1200&h=800&zoom=19"
+            "/api/media/satellite/export?bbox=-121.962000,37.282000,-121.961000,37.283000&w=1600&h=1080&zoom=20"
+        )
+        .is_some());
+        assert!(is_internal_satellite_export_path(
+            "/api/satellite-export?bbox=-121.962000,37.282000,-121.961000,37.283000&w=1600&h=1080&zoom=20"
         )
         .is_some());
         assert!(is_internal_satellite_export_path("/api/media/satellite/export?bbox=bad").is_none());
@@ -3200,86 +3472,104 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn commercial_satellite_proxy_caches_and_never_leaks_secret_key() {
-        use axum::{extract::OriginalUri, routing::get, Router};
-        use std::sync::atomic::{AtomicUsize, Ordering};
+    async fn commercial_satellite_url_builder_and_zero_secret_leak_contracts() {
+        let empty_env = EnvConfig::from_map(HashMap::new());
+        let scc_url = build_tile_url_for_provider(
+            &empty_env,
+            SatelliteProviderKind::SantaClaraSanJoseOrtho2025,
+            19,
+            203363,
+            84561,
+        )
+        .await
+        .expect("scc url");
+        assert_eq!(
+            scc_url,
+            format!("{SCC_SJ_ORTHO_2025_TILE_URL}19/203363/84561")
+        );
 
-        // 1x1 valid PNG bytes
-        const PNG_1X1: &[u8] = &[
-            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48,
-            0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00,
-            0x00, 0x1F, 0x15, 0xC4, 0x89, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x44, 0x41, 0x54, 0x78,
-            0x9C, 0x63, 0xF8, 0xCF, 0xC0, 0x00, 0x00, 0x03, 0x01, 0x01, 0x00, 0x18, 0xDD, 0x8D,
-            0xB0, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
-        ];
+        let kingco_url = build_tile_url_for_provider(
+            &empty_env,
+            SatelliteProviderKind::KingCountyOrtho2023,
+            19,
+            178000,
+            84100,
+        )
+        .await
+        .expect("kingco url");
+        assert_eq!(
+            kingco_url,
+            format!("{KINGCO_ORTHO_2023_TILE_URL}19/178000/84100")
+        );
 
-        let hits = Arc::new(AtomicUsize::new(0));
-        let saw_secret = Arc::new(AtomicUsize::new(0));
-        let hits_clone = Arc::clone(&hits);
-        let secret_clone = Arc::clone(&saw_secret);
+        let usgs_url = build_tile_url_for_provider(
+            &empty_env,
+            SatelliteProviderKind::UsgsImageryOnlyFallback,
+            16,
+            24800,
+            19050,
+        )
+        .await
+        .expect("usgs url");
+        assert_eq!(
+            usgs_url,
+            format!("{USGS_IMAGERY_ONLY_TILE_URL}16/24800/19050")
+        );
 
-        let app = Router::new()
-            .route(
-                "/tile/:z/:y/:x",
-                get(move |uri: OriginalUri| {
-                    let h = Arc::clone(&hits_clone);
-                    let s = Arc::clone(&secret_clone);
-                    async move {
-                        h.fetch_add(1, Ordering::SeqCst);
-                        if uri.0.query().unwrap_or("").contains("token=SECRET_TEST_ESRI_KEY") {
-                            s.fetch_add(1, Ordering::SeqCst);
-                        }
-                        ([(header::CONTENT_TYPE, "image/png")], PNG_1X1.to_vec())
-                    }
-                }),
-            )
-            .route(
-                "/export",
-                get(move |uri: OriginalUri| async move {
-                    assert!(uri.0.query().unwrap_or("").contains("token=SECRET_TEST_ESRI_KEY"));
-                    ([(header::CONTENT_TYPE, "image/png")], PNG_1X1.to_vec())
-                }),
-            );
+        let arcgis_secret = "arcgis-key-contract-val";
+        let arcgis_env = EnvConfig::from_map(HashMap::from([(
+            "ARCGIS_API_KEY".to_string(),
+            arcgis_secret.to_string(),
+        )]));
+        let arcgis_url = build_tile_url_for_provider(
+            &arcgis_env,
+            SatelliteProviderKind::ArcGisCommercial,
+            19,
+            203363,
+            84561,
+        )
+        .await
+        .expect("arcgis url");
+        assert!(arcgis_url.starts_with(ARCGIS_BASEMAPS_WORLD_IMAGERY_BASE_URL));
+        assert!(arcgis_url.contains("token=arcgis-key-contract-val"));
 
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let server_task = tokio::spawn(async move {
-            let _ = axum::serve(listener, app).await;
-        });
+        let fp_a = sat_key_fingerprint(&arcgis_env, SatelliteProviderKind::ArcGisCommercial);
+        let fp_b = sat_key_fingerprint(&empty_env, SatelliteProviderKind::ArcGisCommercial);
+        assert_ne!(fp_a, fp_b);
+        assert!(!fp_a.contains(arcgis_secret));
+        assert_eq!(fp_a.len(), 12);
 
-        let env = EnvConfig::from_map(HashMap::from([
-            ("MEDIA_CACHE_ALLOW_LOOPBACK".to_string(), "1".to_string()),
-            ("ARCGIS_API_KEY".to_string(), "SECRET_TEST_ESRI_KEY".to_string()),
-            (
-                "SATELLITE_TEST_TILE_BASE_URL".to_string(),
-                format!("http://{addr}/tile"),
-            ),
-            (
-                "SATELLITE_TEST_EXPORT_BASE_URL".to_string(),
-                format!("http://{addr}/export"),
-            ),
-        ]));
+        let meta = crate::property::media::build_report_satellite_meta(
+            &arcgis_env,
+            Some((37.288350, -121.944163)),
+        );
+        let meta_raw = serde_json::to_string(&meta).unwrap();
+        assert!(!meta_raw.contains(arcgis_secret));
+        assert_eq!(meta["proxied"], json!(true));
+        assert_eq!(meta["tileUrl"], json!("/api/media/satellite/tile/{z}/{y}/{x}"));
 
-        // Export fetch returns valid PNG and caches cleanly
-        let q = "bbox=-121.962000,37.282000,-121.961000,37.283000&w=1200&h=800&zoom=19";
-        let (exp_bytes, exp_fmt, hit1) = fetch_satellite_export_for_query(&env, q).await.unwrap();
-        assert_eq!(exp_fmt, ImageFormat::Png);
-        assert_eq!(exp_bytes.as_ref(), PNG_1X1);
-        assert!(!hit1);
-        let (_exp2, _fmt2, hit2) = fetch_satellite_export_for_query(&env, q).await.unwrap();
-        assert!(hit2);
+        // Tile coordinate round-trip & regional export bbox URL check
+        let (tx, ty) = lat_lon_to_tile_xy(37.288350, -121.944163, 19);
+        let (clat, clon) = tile_center_lat_lon(19, tx, ty);
+        assert!((clat - 37.288350).abs() < 0.01);
+        assert!((clon + 121.944163).abs() < 0.01);
 
-        // Tile fetch forwards secret upstream only, validates magic bytes, and hits upstream once
-        let resolved = resolve_satellite_source(&env, Some((37.282354, -121.961661)));
-        let (t1, fmt_t1) =
-            fetch_satellite_tile_bytes(&env, &resolved, 19, 203363, 84561, 37.282354, -121.961661)
-                .await
-                .unwrap();
-        assert_eq!(fmt_t1, ImageFormat::Png);
-        assert_eq!(t1.as_ref(), PNG_1X1);
-        assert_eq!(hits.load(Ordering::SeqCst), 1);
-        assert_eq!(saw_secret.load(Ordering::SeqCst), 1);
-
-        server_task.abort();
+        let params = parse_satellite_export_params(
+            "bbox=-121.945000,37.288000,-121.943000,37.289000&w=1600&h=1080&zoom=20",
+        )
+        .expect("export params");
+        assert_eq!(params.width, 1600);
+        assert_eq!(params.height, 1080);
+        assert_eq!(params.zoom, 20);
+        assert_eq!(scaled_2x_static_dimensions(params.width, params.height, 640), (640, 432));
+        let capped = parse_satellite_export_params(
+            "bbox=-121.945000,37.288000,-121.943000,37.289000&w=2500&h=1800&zoom=20",
+        )
+        .expect("capped export params");
+        assert_eq!((capped.width, capped.height), (2048, 1800));
+        let reg = regional_export_url_for_coords(37.288350, -121.944163, &params)
+            .expect("scc regional export");
+        assert!(reg.starts_with(SCC_SJ_ORTHO_2025_EXPORT_URL));
+        assert!(regional_export_url_for_coords(39.952580, -75.163570, &params).is_none());
     }
 }

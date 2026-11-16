@@ -13,7 +13,7 @@
 | virtualTours | [{url, label?}] | [{"url":"https://my.matterport.com/show/?m=…"}] | the listing's published 3D / video tour links (Matterport, Zillow 3D Home, iGUIDE, YouTube …). The report's 3D section plays them through the tour host's own embed; record the link only, never copy tour content. Licensed feeds fill `mlsListing.virtualTourUrl` automatically. |
 | lastSale | {date, price} | {"date":"2025-03-05","price":2320000} | |
 | saleHistory | [{date, event, price, note?}] | | events: Listed, Price cut, Pending, Sold |
-| avms | [{source, value, date, note?}] | Redfin, Movoto, RentCast | date-stamp them |
+| avms | [{source, value, date, note?}] | Redfin, Movoto, ATTOM | date-stamp them |
 | rentEstimate, rentNote | number, string | 4589 | monthly |
 | taxRate, taxNote | fraction, string | 0.012592 | parcel's tax-rate-area total |
 | insuranceAnnual, earthquakeInsuranceAnnual | number | | real quotes override estimates |

@@ -73,7 +73,6 @@ fn proxy_bypass_credential_redaction_and_warning_sanitization_are_deterministic(
     // Keyed API hosts, configured internal base URLs, and loopback/RFC1918 addresses bypass proxies.
     for host in [
         "api.openai.com",
-        "api.rentcast.io",
         "api.gateway.attomdata.com",
         "places.googleapis.com",
         "gateway.enterprise.internal",
@@ -121,14 +120,14 @@ fn proxy_bypass_credential_redaction_and_warning_sanitization_are_deterministic(
 
     // User-facing URL & error sanitization strips paths, query params, coordinates, and API keys.
     let leaky_url =
-        "https://api.rentcast.io/v1/properties?address=200+Synthparcelbeta+Ave&apiKey=sk-live-secret-999";
-    assert_eq!(url_host_label(leaky_url), "api.rentcast.io");
+        "https://api.gateway.attomdata.com/propertyapi/v1.0.0/property/address?address=200+Synthparcelbeta+Ave&apiKey=sk-live-secret-999";
+    assert_eq!(url_host_label(leaky_url), "api.gateway.attomdata.com");
     let warning = sanitize_user_warning(&format!(
         "error sending request for url ({leaky_url}): upstream timeout at {leaky_url}."
     ));
     assert!(!warning.contains("sk-live-secret-999"));
     assert!(!warning.contains("200+Synthparcelbeta+Ave"));
-    assert!(warning.contains("api.rentcast.io"));
+    assert!(warning.contains("api.gateway.attomdata.com"));
 
     // ScrapeBody & cache-bypass / Overpass endpoint configuration sanity.
     assert!(ScrapeBody::Empty.is_empty());

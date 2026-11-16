@@ -9,13 +9,21 @@
 //!   and City of Campbell West Valley Collection & Recycling (`WVC&R`) official rate schedule PDF.
 //! - Live historical heating/cooling degree-days (`HDD65`/`CDD65`) via Open-Meteo Archive API.
 
+use crate::db::{shared_cache_store::GeoIndexColumns, DbStore};
 use crate::extensions::adapter::{BoxFuture, DataExtensionAdapter};
+use crate::extensions::proto::shared_v1::{
+    ClimateNormalsCellProto, UtilityTariffTableProto, UtilityTerritoryProto,
+};
 use crate::extensions::proto::v1::{
     extension_envelope_proto::Payload, CapabilityDomain, DriverKind, ElectricUtilityProto,
     ExtensionEnvelopeProto, ExtensionManifestProto, ExtensionQueryProto, GasUtilityProto,
     GeoScopeProto, ProvenanceTier, RateLimitSpecProto, SourceAttributionProto,
     WaterSewerTrashProto,
 };
+use crate::extensions::shared_cache::{
+    dataset_ids, encode_geohash, get_shared_dataset_proto, put_shared_dataset_proto, ShareScope,
+};
+use crate::extensions::ExtensionHub;
 use crate::shared::{now_iso, round_n, EnvConfig, HttpClient, SourceItem};
 use anyhow::{anyhow, Result};
 use chrono::{Datelike, NaiveDate, Utc};
@@ -37,16 +45,19 @@ const CEC_ELECTRIC_OTHER_URL: &str = "https://services3.arcgis.com/bWPjFyq029ChC
 const CEC_GAS_AREA_URL: &str = "https://services3.arcgis.com/bWPjFyq029ChCGur/arcgis/rest/services/Natural_Gas_Service_Area/FeatureServer/0";
 const EIA861_ELECTRIC_H3_URL: &str = "https://services8.arcgis.com/peDZJliSvYims39Q/arcgis/rest/services/Electricity_Rates_H3_Res5/FeatureServer/7";
 const HIFLD_GAS_LDC_URL: &str = "https://services5.arcgis.com/HDRa0B57OVrv2E1q/arcgis/rest/services/Natural_Gas_Local_Distribution_Company_Service_Territories/FeatureServer/0";
-const PGE_ELEC_TOU_XLSX_URL: &str = "https://www.pge.com/assets/rates/tariffs/res-inclu-tou-current.xlsx";
+const PGE_ELEC_TOU_XLSX_URL: &str =
+    "https://www.pge.com/assets/rates/tariffs/res-inclu-tou-current.xlsx";
 const PGE_GAS_RES_XLSX_URL: &str = "https://www.pge.com/assets/rates/tariffs/Res_Current.xlsx";
 const PGE_TARIFFS_PAGE_URL: &str = "https://www.pge.com/tariffs/en.html";
 const SVCE_RATES_PAGE_URL: &str = "https://www.svcleanenergy.org/residential-rates/";
-const SVCE_DEFAULT_PDF_URL: &str = "https://svcleanenergy.org/wp-content/uploads/SVCE-Residential-Rate-Sheet-Jan-1-2026.pdf";
+const SVCE_DEFAULT_PDF_URL: &str =
+    "https://svcleanenergy.org/wp-content/uploads/SVCE-Residential-Rate-Sheet-Jan-1-2026.pdf";
 const SJW_BILLING_SCHEDULES_URL: &str = "https://www.sjwater.com/billing-schedules/";
 const SJW_2026_RATES_URL: &str = "https://www.sjwater.com/2026-rates/";
 const CA_SWRCB_WATER_URL: &str = "https://gispublic.waterboards.ca.gov/portalserver/rest/services/Drinking_Water/California_Drinking_Water_System_Area_Boundaries/FeatureServer/0";
 const EPA_SDWIS_WATER_URL: &str = "https://services.arcgis.com/cJ9YHowT8TU7DUyn/arcgis/rest/services/Water_System_Boundaries/FeatureServer/0";
-const SCC_SANITATION_BASE_URL: &str = "https://geo.sanjoseca.gov/server/rest/services/REF/REF_CountyReferenceLayers/MapServer";
+const SCC_SANITATION_BASE_URL: &str =
+    "https://geo.sanjoseca.gov/server/rest/services/REF/REF_CountyReferenceLayers/MapServer";
 const WVCR_SINGLE_FAMILY_URL: &str = "https://westvalleyrecycles.com/single-family/";
 const WVCR_DEFAULT_PDF_URL: &str = "https://westvalleyrecycles.com/wp-content/uploads/2026/05/Single-Family-Rate-Sheet_2026-27.pdf";
 const WVSD_DOC_URL: &str = "https://www.wvsdca.gov/DocumentCenter/View/1217";
@@ -171,7 +182,14 @@ pub struct LiveUtilityBundle {
 pub fn normalize_city_slug(raw: &str) -> String {
     let lower = raw.trim().to_ascii_lowercase();
     let mut s = lower.as_str();
-    for suffix in [" city", " town", " village", " borough", " cdp", " municipality"] {
+    for suffix in [
+        " city",
+        " town",
+        " village",
+        " borough",
+        " cdp",
+        " municipality",
+    ] {
         if let Some(stripped) = s.strip_suffix(suffix) {
             s = stripped.trim();
             break;
@@ -196,7 +214,8 @@ fn today_excel_serial() -> i32 {
 // =================================================================================================
 
 fn read_u16_le(b: &[u8], off: usize) -> Option<u16> {
-    b.get(off..off + 2).map(|s| u16::from_le_bytes([s[0], s[1]]))
+    b.get(off..off + 2)
+        .map(|s| u16::from_le_bytes([s[0], s[1]]))
 }
 
 fn read_u32_le(b: &[u8], off: usize) -> Option<u32> {
@@ -236,7 +255,9 @@ pub fn extract_zip_entry(zip_bytes: &[u8], target_path: &str) -> Result<Vec<u8>>
         let name = String::from_utf8_lossy(&zip_bytes[name_start..name_end]);
 
         if name == target_path {
-            if local_off + 30 > zip_bytes.len() || &zip_bytes[local_off..local_off + 4] != b"PK\x03\x04" {
+            if local_off + 30 > zip_bytes.len()
+                || &zip_bytes[local_off..local_off + 4] != b"PK\x03\x04"
+            {
                 return Err(anyhow!("invalid ZIP local header for {target_path}"));
             }
             let lf_name_len = read_u16_le(zip_bytes, local_off + 26).unwrap_or(0) as usize;
@@ -283,8 +304,7 @@ pub fn parse_xlsx_sheet_cells(
 ) -> Result<BTreeMap<(u32, String), String>> {
     static SI_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?s)<si\b[^>]*>(.*?)</si>").unwrap());
     static T_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?s)<t\b[^>]*>(.*?)</t>").unwrap());
-    static CELL_RE: Lazy<Regex> =
-        Lazy::new(|| Regex::new(r#"(?s)<c\b([^>]*)>(.*?)</c>"#).unwrap());
+    static CELL_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r#"(?s)<c\b([^>]*)>(.*?)</c>"#).unwrap());
     static ATTR_R_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r#"\br="([A-Z]+\d+)""#).unwrap());
     static ATTR_T_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r#"\bt="([^"]+)""#).unwrap());
     static VAL_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?s)<v>(.*?)</v>").unwrap());
@@ -400,7 +420,8 @@ fn parse_pge_electric_xlsx(bytes: &[u8]) -> Result<PgeElecParsed> {
         }
     }
     let r0 = anchor_row.unwrap_or(9);
-    let summer_peak = cell_f64(&cells, r0, "J").ok_or_else(|| anyhow!("missing E-TOU-C summer peak"))?;
+    let summer_peak =
+        cell_f64(&cells, r0, "J").ok_or_else(|| anyhow!("missing E-TOU-C summer peak"))?;
     let summer_off_peak =
         cell_f64(&cells, r0 + 1, "J").ok_or_else(|| anyhow!("missing E-TOU-C summer off-peak"))?;
     let winter_peak =
@@ -408,7 +429,8 @@ fn parse_pge_electric_xlsx(bytes: &[u8]) -> Result<PgeElecParsed> {
     let winter_off_peak =
         cell_f64(&cells, r0 + 3, "J").ok_or_else(|| anyhow!("missing E-TOU-C winter off-peak"))?;
     let baseline_credit = cell_f64(&cells, r0, "K").unwrap_or(0.0);
-    let bundled_avg_kwh = cell_f64(&cells, r0, "N").unwrap_or((summer_peak + summer_off_peak + winter_peak + winter_off_peak) / 4.0);
+    let bundled_avg_kwh = cell_f64(&cells, r0, "N")
+        .unwrap_or((summer_peak + summer_off_peak + winter_peak + winter_off_peak) / 4.0);
     // Base Services Charge Income Tier 3 (standard non-CARE) sits in column E at r0 + 2 (E11 = $0.79343/day)
     let daily_base = cell_f64(&cells, r0 + 2, "E")
         .or_else(|| cell_f64(&cells, 5, "E"))
@@ -493,7 +515,8 @@ fn parse_pge_gas_xlsx(bytes: &[u8]) -> Result<PgeGasParsed> {
         .cloned()
         .unwrap_or_else(|| "Current".to_string());
     let min_daily = cell_f64(&cells, row, "D").unwrap_or(0.13151);
-    let baseline = cell_f64(&cells, row, "H").ok_or_else(|| anyhow!("missing gas baseline rate"))?;
+    let baseline =
+        cell_f64(&cells, row, "H").ok_or_else(|| anyhow!("missing gas baseline rate"))?;
     let excess = cell_f64(&cells, row, "I").unwrap_or(baseline + 0.50);
     let g_ppps = cell_f64(&cells, row, "O").unwrap_or(0.12103);
 
@@ -562,7 +585,10 @@ fn parse_svce_rate_pdf_text(text: &str, pdf_url: &str) -> Result<SvceTouDiff> {
     // E-TOU-C table has 4 rows x 3 cols = 12 decimals:
     // Summer Peak [svce_gen, svce_total, pge_total], Summer Off-Peak [3..6], Winter Peak [6..9], Winter Off-Peak [9..12]
     if nums.len() < 12 {
-        return Err(anyhow!("insufficient E-TOU-C rate columns in SVCE PDF ({})", nums.len()));
+        return Err(anyhow!(
+            "insufficient E-TOU-C rate columns in SVCE PDF ({})",
+            nums.len()
+        ));
     }
     Ok(SvceTouDiff {
         summer_peak_delta: nums[1] - nums[2],
@@ -586,7 +612,8 @@ struct SjWaterParsed {
 }
 
 fn parse_sjw_schedule1_text(text: &str, pdf_url: &str) -> Result<SjWaterParsed> {
-    static DOLLARS_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\$\s*(\d{1,3}(?:\.\d{2,4}))").unwrap());
+    static DOLLARS_RE: Lazy<Regex> =
+        Lazy::new(|| Regex::new(r"\$\s*(\d{1,3}(?:\.\d{2,4}))").unwrap());
     static CENTS_4D_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\$\s*(\d+\.\d{4})").unwrap());
     let clean = collapse_pdf_number_spaces(&text.split_whitespace().collect::<Vec<_>>().join(" "));
 
@@ -595,7 +622,9 @@ fn parse_sjw_schedule1_text(text: &str, pdf_url: &str) -> Result<SjWaterParsed> 
         .filter_map(|c| c[1].parse::<f64>().ok())
         .filter(|&x| (2.0..=30.0).contains(&x))
         .collect();
-    let tier1 = *tier_rates.first().ok_or_else(|| anyhow!("missing SJW Tier 1 CCF rate"))?;
+    let tier1 = *tier_rates
+        .first()
+        .ok_or_else(|| anyhow!("missing SJW Tier 1 CCF rate"))?;
     let tier2 = tier_rates.get(1).copied().unwrap_or(tier1 * 1.49);
     let tier3 = tier_rates.get(2).copied().unwrap_or(tier2 * 1.90);
 
@@ -609,7 +638,8 @@ fn parse_sjw_schedule1_text(text: &str, pdf_url: &str) -> Result<SjWaterParsed> 
             }
         }
     }
-    let service_charge_mo = svc_charge.ok_or_else(|| anyhow!("missing SJW meter service charge"))?;
+    let service_charge_mo =
+        svc_charge.ok_or_else(|| anyhow!("missing SJW meter service charge"))?;
 
     Ok(SjWaterParsed {
         service_charge_mo: round_n(service_charge_mo, 2),
@@ -621,7 +651,11 @@ fn parse_sjw_schedule1_text(text: &str, pdf_url: &str) -> Result<SjWaterParsed> 
     })
 }
 
-fn parse_wvcr_campbell_pdf_text(text: &str, city_slug: &str, pdf_url: &str) -> Result<(i64, String)> {
+fn parse_wvcr_campbell_pdf_text(
+    text: &str,
+    city_slug: &str,
+    pdf_url: &str,
+) -> Result<(i64, String)> {
     // Line order in WVC&R PDF: 35-gallon [Campbell, Los Gatos, Monte Sereno, Saratoga]
     static ROW35_RE: Lazy<Regex> = Lazy::new(|| {
         Regex::new(r"35-?gallon\s+(\d{2,3}\.\d{2})\s*\$?\s*(\d{2,3}\.\d{2})?\s*\$?\s*(\d{2,3}\.\d{2})?\s*\$?\s*(\d{2,3}\.\d{2})?").unwrap()
@@ -741,17 +775,207 @@ fn boxed_arcgis_point<'a>(
     .boxed()
 }
 
+const UTILITY_TERRITORY_TTL_SECS: u64 = 90 * 86_400;
+const UTILITY_TARIFF_TTL_SECS: u64 = 7 * 86_400;
+const CLIMATE_NORMALS_TTL_SECS: u64 = 365 * 86_400;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CachedCecElectric {
+    iou: Option<(String, String, String, Option<String>)>,
+    cca: Option<(String, Option<String>)>,
+}
+
+fn effective_db(db: Option<&DbStore>) -> Option<DbStore> {
+    db.cloned().or_else(|| ExtensionHub::global().active_db())
+}
+
+fn point_geo_index(lat: f64, lon: f64, state: Option<&str>) -> Option<(String, GeoIndexColumns)> {
+    if !lat.is_finite() || !lon.is_finite() {
+        return None;
+    }
+    let gh5 = encode_geohash(lat, lon, 5)?;
+    let gh6 = encode_geohash(lat, lon, 6);
+    let gh7 = encode_geohash(lat, lon, 7);
+    let geo = GeoIndexColumns {
+        geohash5: Some(gh5.clone()),
+        geohash6: gh6,
+        geohash7: gh7,
+        state: state
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_ascii_uppercase()),
+        ..Default::default()
+    };
+    Some((gh5, geo))
+}
+
+fn state_geo_index(state: &str) -> GeoIndexColumns {
+    let st = state.trim().to_ascii_uppercase();
+    GeoIndexColumns {
+        state: (!st.is_empty()).then_some(st),
+        ..Default::default()
+    }
+}
+
+fn boxed_shared_get<'a, M>(
+    db: Option<&'a DbStore>,
+    dataset_id: &'a str,
+    scope: ShareScope,
+    scope_key: String,
+    params_hash: &'a str,
+) -> BoxFuture<'a, Option<(crate::db::shared_cache_store::SharedDataRecordRow, M)>>
+where
+    M: prost::Message + Default + 'static,
+{
+    async move {
+        let store = effective_db(db)?;
+        if scope_key.trim().is_empty() || params_hash.trim().is_empty() {
+            return None;
+        }
+        get_shared_dataset_proto::<M>(None, &store, dataset_id, scope, &scope_key, params_hash)
+            .await
+            .ok()
+            .flatten()
+    }
+    .boxed()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn boxed_shared_put<'a, M>(
+    db: Option<&'a DbStore>,
+    dataset_id: &'a str,
+    scope: ShareScope,
+    scope_key: String,
+    params_hash: &'a str,
+    geo: GeoIndexColumns,
+    msg: M,
+    payload_json: Option<String>,
+    source_name: String,
+    source_url: String,
+    ttl_secs: u64,
+) -> BoxFuture<'a, ()>
+where
+    M: prost::Message + 'static,
+{
+    async move {
+        let Some(store) = effective_db(db) else {
+            return;
+        };
+        if scope_key.trim().is_empty() || params_hash.trim().is_empty() {
+            return;
+        }
+        let prov = serde_json::json!({
+            "sourceName": source_name,
+            "sourceUrl": source_url,
+            "fetchedAt": now_iso(),
+        })
+        .to_string();
+        let _ = put_shared_dataset_proto(
+            None,
+            &store,
+            dataset_id,
+            scope,
+            &scope_key,
+            params_hash,
+            geo,
+            &msg,
+            payload_json,
+            Some(prov),
+            None,
+            ttl_secs,
+        )
+        .await;
+    }
+    .boxed()
+}
+
+fn pge_electric_to_tariff_proto(
+    t: &LiveElectricTariff,
+    utility_id: &str,
+) -> UtilityTariffTableProto {
+    UtilityTariffTableProto {
+        utility_id: utility_id.to_string(),
+        service_kind: "electric".to_string(),
+        carrier_name: t.carrier_name.clone(),
+        rate_schedule: t.rate_schedule.clone(),
+        rate_per_kwh_usd: Some(t.rate_per_kwh_usd),
+        off_peak_kwh_usd: Some(t.off_peak_kwh_usd),
+        peak_kwh_usd: Some(t.peak_kwh_usd),
+        rate_per_therm_usd: None,
+        volumetric_water_rate_usd: None,
+        water_rate_unit: None,
+        monthly_base_fee_usd: t.monthly_base_fee_usd,
+        solar_nem_policy: Some(t.solar_nem_policy.clone()),
+        tariff_url: t.tariff_url.clone(),
+        effective_date: t.provenance_label.clone(),
+        fetched_at_rfc3339: now_iso(),
+    }
+}
+
 fn fetch_cached_pge_electric<'a>(
     http: &'a HttpClient,
     use_svce: bool,
 ) -> BoxFuture<'a, Option<LiveElectricTariff>> {
     async move {
+        let active_db = ExtensionHub::global().active_db();
+        fetch_cached_pge_electric_with_db(http, active_db.as_ref(), use_svce).await
+    }
+    .boxed()
+}
+
+fn fetch_cached_pge_electric_with_db<'a>(
+    http: &'a HttpClient,
+    db: Option<&'a DbStore>,
+    use_svce: bool,
+) -> BoxFuture<'a, Option<LiveElectricTariff>> {
+    async move {
+        let scope_key = if use_svce {
+            "us:ca:pge_svce:electric"
+        } else {
+            "us:ca:pge:electric"
+        };
+        if let Some((row, _proto)) = boxed_shared_get::<UtilityTariffTableProto>(
+            db,
+            dataset_ids::UTILITY_TARIFF,
+            ShareScope::UtilityTerritory,
+            scope_key.to_string(),
+            "res_tou_v1",
+        )
+        .await
+        {
+            if let Some(parsed) = row
+                .payload_json
+                .as_deref()
+                .and_then(|s| serde_json::from_str::<LiveElectricTariff>(s).ok())
+            {
+                return Some(parsed);
+            }
+        }
         if http.is_offline_external_blocked() {
             return None;
         }
         let cache_key = format!("pge_elec:svce={use_svce}");
         if let Some(v) = TARIFF_CACHE.get(&cache_key).await {
             if let Ok(parsed) = serde_json::from_value::<LiveElectricTariff>(v) {
+                let proto = pge_electric_to_tariff_proto(&parsed, scope_key);
+                let pj = serde_json::to_string(&parsed).ok();
+                let sn = parsed.rate_source.clone();
+                let su = parsed.tariff_url.clone();
+                boxed_shared_put(
+                    db,
+                    dataset_ids::UTILITY_TARIFF,
+                    ShareScope::UtilityTerritory,
+                    scope_key.to_string(),
+                    "res_tou_v1",
+                    state_geo_index("CA"),
+                    proto,
+                    pj,
+                    sn,
+                    su,
+                    UTILITY_TARIFF_TTL_SECS,
+                )
+                .await;
                 return Some(parsed);
             }
         }
@@ -833,6 +1057,24 @@ fn fetch_cached_pge_electric<'a>(
         if let Ok(jv) = serde_json::to_value(&out) {
             TARIFF_CACHE.insert(cache_key, jv).await;
         }
+        let proto = pge_electric_to_tariff_proto(&out, scope_key);
+        let pj = serde_json::to_string(&out).ok();
+        let sn = out.rate_source.clone();
+        let su = out.tariff_url.clone();
+        boxed_shared_put(
+            db,
+            dataset_ids::UTILITY_TARIFF,
+            ShareScope::UtilityTerritory,
+            scope_key.to_string(),
+            "res_tou_v1",
+            state_geo_index("CA"),
+            proto,
+            pj,
+            sn,
+            su,
+            UTILITY_TARIFF_TTL_SECS,
+        )
+        .await;
         Some(out)
     }
     .boxed()
@@ -852,14 +1094,80 @@ fn discover_svce_pdf_url<'a>(http: &'a HttpClient) -> BoxFuture<'a, Option<Strin
     .boxed()
 }
 
+fn pge_gas_to_tariff_proto(g: &LiveGasTariff) -> UtilityTariffTableProto {
+    UtilityTariffTableProto {
+        utility_id: "us:ca:pge:gas".to_string(),
+        service_kind: "gas".to_string(),
+        carrier_name: g.carrier_name.clone(),
+        rate_schedule: g.rate_schedule.clone(),
+        rate_per_kwh_usd: None,
+        off_peak_kwh_usd: None,
+        peak_kwh_usd: None,
+        rate_per_therm_usd: g.rate_per_therm_usd,
+        volumetric_water_rate_usd: None,
+        water_rate_unit: None,
+        monthly_base_fee_usd: g.monthly_base_fee_usd,
+        solar_nem_policy: None,
+        tariff_url: g.tariff_url.clone(),
+        effective_date: g.provenance_label.clone(),
+        fetched_at_rfc3339: now_iso(),
+    }
+}
+
 fn fetch_cached_pge_gas<'a>(http: &'a HttpClient) -> BoxFuture<'a, Option<LiveGasTariff>> {
     async move {
+        let active_db = ExtensionHub::global().active_db();
+        fetch_cached_pge_gas_with_db(http, active_db.as_ref()).await
+    }
+    .boxed()
+}
+
+fn fetch_cached_pge_gas_with_db<'a>(
+    http: &'a HttpClient,
+    db: Option<&'a DbStore>,
+) -> BoxFuture<'a, Option<LiveGasTariff>> {
+    async move {
+        if let Some((row, _proto)) = boxed_shared_get::<UtilityTariffTableProto>(
+            db,
+            dataset_ids::UTILITY_TARIFF,
+            ShareScope::UtilityTerritory,
+            "us:ca:pge:gas".to_string(),
+            "res_gas_v1",
+        )
+        .await
+        {
+            if let Some(parsed) = row
+                .payload_json
+                .as_deref()
+                .and_then(|s| serde_json::from_str::<LiveGasTariff>(s).ok())
+            {
+                return Some(parsed);
+            }
+        }
         if http.is_offline_external_blocked() {
             return None;
         }
         let cache_key = "pge_gas:current".to_string();
         if let Some(v) = TARIFF_CACHE.get(&cache_key).await {
             if let Ok(parsed) = serde_json::from_value::<LiveGasTariff>(v) {
+                let proto = pge_gas_to_tariff_proto(&parsed);
+                let pj = serde_json::to_string(&parsed).ok();
+                let sn = parsed.rate_source.clone();
+                let su = parsed.tariff_url.clone();
+                boxed_shared_put(
+                    db,
+                    dataset_ids::UTILITY_TARIFF,
+                    ShareScope::UtilityTerritory,
+                    "us:ca:pge:gas".to_string(),
+                    "res_gas_v1",
+                    state_geo_index("CA"),
+                    proto,
+                    pj,
+                    sn,
+                    su,
+                    UTILITY_TARIFF_TTL_SECS,
+                )
+                .await;
                 return Some(parsed);
             }
         }
@@ -890,26 +1198,104 @@ fn fetch_cached_pge_gas<'a>(http: &'a HttpClient) -> BoxFuture<'a, Option<LiveGa
         if let Ok(jv) = serde_json::to_value(&out) {
             TARIFF_CACHE.insert(cache_key, jv).await;
         }
+        let proto = pge_gas_to_tariff_proto(&out);
+        let pj = serde_json::to_string(&out).ok();
+        let sn = out.rate_source.clone();
+        let su = out.tariff_url.clone();
+        boxed_shared_put(
+            db,
+            dataset_ids::UTILITY_TARIFF,
+            ShareScope::UtilityTerritory,
+            "us:ca:pge:gas".to_string(),
+            "res_gas_v1",
+            state_geo_index("CA"),
+            proto,
+            pj,
+            sn,
+            su,
+            UTILITY_TARIFF_TTL_SECS,
+        )
+        .await;
         Some(out)
     }
     .boxed()
 }
 
+fn sjw_to_tariff_proto(sjw: &SjWaterParsed) -> UtilityTariffTableProto {
+    UtilityTariffTableProto {
+        utility_id: "pwsid:CA4310011".to_string(),
+        service_kind: "water".to_string(),
+        carrier_name: "San Jose Water".to_string(),
+        rate_schedule: sjw.effective_label.clone(),
+        rate_per_kwh_usd: None,
+        off_peak_kwh_usd: None,
+        peak_kwh_usd: None,
+        rate_per_therm_usd: None,
+        volumetric_water_rate_usd: Some(sjw.tier1_ccf),
+        water_rate_unit: Some("CCF (748 gal)".to_string()),
+        monthly_base_fee_usd: sjw.service_charge_mo,
+        solar_nem_policy: None,
+        tariff_url: sjw.schedule_pdf_url.clone(),
+        effective_date: sjw.effective_label.clone(),
+        fetched_at_rfc3339: now_iso(),
+    }
+}
+
 fn fetch_cached_sjw_tariff<'a>(http: &'a HttpClient) -> BoxFuture<'a, Option<SjWaterParsed>> {
+    fetch_cached_sjw_tariff_with_db(http, None)
+}
+
+fn fetch_cached_sjw_tariff_with_db<'a>(
+    http: &'a HttpClient,
+    db: Option<&'a DbStore>,
+) -> BoxFuture<'a, Option<SjWaterParsed>> {
     async move {
+        if let Some((row, _proto)) = boxed_shared_get::<UtilityTariffTableProto>(
+            db,
+            dataset_ids::UTILITY_TARIFF,
+            ShareScope::UtilityTerritory,
+            "pwsid:CA4310011".to_string(),
+            "schedule_1_v1",
+        )
+        .await
+        {
+            if let Some(parsed) = row
+                .payload_json
+                .as_deref()
+                .and_then(|s| serde_json::from_str::<SjWaterParsed>(s).ok())
+            {
+                return Some(parsed);
+            }
+        }
         if http.is_offline_external_blocked() {
             return None;
         }
         let cache_key = "sjw_schedule_1:current".to_string();
         if let Some(v) = TARIFF_CACHE.get(&cache_key).await {
             if let Ok(parsed) = serde_json::from_value::<SjWaterParsed>(v) {
+                let proto = sjw_to_tariff_proto(&parsed);
+                let pj = serde_json::to_string(&parsed).ok();
+                let su = parsed.schedule_pdf_url.clone();
+                boxed_shared_put(
+                    db,
+                    dataset_ids::UTILITY_TARIFF,
+                    ShareScope::UtilityTerritory,
+                    "pwsid:CA4310011".to_string(),
+                    "schedule_1_v1",
+                    state_geo_index("CA"),
+                    proto,
+                    pj,
+                    "San Jose Water CPUC Schedule 1".to_string(),
+                    su,
+                    UTILITY_TARIFF_TTL_SECS,
+                )
+                .await;
                 return Some(parsed);
             }
         }
         static S1_HREF_RE: Lazy<Regex> =
             Lazy::new(|| Regex::new(r#"(?i)href="([^"]*schedule-?1-[^"]+\.pdf)""#).unwrap());
-        let html =
-            boxed_get_text(http, SJW_BILLING_SCHEDULES_URL, 4000, 3500, 0, 6 * 3600).await?;
+        let html = boxed_get_text(http, SJW_BILLING_SCHEDULES_URL, 4000, 3500, 0, 6 * 3600).await?;
         let href = S1_HREF_RE.captures(&html).map(|c| c[1].to_string())?;
         let pdf_url = if href.starts_with("http") {
             href
@@ -922,6 +1308,22 @@ fn fetch_cached_sjw_tariff<'a>(http: &'a HttpClient) -> BoxFuture<'a, Option<SjW
         if let Ok(jv) = serde_json::to_value(&parsed) {
             TARIFF_CACHE.insert(cache_key, jv).await;
         }
+        let proto = sjw_to_tariff_proto(&parsed);
+        let pj = serde_json::to_string(&parsed).ok();
+        boxed_shared_put(
+            db,
+            dataset_ids::UTILITY_TARIFF,
+            ShareScope::UtilityTerritory,
+            "pwsid:CA4310011".to_string(),
+            "schedule_1_v1",
+            state_geo_index("CA"),
+            proto,
+            pj,
+            "San Jose Water CPUC Schedule 1".to_string(),
+            pdf_url,
+            UTILITY_TARIFF_TTL_SECS,
+        )
+        .await;
         Some(parsed)
     }
     .boxed()
@@ -931,7 +1333,46 @@ fn fetch_cached_wvcr_campbell_trash<'a>(
     http: &'a HttpClient,
     city_slug: &'a str,
 ) -> BoxFuture<'a, Option<(i64, String, String)>> {
+    fetch_cached_wvcr_campbell_trash_with_db(http, None, city_slug)
+}
+
+fn fetch_cached_wvcr_campbell_trash_with_db<'a>(
+    http: &'a HttpClient,
+    db: Option<&'a DbStore>,
+    city_slug: &'a str,
+) -> BoxFuture<'a, Option<(i64, String, String)>> {
     async move {
+        let scope_key = format!("us:ca:wvcr:{city_slug}:trash");
+        if let Some((row, proto)) = boxed_shared_get::<UtilityTariffTableProto>(
+            db,
+            dataset_ids::UTILITY_TARIFF,
+            ShareScope::UtilityTerritory,
+            scope_key.clone(),
+            "res_trash_v1",
+        )
+        .await
+        {
+            if let Some(v) = row
+                .payload_json
+                .as_deref()
+                .and_then(|s| serde_json::from_str::<Value>(s).ok())
+            {
+                if let (Some(usd), Some(src), Some(url)) = (
+                    v.get("usd").and_then(|x| x.as_i64()),
+                    v.get("src").and_then(|x| x.as_str()),
+                    v.get("url").and_then(|x| x.as_str()),
+                ) {
+                    return Some((usd, src.to_string(), url.to_string()));
+                }
+            }
+            if proto.monthly_base_fee_usd > 0.0 {
+                return Some((
+                    proto.monthly_base_fee_usd.round() as i64,
+                    proto.effective_date,
+                    proto.tariff_url,
+                ));
+            }
+        }
         if http.is_offline_external_blocked() {
             return None;
         }
@@ -942,6 +1383,31 @@ fn fetch_cached_wvcr_campbell_trash<'a>(
                 v.get("src").and_then(|x| x.as_str()),
                 v.get("url").and_then(|x| x.as_str()),
             ) {
+                let proto = UtilityTariffTableProto {
+                    utility_id: scope_key.clone(),
+                    service_kind: "trash".to_string(),
+                    carrier_name: "West Valley Collection & Recycling (WVC&R)".to_string(),
+                    rate_schedule: format!("WVC&R {city_slug} Residential Single-Family"),
+                    monthly_base_fee_usd: usd as f64,
+                    tariff_url: url.to_string(),
+                    effective_date: src.to_string(),
+                    fetched_at_rfc3339: now_iso(),
+                    ..Default::default()
+                };
+                boxed_shared_put(
+                    db,
+                    dataset_ids::UTILITY_TARIFF,
+                    ShareScope::UtilityTerritory,
+                    scope_key,
+                    "res_trash_v1",
+                    state_geo_index("CA"),
+                    proto,
+                    Some(v.to_string()),
+                    src.to_string(),
+                    url.to_string(),
+                    UTILITY_TARIFF_TTL_SECS,
+                )
+                .await;
                 return Some((usd, src.to_string(), url.to_string()));
             }
         }
@@ -956,25 +1422,91 @@ fn fetch_cached_wvcr_campbell_trash<'a>(
         let pb = boxed_get_bytes(http, &pdf_url, 4500, 4000, 0, Some(3 * 1024 * 1024)).await?;
         let text = pdf_extract::extract_text_from_mem(&pb).ok()?;
         let (usd, src) = parse_wvcr_campbell_pdf_text(&text, city_slug, &pdf_url).ok()?;
-        TARIFF_CACHE
-            .insert(
-                cache_key,
-                serde_json::json!({ "usd": usd, "src": src, "url": pdf_url }),
-            )
-            .await;
+        let jv = serde_json::json!({ "usd": usd, "src": src, "url": pdf_url });
+        TARIFF_CACHE.insert(cache_key, jv.clone()).await;
+        let proto = UtilityTariffTableProto {
+            utility_id: scope_key.clone(),
+            service_kind: "trash".to_string(),
+            carrier_name: "West Valley Collection & Recycling (WVC&R)".to_string(),
+            rate_schedule: format!("WVC&R {city_slug} Residential Single-Family"),
+            monthly_base_fee_usd: usd as f64,
+            tariff_url: pdf_url.clone(),
+            effective_date: src.clone(),
+            fetched_at_rfc3339: now_iso(),
+            ..Default::default()
+        };
+        boxed_shared_put(
+            db,
+            dataset_ids::UTILITY_TARIFF,
+            ShareScope::UtilityTerritory,
+            scope_key,
+            "res_trash_v1",
+            state_geo_index("CA"),
+            proto,
+            Some(jv.to_string()),
+            src.clone(),
+            pdf_url.clone(),
+            UTILITY_TARIFF_TTL_SECS,
+        )
+        .await;
         Some((usd, src, pdf_url))
     }
     .boxed()
 }
 
 fn fetch_cached_wvsd_rate<'a>(http: &'a HttpClient) -> BoxFuture<'a, Option<i64>> {
+    fetch_cached_wvsd_rate_with_db(http, None)
+}
+
+fn fetch_cached_wvsd_rate_with_db<'a>(
+    http: &'a HttpClient,
+    db: Option<&'a DbStore>,
+) -> BoxFuture<'a, Option<i64>> {
     async move {
+        if let Some((_row, proto)) = boxed_shared_get::<UtilityTariffTableProto>(
+            db,
+            dataset_ids::UTILITY_TARIFF,
+            ShareScope::UtilityTerritory,
+            "us:ca:scc:wvsd:sewer".to_string(),
+            "res_sewer_v1",
+        )
+        .await
+        {
+            if proto.monthly_base_fee_usd > 0.0 {
+                return Some(proto.monthly_base_fee_usd.round() as i64);
+            }
+        }
         if http.is_offline_external_blocked() {
             return None;
         }
         let cache_key = "wvsd_sfd_annual:current".to_string();
         if let Some(v) = TARIFF_CACHE.get(&cache_key).await {
             if let Some(mo) = v.as_i64() {
+                let proto = UtilityTariffTableProto {
+                    utility_id: "us:ca:scc:wvsd:sewer".to_string(),
+                    service_kind: "sewer".to_string(),
+                    carrier_name: "West Valley Sanitation District".to_string(),
+                    rate_schedule: "WVSD SFD Residential Annual Charge / 12".to_string(),
+                    monthly_base_fee_usd: mo as f64,
+                    tariff_url: WVSD_DOC_URL.to_string(),
+                    effective_date: "current".to_string(),
+                    fetched_at_rfc3339: now_iso(),
+                    ..Default::default()
+                };
+                boxed_shared_put(
+                    db,
+                    dataset_ids::UTILITY_TARIFF,
+                    ShareScope::UtilityTerritory,
+                    "us:ca:scc:wvsd:sewer".to_string(),
+                    "res_sewer_v1",
+                    state_geo_index("CA"),
+                    proto,
+                    None,
+                    "West Valley Sanitation District Fee Schedule".to_string(),
+                    WVSD_DOC_URL.to_string(),
+                    UTILITY_TARIFF_TTL_SECS,
+                )
+                .await;
                 return Some(mo);
             }
         }
@@ -982,7 +1514,8 @@ fn fetch_cached_wvsd_rate<'a>(http: &'a HttpClient) -> BoxFuture<'a, Option<i64>
         let text = pdf_extract::extract_text_from_mem(&pb).ok()?;
         static WVSD_AMT_RE: Lazy<Regex> =
             Lazy::new(|| Regex::new(r"\$\s*(\d{3,4}(?:,\d{3})?\.\d{2})").unwrap());
-        let clean = collapse_pdf_number_spaces(&text.split_whitespace().collect::<Vec<_>>().join(" "));
+        let clean =
+            collapse_pdf_number_spaces(&text.split_whitespace().collect::<Vec<_>>().join(" "));
         // Extract SFD/townhouse annual sanitary sewer charge (~$450-$1,200/yr)
         let mut found_mo = None;
         for cap in WVSD_AMT_RE.captures_iter(&clean) {
@@ -994,6 +1527,31 @@ fn fetch_cached_wvsd_rate<'a>(http: &'a HttpClient) -> BoxFuture<'a, Option<i64>
         }
         if let Some(mo) = found_mo {
             TARIFF_CACHE.insert(cache_key, serde_json::json!(mo)).await;
+            let proto = UtilityTariffTableProto {
+                utility_id: "us:ca:scc:wvsd:sewer".to_string(),
+                service_kind: "sewer".to_string(),
+                carrier_name: "West Valley Sanitation District".to_string(),
+                rate_schedule: "WVSD SFD Residential Annual Charge / 12".to_string(),
+                monthly_base_fee_usd: mo as f64,
+                tariff_url: WVSD_DOC_URL.to_string(),
+                effective_date: "current".to_string(),
+                fetched_at_rfc3339: now_iso(),
+                ..Default::default()
+            };
+            boxed_shared_put(
+                db,
+                dataset_ids::UTILITY_TARIFF,
+                ShareScope::UtilityTerritory,
+                "us:ca:scc:wvsd:sewer".to_string(),
+                "res_sewer_v1",
+                state_geo_index("CA"),
+                proto,
+                None,
+                "West Valley Sanitation District Fee Schedule".to_string(),
+                WVSD_DOC_URL.to_string(),
+                UTILITY_TARIFF_TTL_SECS,
+            )
+            .await;
         }
         found_mo
     }
@@ -1005,7 +1563,38 @@ fn query_eia861_electric_point<'a>(
     lat: f64,
     lon: f64,
 ) -> BoxFuture<'a, Option<(String, String, Option<f64>)>> {
+    query_eia861_electric_point_with_db(http, None, lat, lon)
+}
+
+fn query_eia861_electric_point_with_db<'a>(
+    http: &'a HttpClient,
+    db: Option<&'a DbStore>,
+    lat: f64,
+    lon: f64,
+) -> BoxFuture<'a, Option<(String, String, Option<f64>)>> {
     async move {
+        let geo_pair = point_geo_index(lat, lon, None);
+        if let Some((ref gh5, _)) = geo_pair {
+            if let Some((row, proto)) = boxed_shared_get::<UtilityTerritoryProto>(
+                db,
+                dataset_ids::UTILITY_TERRITORY,
+                ShareScope::Geohash5,
+                gh5.clone(),
+                "eia861_electric",
+            )
+            .await
+            {
+                let rate = row
+                    .payload_json
+                    .as_deref()
+                    .and_then(|s| serde_json::from_str::<Value>(s).ok())
+                    .and_then(|v| v.get("rateUsd").and_then(|x| x.as_f64()));
+                return Some((proto.carrier_name, proto.utility_type, rate));
+            }
+        }
+        if http.is_offline_external_blocked() {
+            return None;
+        }
         let feats = boxed_arcgis_point(
             http,
             EIA861_ELECTRIC_H3_URL.to_string(),
@@ -1042,7 +1631,43 @@ fn query_eia861_electric_point<'a>(
             .and_then(|v| v.as_f64())
             .or_else(|| attr.get("Res_Electricity_Rate_Nom_2024").and_then(|v| v.as_f64()))
             .filter(|&c| c > 2.0 && c < 95.0);
-        Some((name, utility_type, cents.map(|c| round_n(c / 100.0, 4))))
+        let rate_usd = cents.map(|c| round_n(c / 100.0, 4));
+        if let Some((gh5, mut geo)) = geo_pair {
+            geo.state = attr
+                .get("STATE")
+                .and_then(|v| v.as_str())
+                .map(|s| s.trim().to_ascii_uppercase())
+                .filter(|s| !s.is_empty());
+            let proto = UtilityTerritoryProto {
+                service_kind: "electric".to_string(),
+                geo_key: gh5.clone(),
+                carrier_name: name.clone(),
+                short_name: name.clone(),
+                utility_type: utility_type.clone(),
+                cca_program: None,
+                pwsid: None,
+                boundary_geojson: None,
+                source_name: "Esri / EIA Form 861 H3 Residential Utility Territory".to_string(),
+                source_url: EIA861_ELECTRIC_H3_URL.to_string(),
+                fetched_at_rfc3339: now_iso(),
+            };
+            let pj = serde_json::json!({ "rateUsd": rate_usd }).to_string();
+            boxed_shared_put(
+                db,
+                dataset_ids::UTILITY_TERRITORY,
+                ShareScope::Geohash5,
+                gh5,
+                "eia861_electric",
+                geo,
+                proto,
+                Some(pj),
+                "Esri / EIA Form 861 H3".to_string(),
+                EIA861_ELECTRIC_H3_URL.to_string(),
+                UTILITY_TERRITORY_TTL_SECS,
+            )
+            .await;
+        }
+        Some((name, utility_type, rate_usd))
     }
     .boxed()
 }
@@ -1051,8 +1676,56 @@ fn query_cec_electric_ca<'a>(
     http: &'a HttpClient,
     lat: f64,
     lon: f64,
-) -> BoxFuture<'a, (Option<(String, String, String, Option<String>)>, Option<(String, Option<String>)>)> {
+) -> BoxFuture<
+    'a,
+    (
+        Option<(String, String, String, Option<String>)>,
+        Option<(String, Option<String>)>,
+    ),
+> {
     async move {
+        let active_db = ExtensionHub::global().active_db();
+        query_cec_electric_ca_with_db(http, active_db.as_ref(), lat, lon).await
+    }
+    .boxed()
+}
+
+fn query_cec_electric_ca_with_db<'a>(
+    http: &'a HttpClient,
+    db: Option<&'a DbStore>,
+    lat: f64,
+    lon: f64,
+) -> BoxFuture<
+    'a,
+    (
+        Option<(String, String, String, Option<String>)>,
+        Option<(String, Option<String>)>,
+    ),
+> {
+    async move {
+        let geo_pair = point_geo_index(lat, lon, Some("CA"));
+        if let Some((ref gh5, _)) = geo_pair {
+            if let Some((row, _proto)) = boxed_shared_get::<UtilityTerritoryProto>(
+                db,
+                dataset_ids::UTILITY_TERRITORY,
+                ShareScope::Geohash5,
+                gh5.clone(),
+                "cec_electric_ca",
+            )
+            .await
+            {
+                if let Some(parsed) = row
+                    .payload_json
+                    .as_deref()
+                    .and_then(|s| serde_json::from_str::<CachedCecElectric>(s).ok())
+                {
+                    return (parsed.iou, parsed.cca);
+                }
+            }
+        }
+        if http.is_offline_external_blocked() {
+            return (None, None);
+        }
         let iou_fut = boxed_arcgis_point(
             http,
             CEC_ELECTRIC_IOU_URL.to_string(),
@@ -1074,7 +1747,11 @@ fn query_cec_electric_ca<'a>(
         let (iou_r, cca_r) = tokio::join!(iou_fut, cca_fut);
 
         let iou = iou_r.and_then(|v| v.into_iter().next()).and_then(|a| {
-            let full = a.get("Utility").and_then(|x| x.as_str())?.trim().to_string();
+            let full = a
+                .get("Utility")
+                .and_then(|x| x.as_str())?
+                .trim()
+                .to_string();
             let acr = a
                 .get("Acronym")
                 .and_then(|x| x.as_str())
@@ -1101,6 +1778,60 @@ fn query_cec_electric_ca<'a>(
             let url = a.get("URL").and_then(|x| x.as_str()).map(String::from);
             Some((nm, url))
         });
+        if iou.is_some() || cca.is_some() {
+            if let Some((gh5, geo)) = geo_pair {
+                let carrier = iou
+                    .as_ref()
+                    .map(|(u, _, _, _)| u.clone())
+                    .or_else(|| cca.as_ref().map(|(n, _)| n.clone()))
+                    .unwrap_or_default();
+                let short = iou
+                    .as_ref()
+                    .map(|(_, a, _, _)| a.clone())
+                    .unwrap_or_else(|| carrier.clone());
+                let utype = iou
+                    .as_ref()
+                    .map(|(_, _, t, _)| t.clone())
+                    .unwrap_or_else(|| "cca".to_string());
+                let src_url = iou
+                    .as_ref()
+                    .and_then(|(_, _, _, u)| u.clone())
+                    .or_else(|| cca.as_ref().and_then(|(_, u)| u.clone()))
+                    .unwrap_or_else(|| CEC_ELECTRIC_IOU_URL.to_string());
+                let proto = UtilityTerritoryProto {
+                    service_kind: "electric".to_string(),
+                    geo_key: gh5.clone(),
+                    carrier_name: carrier,
+                    short_name: short,
+                    utility_type: utype,
+                    cca_program: cca.as_ref().map(|(n, _)| n.clone()),
+                    pwsid: None,
+                    boundary_geojson: None,
+                    source_name: "CEC California Electric Load-Serving Entities".to_string(),
+                    source_url: src_url.clone(),
+                    fetched_at_rfc3339: now_iso(),
+                };
+                let pj = serde_json::to_string(&CachedCecElectric {
+                    iou: iou.clone(),
+                    cca: cca.clone(),
+                })
+                .ok();
+                boxed_shared_put(
+                    db,
+                    dataset_ids::UTILITY_TERRITORY,
+                    ShareScope::Geohash5,
+                    gh5,
+                    "cec_electric_ca",
+                    geo,
+                    proto,
+                    pj,
+                    "CEC California Electric ArcGIS".to_string(),
+                    src_url,
+                    UTILITY_TERRITORY_TTL_SECS,
+                )
+                .await;
+            }
+        }
         (iou, cca)
     }
     .boxed()
@@ -1112,7 +1843,40 @@ fn query_gas_territory_point<'a>(
     lat: f64,
     lon: f64,
 ) -> BoxFuture<'a, Option<(String, Option<String>)>> {
+    query_gas_territory_point_with_db(http, None, state, lat, lon)
+}
+
+fn query_gas_territory_point_with_db<'a>(
+    http: &'a HttpClient,
+    db: Option<&'a DbStore>,
+    state: &'a str,
+    lat: f64,
+    lon: f64,
+) -> BoxFuture<'a, Option<(String, Option<String>)>> {
     async move {
+        let geo_pair = point_geo_index(lat, lon, Some(state));
+        if let Some((ref gh5, _)) = geo_pair {
+            if let Some((row, proto)) = boxed_shared_get::<UtilityTerritoryProto>(
+                db,
+                dataset_ids::UTILITY_TERRITORY,
+                ShareScope::Geohash5,
+                gh5.clone(),
+                "gas_territory",
+            )
+            .await
+            {
+                let web = row
+                    .payload_json
+                    .as_deref()
+                    .and_then(|s| serde_json::from_str::<Value>(s).ok())
+                    .and_then(|v| v.get("website").and_then(|x| x.as_str()).map(String::from));
+                return Some((proto.carrier_name, web));
+            }
+        }
+        if http.is_offline_external_blocked() {
+            return None;
+        }
+        let mut found: Option<(String, Option<String>)> = None;
         if state == "CA" {
             if let Some(feats) = boxed_arcgis_point(
                 http,
@@ -1131,30 +1895,75 @@ fn query_gas_territory_point<'a>(
                         .and_then(|v| v.as_str())
                         .filter(|s| !s.trim().is_empty())
                     {
-                        return Some((u.trim().to_string(), None));
+                        found = Some((u.trim().to_string(), None));
                     }
                 }
             }
         }
-        let feats = boxed_arcgis_point(
-            http,
-            HIFLD_GAS_LDC_URL.to_string(),
-            lat,
-            lon,
-            "NAME,TYPE,WEBSITE",
-            3200,
-            3000,
-        )
-        .await?;
-        let a = feats.first()?;
-        let nm = a.get("NAME").and_then(|v| v.as_str())?.trim().to_string();
-        let web = a
-            .get("WEBSITE")
-            .and_then(|v| v.as_str())
-            .map(str::trim)
-            .filter(|s| s.starts_with("http"))
-            .map(String::from);
-        Some((nm, web))
+        if found.is_none() {
+            let feats = boxed_arcgis_point(
+                http,
+                HIFLD_GAS_LDC_URL.to_string(),
+                lat,
+                lon,
+                "NAME,TYPE,WEBSITE",
+                3200,
+                3000,
+            )
+            .await?;
+            let a = feats.first()?;
+            let nm = a.get("NAME").and_then(|v| v.as_str())?.trim().to_string();
+            let web = a
+                .get("WEBSITE")
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| s.starts_with("http"))
+                .map(String::from);
+            found = Some((nm, web));
+        }
+        if let (Some((ref nm, ref web)), Some((gh5, geo))) = (&found, geo_pair) {
+            let src_url = web.clone().unwrap_or_else(|| {
+                if state == "CA" {
+                    CEC_GAS_AREA_URL.to_string()
+                } else {
+                    HIFLD_GAS_LDC_URL.to_string()
+                }
+            });
+            let src_name = if state == "CA" {
+                "CEC California Natural Gas Service Area".to_string()
+            } else {
+                "HIFLD Natural Gas LDC Service Territories".to_string()
+            };
+            let proto = UtilityTerritoryProto {
+                service_kind: "gas".to_string(),
+                geo_key: gh5.clone(),
+                carrier_name: nm.clone(),
+                short_name: nm.clone(),
+                utility_type: "gas_ldc".to_string(),
+                cca_program: None,
+                pwsid: None,
+                boundary_geojson: None,
+                source_name: src_name.clone(),
+                source_url: src_url.clone(),
+                fetched_at_rfc3339: now_iso(),
+            };
+            let pj = serde_json::json!({ "website": web }).to_string();
+            boxed_shared_put(
+                db,
+                dataset_ids::UTILITY_TERRITORY,
+                ShareScope::Geohash5,
+                gh5,
+                "gas_territory",
+                geo,
+                proto,
+                Some(pj),
+                src_name,
+                src_url,
+                UTILITY_TERRITORY_TTL_SECS,
+            )
+            .await;
+        }
+        found
     }
     .boxed()
 }
@@ -1165,17 +1974,79 @@ fn query_eia_v2_state_rate<'a>(
     state: &'a str,
     electric: bool,
 ) -> BoxFuture<'a, Option<(f64, String)>> {
+    query_eia_v2_state_rate_with_db(http, env, None, state, electric)
+}
+
+fn query_eia_v2_state_rate_with_db<'a>(
+    http: &'a HttpClient,
+    env: &'a EnvConfig,
+    db: Option<&'a DbStore>,
+    state: &'a str,
+    electric: bool,
+) -> BoxFuture<'a, Option<(f64, String)>> {
     async move {
-        if state.len() != 2 || http.is_offline_external_blocked() {
+        if state.len() != 2 {
             return None;
         }
         let st = state.to_ascii_uppercase();
+        let scope_key = format!(
+            "us:{}:eia_v2:{}",
+            st.to_ascii_lowercase(),
+            if electric { "electric" } else { "gas" }
+        );
+        if let Some((_row, proto)) = boxed_shared_get::<UtilityTariffTableProto>(
+            db,
+            dataset_ids::UTILITY_TARIFF,
+            ShareScope::UtilityTerritory,
+            scope_key.clone(),
+            "eia_res_v1",
+        )
+        .await
+        {
+            let rate = if electric {
+                proto.rate_per_kwh_usd
+            } else {
+                proto.rate_per_therm_usd
+            };
+            if let Some(r) = rate {
+                return Some((r, proto.effective_date));
+            }
+        }
+        if http.is_offline_external_blocked() {
+            return None;
+        }
         let cache_key = format!("eia_v2:{}:{}", if electric { "elec" } else { "gas" }, st);
         if let Some(v) = TARIFF_CACHE.get(&cache_key).await {
             if let (Some(r), Some(p)) = (
                 v.get("rate").and_then(|x| x.as_f64()),
                 v.get("period").and_then(|x| x.as_str()),
             ) {
+                let proto = UtilityTariffTableProto {
+                    utility_id: scope_key.clone(),
+                    service_kind: if electric { "electric" } else { "gas" }.to_string(),
+                    carrier_name: format!("EIA State {st} Residential Average"),
+                    rate_schedule: format!("EIA v2 {st} Monthly ({p})"),
+                    rate_per_kwh_usd: electric.then_some(r),
+                    rate_per_therm_usd: (!electric).then_some(r),
+                    tariff_url: "https://www.eia.gov/opendata/".to_string(),
+                    effective_date: p.to_string(),
+                    fetched_at_rfc3339: now_iso(),
+                    ..Default::default()
+                };
+                boxed_shared_put(
+                    db,
+                    dataset_ids::UTILITY_TARIFF,
+                    ShareScope::UtilityTerritory,
+                    scope_key,
+                    "eia_res_v1",
+                    state_geo_index(&st),
+                    proto,
+                    None,
+                    "EIA Open Data API v2".to_string(),
+                    "https://www.eia.gov/opendata/".to_string(),
+                    UTILITY_TARIFF_TTL_SECS,
+                )
+                .await;
                 return Some((r, p.to_string()));
             }
         }
@@ -1214,6 +2085,32 @@ fn query_eia_v2_state_rate<'a>(
         TARIFF_CACHE
             .insert(cache_key, serde_json::json!({ "rate": val, "period": period }))
             .await;
+        let proto = UtilityTariffTableProto {
+            utility_id: scope_key.clone(),
+            service_kind: if electric { "electric" } else { "gas" }.to_string(),
+            carrier_name: format!("EIA State {st} Residential Average"),
+            rate_schedule: format!("EIA v2 {st} Monthly ({period})"),
+            rate_per_kwh_usd: electric.then_some(val),
+            rate_per_therm_usd: (!electric).then_some(val),
+            tariff_url: "https://www.eia.gov/opendata/".to_string(),
+            effective_date: period.clone(),
+            fetched_at_rfc3339: now_iso(),
+            ..Default::default()
+        };
+        boxed_shared_put(
+            db,
+            dataset_ids::UTILITY_TARIFF,
+            ShareScope::UtilityTerritory,
+            scope_key,
+            "eia_res_v1",
+            state_geo_index(&st),
+            proto,
+            None,
+            "EIA Open Data API v2".to_string(),
+            "https://www.eia.gov/opendata/".to_string(),
+            UTILITY_TARIFF_TTL_SECS,
+        )
+        .await;
         Some((val, period))
     }
     .boxed()
@@ -1226,6 +2123,42 @@ fn query_openei_urdb_rate<'a>(
     lon: f64,
 ) -> BoxFuture<'a, Option<(String, String, f64, f64, String)>> {
     async move {
+        let active_db = ExtensionHub::global().active_db();
+        query_openei_urdb_rate_with_db(http, env, active_db.as_ref(), lat, lon).await
+    }
+    .boxed()
+}
+
+fn query_openei_urdb_rate_with_db<'a>(
+    http: &'a HttpClient,
+    env: &'a EnvConfig,
+    db: Option<&'a DbStore>,
+    lat: f64,
+    lon: f64,
+) -> BoxFuture<'a, Option<(String, String, f64, f64, String)>> {
+    async move {
+        let geo_pair = point_geo_index(lat, lon, None);
+        if let Some((ref gh5, _)) = geo_pair {
+            if let Some((_row, proto)) = boxed_shared_get::<UtilityTariffTableProto>(
+                db,
+                dataset_ids::UTILITY_TARIFF,
+                ShareScope::UtilityTerritory,
+                format!("urdb:geohash5:{gh5}"),
+                "urdb_res_v1",
+            )
+            .await
+            {
+                if let Some(rate) = proto.rate_per_kwh_usd {
+                    return Some((
+                        proto.carrier_name,
+                        proto.rate_schedule,
+                        rate,
+                        proto.monthly_base_fee_usd,
+                        proto.tariff_url,
+                    ));
+                }
+            }
+        }
         let api_key = env.get("OPENEI_API_KEY").filter(|s| !s.trim().is_empty())?;
         if http.is_offline_external_blocked() {
             return None;
@@ -1251,7 +2184,10 @@ fn query_openei_urdb_rate<'a>(
             .and_then(|v| v.as_str())
             .unwrap_or("Residential Schedule")
             .to_string();
-        let fixed_mo = item.get("fixedmonthlycharge").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let fixed_mo = item
+            .get("fixedmonthlycharge")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
         let uri = item
             .get("uri")
             .and_then(|v| v.as_str())
@@ -1275,8 +2211,43 @@ fn query_openei_urdb_rate<'a>(
         if rates.is_empty() {
             return None;
         }
-        let avg = rates.iter().sum::<f64>() / rates.len() as f64;
-        Some((utility, sched_name, round_n(avg, 4), round_n(fixed_mo, 2), uri))
+        let avg = round_n(rates.iter().sum::<f64>() / rates.len() as f64, 4);
+        let fixed = round_n(fixed_mo, 2);
+        if let Some((gh5, geo)) = geo_pair {
+            let scope_key = format!("urdb:geohash5:{gh5}");
+            let proto = UtilityTariffTableProto {
+                utility_id: scope_key.clone(),
+                service_kind: "electric".to_string(),
+                carrier_name: utility.clone(),
+                rate_schedule: sched_name.clone(),
+                rate_per_kwh_usd: Some(avg),
+                off_peak_kwh_usd: Some(round_n(avg * 0.90, 3)),
+                peak_kwh_usd: Some(round_n(avg * 1.15, 3)),
+                rate_per_therm_usd: None,
+                volumetric_water_rate_usd: None,
+                water_rate_unit: None,
+                monthly_base_fee_usd: fixed,
+                solar_nem_policy: None,
+                tariff_url: uri.clone(),
+                effective_date: "urdb_v7".to_string(),
+                fetched_at_rfc3339: now_iso(),
+            };
+            boxed_shared_put(
+                db,
+                dataset_ids::UTILITY_TARIFF,
+                ShareScope::UtilityTerritory,
+                scope_key,
+                "urdb_res_v1",
+                geo,
+                proto,
+                None,
+                "OpenEI URDB v7 Live Utility Rate Database".to_string(),
+                uri.clone(),
+                UTILITY_TARIFF_TTL_SECS,
+            )
+            .await;
+        }
+        Some((utility, sched_name, avg, fixed, uri))
     }
     .boxed()
 }
@@ -1287,7 +2258,35 @@ fn query_retail_water_boundary<'a>(
     lat: f64,
     lon: f64,
 ) -> BoxFuture<'a, Option<(String, Option<String>)>> {
+    query_retail_water_boundary_with_db(http, None, state, lat, lon)
+}
+
+fn query_retail_water_boundary_with_db<'a>(
+    http: &'a HttpClient,
+    db: Option<&'a DbStore>,
+    state: &'a str,
+    lat: f64,
+    lon: f64,
+) -> BoxFuture<'a, Option<(String, Option<String>)>> {
     async move {
+        let geo_pair = point_geo_index(lat, lon, Some(state));
+        if let Some((ref gh5, _)) = geo_pair {
+            if let Some((_row, proto)) = boxed_shared_get::<UtilityTerritoryProto>(
+                db,
+                dataset_ids::UTILITY_TERRITORY,
+                ShareScope::Geohash5,
+                gh5.clone(),
+                "water_retail",
+            )
+            .await
+            {
+                return Some((proto.carrier_name, proto.pwsid));
+            }
+        }
+        if http.is_offline_external_blocked() {
+            return None;
+        }
+        let mut matched: Option<(String, Option<String>)> = None;
         if state == "CA" {
             if let Some(feats) = boxed_arcgis_point(
                 http,
@@ -1316,38 +2315,76 @@ fn query_retail_water_boundary<'a>(
                             .get("SABL_PWSID")
                             .and_then(|v| v.as_str())
                             .map(|s| s.trim().to_string());
-                        return Some((nm.to_string(), pwsid));
+                        matched = Some((nm.to_string(), pwsid));
+                        break;
                     }
                 }
             }
         }
-        let feats = boxed_arcgis_point(
-            http,
-            EPA_SDWIS_WATER_URL.to_string(),
-            lat,
-            lon,
-            "PWSID,PWS_Name,Service_Area_Type,Population_Served_Count",
-            3200,
-            3000,
-        )
-        .await?;
-        for a in feats {
-            let sat = a
-                .get("Service_Area_Type")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_ascii_lowercase();
-            let nm = a
-                .get("PWS_Name")
-                .and_then(|v| v.as_str())
-                .map(str::trim)
-                .unwrap_or("");
-            if !nm.is_empty() && !sat.contains("wholesaler") && !is_wholesaler_name(nm) {
-                let pwsid = a.get("PWSID").and_then(|v| v.as_str()).map(String::from);
-                return Some((nm.to_string(), pwsid));
+        if matched.is_none() {
+            let feats = boxed_arcgis_point(
+                http,
+                EPA_SDWIS_WATER_URL.to_string(),
+                lat,
+                lon,
+                "PWSID,PWS_Name,Service_Area_Type,Population_Served_Count",
+                3200,
+                3000,
+            )
+            .await?;
+            for a in feats {
+                let sat = a
+                    .get("Service_Area_Type")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_ascii_lowercase();
+                let nm = a
+                    .get("PWS_Name")
+                    .and_then(|v| v.as_str())
+                    .map(str::trim)
+                    .unwrap_or("");
+                if !nm.is_empty() && !sat.contains("wholesaler") && !is_wholesaler_name(nm) {
+                    let pwsid = a.get("PWSID").and_then(|v| v.as_str()).map(String::from);
+                    matched = Some((nm.to_string(), pwsid));
+                    break;
+                }
             }
         }
-        None
+        if let (Some((ref wname, ref wpwsid)), Some((gh5, geo))) = (&matched, geo_pair) {
+            let src_url = if state == "CA" {
+                CA_SWRCB_WATER_URL.to_string()
+            } else {
+                EPA_SDWIS_WATER_URL.to_string()
+            };
+            let proto = UtilityTerritoryProto {
+                service_kind: "water".to_string(),
+                geo_key: gh5.clone(),
+                carrier_name: wname.clone(),
+                short_name: wname.clone(),
+                utility_type: "water_retail".to_string(),
+                cca_program: None,
+                pwsid: wpwsid.clone(),
+                boundary_geojson: None,
+                source_name: "CA SWRCB / EPA SDWIS Retail Water Boundary".to_string(),
+                source_url: src_url.clone(),
+                fetched_at_rfc3339: now_iso(),
+            };
+            boxed_shared_put(
+                db,
+                dataset_ids::UTILITY_TERRITORY,
+                ShareScope::Geohash5,
+                gh5,
+                "water_retail",
+                geo,
+                proto,
+                None,
+                "CA SWRCB / EPA SDWIS Retail Water Boundary".to_string(),
+                src_url,
+                UTILITY_TERRITORY_TTL_SECS,
+            )
+            .await;
+        }
+        matched
     }
     .boxed()
 }
@@ -1357,8 +2394,34 @@ fn query_scc_sanitation_district<'a>(
     lat: f64,
     lon: f64,
 ) -> BoxFuture<'a, Option<String>> {
+    query_scc_sanitation_district_with_db(http, None, lat, lon)
+}
+
+fn query_scc_sanitation_district_with_db<'a>(
+    http: &'a HttpClient,
+    db: Option<&'a DbStore>,
+    lat: f64,
+    lon: f64,
+) -> BoxFuture<'a, Option<String>> {
     async move {
         if !(36.9..=37.55).contains(&lat) || !(-122.25..=-121.35).contains(&lon) {
+            return None;
+        }
+        let geo_pair = point_geo_index(lat, lon, Some("CA"));
+        if let Some((ref gh5, _)) = geo_pair {
+            if let Some((_row, proto)) = boxed_shared_get::<UtilityTerritoryProto>(
+                db,
+                dataset_ids::UTILITY_TERRITORY,
+                ShareScope::Geohash5,
+                gh5.clone(),
+                "sewer_scc",
+            )
+            .await
+            {
+                return Some(proto.carrier_name);
+            }
+        }
+        if http.is_offline_external_blocked() {
             return None;
         }
         let futs = (1..=6).map(|layer| {
@@ -1376,7 +2439,37 @@ fn query_scc_sanitation_district<'a>(
                     .map(str::trim)
                     .filter(|s| !s.is_empty())
                 {
-                    return Some(d.to_string());
+                    let dist = d.to_string();
+                    if let Some((gh5, geo)) = geo_pair {
+                        let proto = UtilityTerritoryProto {
+                            service_kind: "sewer".to_string(),
+                            geo_key: gh5.clone(),
+                            carrier_name: dist.clone(),
+                            short_name: dist.clone(),
+                            utility_type: "sewer_district".to_string(),
+                            cca_program: None,
+                            pwsid: None,
+                            boundary_geojson: None,
+                            source_name: "Santa Clara County Sanitation District GIS".to_string(),
+                            source_url: SCC_SANITATION_BASE_URL.to_string(),
+                            fetched_at_rfc3339: now_iso(),
+                        };
+                        boxed_shared_put(
+                            db,
+                            dataset_ids::UTILITY_TERRITORY,
+                            ShareScope::Geohash5,
+                            gh5,
+                            "sewer_scc",
+                            geo,
+                            proto,
+                            None,
+                            "Santa Clara County Sanitation District GIS".to_string(),
+                            SCC_SANITATION_BASE_URL.to_string(),
+                            UTILITY_TERRITORY_TTL_SECS,
+                        )
+                        .await;
+                    }
+                    return Some(dist);
                 }
             }
         }
@@ -1391,15 +2484,91 @@ pub async fn fetch_live_climate_degree_days(
     lat: f64,
     lon: f64,
 ) -> Option<LiveClimateDegreeDays> {
+    let active_db = ExtensionHub::global().active_db();
+    fetch_live_climate_degree_days_with_db(http, active_db.as_ref(), lat, lon).await
+}
+
+pub async fn fetch_live_climate_degree_days_with_db(
+    http: &HttpClient,
+    db: Option<&DbStore>,
+    lat: f64,
+    lon: f64,
+) -> Option<LiveClimateDegreeDays> {
     async move {
-        if http.is_offline_external_blocked() || !lat.is_finite() || !lon.is_finite() {
+        if !lat.is_finite() || !lon.is_finite() {
             return None;
         }
         let grid_lat = (lat * 10.0).round() / 10.0;
         let grid_lon = (lon * 10.0).round() / 10.0;
         let year = Utc::now().year() - 1;
+        let params_hash = format!("y:{year}");
+        let geo_pair = point_geo_index(lat, lon, None);
+        if let Some((ref gh5, _)) = geo_pair {
+            if let Some((row, proto)) = boxed_shared_get::<ClimateNormalsCellProto>(
+                db,
+                dataset_ids::CLIMATE_NORMALS_CELL,
+                ShareScope::Geohash5,
+                gh5.clone(),
+                &params_hash,
+            )
+            .await
+            {
+                if let Some(parsed) = row
+                    .payload_json
+                    .as_deref()
+                    .and_then(|s| serde_json::from_str::<LiveClimateDegreeDays>(s).ok())
+                {
+                    return Some(parsed);
+                }
+                if let (Some(hdd), Some(cdd)) =
+                    (proto.heating_degree_days_65f, proto.cooling_degree_days_65f)
+                {
+                    return Some(LiveClimateDegreeDays {
+                        cdd_65: cdd.round() as i64,
+                        hdd_65: hdd.round() as i64,
+                        source_name: format!(
+                            "Open-Meteo Historical Weather ({} Daily Mean Degree-Days)",
+                            proto.normal_period
+                        ),
+                        source_url: proto.source_url,
+                        year,
+                    });
+                }
+            }
+        }
+        if http.is_offline_external_blocked() {
+            return None;
+        }
         let key = format!("climate:{grid_lat:.1}:{grid_lon:.1}:{year}");
         if let Some(cached) = CLIMATE_CACHE.get(&key).await {
+            if let Some((gh5, geo)) = geo_pair {
+                let proto = ClimateNormalsCellProto {
+                    grid_key: gh5.clone(),
+                    center_lat: grid_lat,
+                    center_lon: grid_lon,
+                    heating_degree_days_65f: Some(cached.hdd_65 as f64),
+                    cooling_degree_days_65f: Some(cached.cdd_65 as f64),
+                    normal_period: year.to_string(),
+                    source_url: cached.source_url.clone(),
+                    fetched_at_rfc3339: now_iso(),
+                    ..Default::default()
+                };
+                let pj = serde_json::to_string(&cached).ok();
+                boxed_shared_put(
+                    db,
+                    dataset_ids::CLIMATE_NORMALS_CELL,
+                    ShareScope::Geohash5,
+                    gh5,
+                    &params_hash,
+                    geo,
+                    proto,
+                    pj,
+                    cached.source_name.clone(),
+                    cached.source_url.clone(),
+                    CLIMATE_NORMALS_TTL_SECS,
+                )
+                .await;
+            }
             return Some(cached);
         }
         let url = format!(
@@ -1429,6 +2598,34 @@ pub async fn fetch_live_climate_degree_days(
             year,
         };
         CLIMATE_CACHE.insert(key, out.clone()).await;
+        if let Some((gh5, geo)) = geo_pair {
+            let proto = ClimateNormalsCellProto {
+                grid_key: gh5.clone(),
+                center_lat: grid_lat,
+                center_lon: grid_lon,
+                heating_degree_days_65f: Some(out.hdd_65 as f64),
+                cooling_degree_days_65f: Some(out.cdd_65 as f64),
+                normal_period: year.to_string(),
+                source_url: out.source_url.clone(),
+                fetched_at_rfc3339: now_iso(),
+                ..Default::default()
+            };
+            let pj = serde_json::to_string(&out).ok();
+            boxed_shared_put(
+                db,
+                dataset_ids::CLIMATE_NORMALS_CELL,
+                ShareScope::Geohash5,
+                gh5,
+                &params_hash,
+                geo,
+                proto,
+                pj,
+                out.source_name.clone(),
+                out.source_url.clone(),
+                CLIMATE_NORMALS_TTL_SECS,
+            )
+            .await;
+        }
         Some(out)
     }
     .boxed()
@@ -1443,14 +2640,29 @@ fn resolve_live_electric<'a>(
     lon: f64,
 ) -> BoxFuture<'a, Option<LiveElectricTariff>> {
     async move {
+        let active_db = ExtensionHub::global().active_db();
+        resolve_live_electric_with_db(http, env, active_db.as_ref(), q, lat, lon).await
+    }
+    .boxed()
+}
+
+fn resolve_live_electric_with_db<'a>(
+    http: &'a HttpClient,
+    env: &'a EnvConfig,
+    db: Option<&'a DbStore>,
+    q: &'a LiveUtilityQuery,
+    lat: f64,
+    lon: f64,
+) -> BoxFuture<'a, Option<LiveElectricTariff>> {
+    async move {
         let cec_fut = if q.state == "CA" {
-            query_cec_electric_ca(http, lat, lon)
+            query_cec_electric_ca_with_db(http, db, lat, lon)
         } else {
             futures::future::ready((None, None)).boxed()
         };
-        let eia861_fut = query_eia861_electric_point(http, lat, lon);
-        let urdb_fut = query_openei_urdb_rate(http, env, lat, lon);
-        let eia_state_fut = query_eia_v2_state_rate(http, env, &q.state, true);
+        let eia861_fut = query_eia861_electric_point_with_db(http, db, lat, lon);
+        let urdb_fut = query_openei_urdb_rate_with_db(http, env, db, lat, lon);
+        let eia_state_fut = query_eia_v2_state_rate_with_db(http, env, db, &q.state, true);
 
         let ((cec_iou, cec_cca), eia861, urdb, eia_state) =
             tokio::join!(cec_fut, eia861_fut, urdb_fut, eia_state_fut);
@@ -1467,11 +2679,13 @@ fn resolve_live_electric<'a>(
                 .unwrap_or(false);
 
         let cca_name = cec_cca.as_ref().map(|(n, _)| n.as_str()).unwrap_or("");
-        let is_svce = cca_name.to_ascii_lowercase().contains("silicon valley clean")
+        let is_svce = cca_name
+            .to_ascii_lowercase()
+            .contains("silicon valley clean")
             || cca_name.eq_ignore_ascii_case("SVCE");
 
         if is_pge {
-            if let Some(pge_live) = fetch_cached_pge_electric(http, is_svce).await {
+            if let Some(pge_live) = fetch_cached_pge_electric_with_db(http, db, is_svce).await {
                 return Some(pge_live);
             }
         }
@@ -1502,7 +2716,9 @@ fn resolve_live_electric<'a>(
                 off_peak_kwh_usd: round_n(rate * 0.90, 3),
                 peak_kwh_usd: round_n(rate * 1.15, 3),
                 monthly_base_fee_usd: fixed_mo,
-                solar_nem_policy: "Verify utility net metering / net billing tariff on current schedule".to_string(),
+                solar_nem_policy:
+                    "Verify utility net metering / net billing tariff on current schedule"
+                        .to_string(),
                 tariff_url: uri,
                 rate_source: "OpenEI URDB v7 Live Utility Rate Schedule".to_string(),
                 is_live_verified: true,
@@ -1514,7 +2730,10 @@ fn resolve_live_electric<'a>(
             let rate_usd = rate_861
                 .or_else(|| eia_state.as_ref().map(|(r, _)| *r))
                 .or(q.gov_kwh_benchmark)?;
-            let carrier = cec_iou.as_ref().map(|(u, _, _, _)| u.clone()).unwrap_or(name_861);
+            let carrier = cec_iou
+                .as_ref()
+                .map(|(u, _, _, _)| u.clone())
+                .unwrap_or(name_861);
             let short = cec_iou
                 .as_ref()
                 .map(|(_, a, _, _)| a.clone())
@@ -1570,14 +2789,29 @@ fn resolve_live_gas<'a>(
     lon: f64,
 ) -> BoxFuture<'a, Option<LiveGasTariff>> {
     async move {
-        let terr_fut = query_gas_territory_point(http, state, lat, lon);
-        let eia_gas_fut = query_eia_v2_state_rate(http, env, state, false);
+        let active_db = ExtensionHub::global().active_db();
+        resolve_live_gas_with_db(http, env, active_db.as_ref(), state, lat, lon).await
+    }
+    .boxed()
+}
+
+fn resolve_live_gas_with_db<'a>(
+    http: &'a HttpClient,
+    env: &'a EnvConfig,
+    db: Option<&'a DbStore>,
+    state: &'a str,
+    lat: f64,
+    lon: f64,
+) -> BoxFuture<'a, Option<LiveGasTariff>> {
+    async move {
+        let terr_fut = query_gas_territory_point_with_db(http, db, state, lat, lon);
+        let eia_gas_fut = query_eia_v2_state_rate_with_db(http, env, db, state, false);
         let (terr_opt, eia_gas) = tokio::join!(terr_fut, eia_gas_fut);
 
         let (carrier_raw, web_opt) = terr_opt?;
         let lc = carrier_raw.to_ascii_lowercase();
         if lc.contains("pacific gas") || lc.contains("pg&e") {
-            if let Some(pge_gas) = fetch_cached_pge_gas(http).await {
+            if let Some(pge_gas) = fetch_cached_pge_gas_with_db(http, db).await {
                 return Some(pge_gas);
             }
         }
@@ -1606,6 +2840,20 @@ fn resolve_live_wst<'a>(
     lon: f64,
 ) -> BoxFuture<'a, Option<LiveWaterSewerTrashTariff>> {
     async move {
+        let active_db = ExtensionHub::global().active_db();
+        resolve_live_wst_with_db(http, active_db.as_ref(), q, lat, lon).await
+    }
+    .boxed()
+}
+
+fn resolve_live_wst_with_db<'a>(
+    http: &'a HttpClient,
+    db: Option<&'a DbStore>,
+    q: &'a LiveUtilityQuery,
+    lat: f64,
+    lon: f64,
+) -> BoxFuture<'a, Option<LiveWaterSewerTrashTariff>> {
+    async move {
         let mut out = LiveWaterSewerTrashTariff::default();
         let city_slug = normalize_city_slug(&q.city);
 
@@ -1620,13 +2868,13 @@ fn resolve_live_wst<'a>(
             if existing_retail.is_some() {
                 futures::future::ready(existing_retail).boxed()
             } else {
-                query_retail_water_boundary(http, &q.state, lat, lon)
+                query_retail_water_boundary_with_db(http, db, &q.state, lat, lon)
             }
         };
         let scc_sewer_fut = if q.is_private_septic {
             futures::future::ready(None).boxed()
         } else {
-            query_scc_sanitation_district(http, lat, lon)
+            query_scc_sanitation_district_with_db(http, db, lat, lon)
         };
         let wvcr_fut = if !q.hoa_covers_water_trash
             && q.state == "CA"
@@ -1634,7 +2882,7 @@ fn resolve_live_wst<'a>(
                 city_slug.as_str(),
                 "campbell" | "los gatos" | "monte sereno" | "saratoga"
             ) {
-            fetch_cached_wvcr_campbell_trash(http, &city_slug)
+            fetch_cached_wvcr_campbell_trash_with_db(http, db, &city_slug)
         } else {
             futures::future::ready(None).boxed()
         };
@@ -1649,7 +2897,7 @@ fn resolve_live_wst<'a>(
             out.water_pwsid = wpwsid;
             out.water_source_type = Some("municipal".to_string());
             if is_sjw {
-                if let Some(sjw) = fetch_cached_sjw_tariff(http).await {
+                if let Some(sjw) = fetch_cached_sjw_tariff_with_db(http, db).await {
                     out.water_rate_unit = Some("CCF (748 gal)".to_string());
                     out.water_volumetric_rate_usd = Some(sjw.tier1_ccf);
                     out.water_tier_rates_ccf = Some([sjw.tier1_ccf, sjw.tier2_ccf, sjw.tier3_ccf]);
@@ -1669,7 +2917,7 @@ fn resolve_live_wst<'a>(
             out.sewer_carrier_name = Some(sewer_dist.clone());
             out.sewer_type = Some("municipal".to_string());
             if is_wvsd {
-                if let Some(mo) = fetch_cached_wvsd_rate(http).await {
+                if let Some(mo) = fetch_cached_wvsd_rate_with_db(http, db).await {
                     out.sewer_monthly_usd = Some(mo);
                     out.sewer_tariff_url = Some(WVSD_SERVICE_URL.to_string());
                     out.sewer_rate_source = Some(format!(
@@ -1708,8 +2956,21 @@ pub async fn resolve_live_utility_and_climate_bundle(
     env: &EnvConfig,
     q: &LiveUtilityQuery,
 ) -> LiveUtilityBundle {
+    let active_db = ExtensionHub::global().active_db();
+    resolve_live_utility_and_climate_bundle_with_db(http, env, active_db.as_ref(), q).await
+}
+
+/// Database-aware utility & climate bundle resolution reading/writing `shared_data_records`
+/// (`UTILITY_TERRITORY`, `UTILITY_TARIFF`, `CLIMATE_NORMALS_CELL`).
+pub async fn resolve_live_utility_and_climate_bundle_with_db(
+    http: &HttpClient,
+    env: &EnvConfig,
+    db: Option<&DbStore>,
+    q: &LiveUtilityQuery,
+) -> LiveUtilityBundle {
     async move {
-        if http.is_offline_external_blocked() {
+        let resolved_db = effective_db(db);
+        if http.is_offline_external_blocked() && resolved_db.is_none() {
             return LiveUtilityBundle::default();
         }
         let (Some(lat), Some(lon)) = (
@@ -1719,11 +2980,12 @@ pub async fn resolve_live_utility_and_climate_bundle(
             return LiveUtilityBundle::default();
         };
 
+        let db_ref = resolved_db.as_ref();
         let (elec, gas, wst, climate) = tokio::join!(
-            resolve_live_electric(http, env, q, lat, lon),
-            resolve_live_gas(http, env, &q.state, lat, lon),
-            resolve_live_wst(http, q, lat, lon),
-            fetch_live_climate_degree_days(http, lat, lon).boxed(),
+            resolve_live_electric_with_db(http, env, db_ref, q, lat, lon),
+            resolve_live_gas_with_db(http, env, db_ref, &q.state, lat, lon),
+            resolve_live_wst_with_db(http, db_ref, q, lat, lon),
+            fetch_live_climate_degree_days_with_db(http, db_ref, lat, lon).boxed(),
         );
 
         let mut sources: Vec<SourceItem> = Vec::new();
@@ -1736,7 +2998,9 @@ pub async fn resolve_live_utility_and_climate_bundle(
             push_src(&e.rate_source, &e.tariff_url);
             if let Some(ref cu) = e.cca_url {
                 push_src(
-                    e.cca_program.as_deref().unwrap_or("CCA Electric Generation"),
+                    e.cca_program
+                        .as_deref()
+                        .unwrap_or("CCA Electric Generation"),
                     cu,
                 );
             }
@@ -1842,6 +3106,7 @@ fn base_manifest(
         depends_on: Vec::new(),
         input_from_domains: Vec::new(),
         upstream_require_mode: "any".to_string(),
+        ..Default::default()
     }
 }
 
@@ -2059,14 +3324,19 @@ impl DataExtensionAdapter for PgeLiveTariffsAdapter {
             let (iou_opt, cca_opt) = query_cec_electric_ca(http, lat, lon).await;
             let is_pge = iou_opt
                 .as_ref()
-                .map(|(u, a, _, _)| a.eq_ignore_ascii_case("PG&E") || u.to_ascii_lowercase().contains("pacific gas"))
+                .map(|(u, a, _, _)| {
+                    a.eq_ignore_ascii_case("PG&E") || u.to_ascii_lowercase().contains("pacific gas")
+                })
                 .unwrap_or(false);
             if !is_pge {
                 return Ok(Vec::new());
             }
             let is_svce = cca_opt
                 .as_ref()
-                .map(|(n, _)| n.to_ascii_lowercase().contains("silicon valley clean") || n.eq_ignore_ascii_case("SVCE"))
+                .map(|(n, _)| {
+                    n.to_ascii_lowercase().contains("silicon valley clean")
+                        || n.eq_ignore_ascii_case("SVCE")
+                })
                 .unwrap_or(false);
             let mut out = Vec::new();
             if let Some(elec) = fetch_cached_pge_electric(http, is_svce).await {
@@ -2252,7 +3522,9 @@ impl DataExtensionAdapter for SjWaterLiveTariffsAdapter {
                 water_carrier_name: wc.clone(),
                 water_pwsid: wst.water_pwsid.clone(),
                 water_source_type: wst.water_source_type.unwrap_or_else(|| "municipal".into()),
-                water_rate_unit: wst.water_rate_unit.unwrap_or_else(|| "CCF (748 gal)".into()),
+                water_rate_unit: wst
+                    .water_rate_unit
+                    .unwrap_or_else(|| "CCF (748 gal)".into()),
                 water_volumetric_rate_usd: wst.water_volumetric_rate_usd,
                 water_base_monthly_usd: wst.water_base_monthly_usd.unwrap_or(0.0),
                 water_tariff_url: wst.water_tariff_url.clone(),
@@ -2266,7 +3538,9 @@ impl DataExtensionAdapter for SjWaterLiveTariffsAdapter {
                     .unwrap_or_else(|| "Confirm Municipal Hauler".into()),
                 trash_monthly_usd: wst.trash_monthly_usd.unwrap_or(0),
             };
-            let su = wst.water_tariff_url.unwrap_or_else(|| SJW_2026_RATES_URL.into());
+            let su = wst
+                .water_tariff_url
+                .unwrap_or_else(|| SJW_2026_RATES_URL.into());
             let sn = wst.water_rate_source.unwrap_or(wc);
             Ok(vec![make_envelope(
                 "sjwater_live_tariffs",
@@ -2323,7 +3597,9 @@ impl DataExtensionAdapter for SccSanitationDistrictAdapter {
                     .unwrap_or_else(|| "Retail Water System".into()),
                 water_pwsid: wst.water_pwsid,
                 water_source_type: wst.water_source_type.unwrap_or_else(|| "municipal".into()),
-                water_rate_unit: wst.water_rate_unit.unwrap_or_else(|| "CCF (748 gal)".into()),
+                water_rate_unit: wst
+                    .water_rate_unit
+                    .unwrap_or_else(|| "CCF (748 gal)".into()),
                 water_volumetric_rate_usd: wst.water_volumetric_rate_usd,
                 water_base_monthly_usd: wst.water_base_monthly_usd.unwrap_or(0.0),
                 water_tariff_url: wst.water_tariff_url,
@@ -2337,7 +3613,10 @@ impl DataExtensionAdapter for SccSanitationDistrictAdapter {
                     .unwrap_or_else(|| "Municipal Curbside Hauler".into()),
                 trash_monthly_usd: wst.trash_monthly_usd.unwrap_or(0),
             };
-            let su = wst.trash_tariff_url.or(wst.sewer_tariff_url).unwrap_or_else(|| WVSD_SERVICE_URL.into());
+            let su = wst
+                .trash_tariff_url
+                .or(wst.sewer_tariff_url)
+                .unwrap_or_else(|| WVSD_SERVICE_URL.into());
             let sn = wst
                 .sewer_rate_source
                 .or(wst.trash_rate_source)
@@ -2421,8 +3700,10 @@ mod tests {
         out.write_all(b"PK\x05\x06").unwrap();
         out.write_all(&0u16.to_le_bytes()).unwrap();
         out.write_all(&0u16.to_le_bytes()).unwrap();
-        out.write_all(&(entries.len() as u16).to_le_bytes()).unwrap();
-        out.write_all(&(entries.len() as u16).to_le_bytes()).unwrap();
+        out.write_all(&(entries.len() as u16).to_le_bytes())
+            .unwrap();
+        out.write_all(&(entries.len() as u16).to_le_bytes())
+            .unwrap();
         out.write_all(&cd_len.to_le_bytes()).unwrap();
         out.write_all(&cd_off.to_le_bytes()).unwrap();
         out.write_all(&0u16.to_le_bytes()).unwrap();
@@ -2480,7 +3761,8 @@ mod tests {
         assert_eq!(sjw.tier1_ccf, 5.0355);
 
         let wvcr_txt = "35-gallon 53.87 $ 58.64 $ 68.89 $ 60.30 $ 65-gallon 97.76 $";
-        let (usd, _) = parse_wvcr_campbell_pdf_text(wvcr_txt, "campbell", WVCR_DEFAULT_PDF_URL).unwrap();
+        let (usd, _) =
+            parse_wvcr_campbell_pdf_text(wvcr_txt, "campbell", WVCR_DEFAULT_PDF_URL).unwrap();
         assert_eq!(usd, 54);
     }
 }

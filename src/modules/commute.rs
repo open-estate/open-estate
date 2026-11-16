@@ -40,8 +40,17 @@ use moka::sync::Cache;
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use url::Url;
 
+use crate::db::shared_cache_store::GeoIndexColumns;
+use crate::db::DbStore;
+use crate::extensions::shared_cache::{
+    dataset_ids, decode_geohash_bbox, encode_geohash, get_shared_dataset_proto,
+    put_shared_dataset_proto,
+    shared_v1::{DriveTimeEntryProto, DriveTimeMatrixProto},
+    ShareScope, SharedExtensionCache,
+};
 use crate::extensions::ExtensionHub;
 use crate::shared::{
     haversine_m, sanitize_user_warning, url_host_label, EnvConfig, HttpClient, SourceItem, MILE_M,
@@ -735,6 +744,190 @@ static CELL_CACHE: Lazy<Cache<CellKey, Resolved>> = Lazy::new(|| {
         .build()
 });
 
+const DRIVE_TIME_MATRIX_TTL_SECS: u64 = 30 * 86_400;
+
+fn drive_matrix_dest_hash(dst_keys: &[(i32, i32)]) -> String {
+    let mut sorted = dst_keys.to_vec();
+    sorted.sort_unstable();
+    sorted.dedup();
+    let mut hasher = Sha256::new();
+    hasher.update(b"driving|");
+    for (lat5, lon5) in &sorted {
+        hasher.update(format!("{lat5},{lon5};").as_bytes());
+    }
+    let hex_digest = format!("{:x}", hasher.finalize());
+    hex_digest[..32].to_string()
+}
+
+fn encode_drive_entry_id(provider: RoutingProviderKind, dlat5: i32, dlon5: i32) -> String {
+    format!(
+        "{}|{:.5},{:.5}",
+        provider.extension_id(),
+        f64::from(dlat5) / 1e5,
+        f64::from(dlon5) / 1e5
+    )
+}
+
+fn decode_entry_provider(entry_id: &str, matrix_provider_id: &str) -> RoutingProviderKind {
+    entry_id
+        .split_once('|')
+        .and_then(|(prefix, _)| RoutingProviderKind::from_id_or_alias(prefix))
+        .or_else(|| RoutingProviderKind::from_id_or_alias(matrix_provider_id))
+        .unwrap_or(RoutingProviderKind::Osrm)
+}
+
+async fn load_drive_matrix_from_shared_store(
+    db: &DbStore,
+    gh7: &str,
+    dest_hash: &str,
+    dst_keys: &[(i32, i32)],
+    extension_hub: &ExtensionHub,
+    osrm_active: bool,
+    cloud_active: bool,
+) -> Vec<(usize, Resolved)> {
+    let Ok(Some((_row, proto))) = get_shared_dataset_proto::<DriveTimeMatrixProto>(
+        Some(SharedExtensionCache::global()),
+        db,
+        dataset_ids::DRIVE_TIME_MATRIX,
+        ShareScope::Geohash7,
+        gh7,
+        dest_hash,
+    )
+    .await
+    else {
+        return Vec::new();
+    };
+
+    let dst_lookup: HashMap<(i32, i32), usize> = dst_keys
+        .iter()
+        .enumerate()
+        .map(|(idx, &key)| (key, idx))
+        .collect();
+    let mut resolved = Vec::with_capacity(proto.entries.len());
+    for entry in &proto.entries {
+        if !entry.duration_sec.is_finite()
+            || !entry.distance_m.is_finite()
+            || !entry.destination_lat.is_finite()
+            || !entry.destination_lon.is_finite()
+        {
+            continue;
+        }
+        let dkey = (
+            (entry.destination_lat * 1e5).round() as i32,
+            (entry.destination_lon * 1e5).round() as i32,
+        );
+        let Some(&d_idx) = dst_lookup.get(&dkey) else {
+            continue;
+        };
+        let provider = decode_entry_provider(&entry.destination_id, &proto.provider_id);
+        let provider_allowed = match provider {
+            RoutingProviderKind::Osrm => osrm_active,
+            _ => cloud_active && extension_hub.is_enabled(provider.extension_id()),
+        };
+        if !provider_allowed {
+            continue;
+        }
+        resolved.push((
+            d_idx,
+            Resolved::Routed {
+                seconds: entry.duration_sec,
+                meters: entry.distance_m,
+                provider,
+            },
+        ));
+    }
+    resolved
+}
+
+async fn persist_drive_matrix_to_shared_store(
+    db: &DbStore,
+    gh7: &str,
+    origin: (i32, i32),
+    dest_hash: &str,
+    row: &[Option<Resolved>],
+    dst_keys: &[(i32, i32)],
+) {
+    let origin_lat = f64::from(origin.0) / 1e5;
+    let origin_lon = f64::from(origin.1) / 1e5;
+    let mut entries = Vec::new();
+    let mut primary_provider: Option<RoutingProviderKind> = None;
+
+    for (d, cell_opt) in row.iter().enumerate() {
+        let Some(Resolved::Routed {
+            seconds,
+            meters,
+            provider,
+        }) = cell_opt
+        else {
+            continue;
+        };
+        if primary_provider.is_none() {
+            primary_provider = Some(*provider);
+        }
+        let (dlat5, dlon5) = dst_keys[d];
+        entries.push(DriveTimeEntryProto {
+            destination_id: encode_drive_entry_id(*provider, dlat5, dlon5),
+            destination_label: format!("{:.5},{:.5}", f64::from(dlat5) / 1e5, f64::from(dlon5) / 1e5),
+            destination_lat: f64::from(dlat5) / 1e5,
+            destination_lon: f64::from(dlon5) / 1e5,
+            duration_sec: *seconds,
+            distance_m: *meters,
+        });
+    }
+    if entries.is_empty() {
+        return;
+    }
+    let provider_id = primary_provider
+        .unwrap_or(RoutingProviderKind::Osrm)
+        .extension_id()
+        .to_string();
+    let proto = DriveTimeMatrixProto {
+        origin_geohash7: gh7.to_string(),
+        origin_lat,
+        origin_lon,
+        profile: "driving".to_string(),
+        provider_id: provider_id.clone(),
+        entries,
+        fetched_at_rfc3339: chrono::Utc::now().to_rfc3339(),
+    };
+    let bbox = decode_geohash_bbox(gh7);
+    let geo_cols = GeoIndexColumns {
+        geohash5: encode_geohash(origin_lat, origin_lon, 5),
+        geohash6: encode_geohash(origin_lat, origin_lon, 6),
+        geohash7: Some(gh7.to_string()),
+        bbox_south: bbox.map(|(s, _, _, _)| s),
+        bbox_west: bbox.map(|(_, w, _, _)| w),
+        bbox_north: bbox.map(|(_, _, n, _)| n),
+        bbox_east: bbox.map(|(_, _, _, e)| e),
+        ..Default::default()
+    };
+    let provenance_json = serde_json::json!({
+        "dataset": dataset_ids::DRIVE_TIME_MATRIX,
+        "scope": "geohash7",
+        "originGeohash7": gh7,
+        "providerId": provider_id,
+    })
+    .to_string();
+    if let Err(err) = put_shared_dataset_proto(
+        Some(SharedExtensionCache::global()),
+        db,
+        dataset_ids::DRIVE_TIME_MATRIX,
+        ShareScope::Geohash7,
+        gh7,
+        dest_hash,
+        geo_cols,
+        &proto,
+        None,
+        Some(provenance_json),
+        None,
+        DRIVE_TIME_MATRIX_TTL_SECS,
+    )
+    .await
+    {
+        tracing::warn!(geohash7 = gh7, error = %err, "commute: failed to persist DRIVE_TIME_MATRIX");
+    }
+}
+
 /// Last dataset version each router reported (empty string: the router reports none).
 static DATA_VERSIONS: Lazy<DashMap<Arc<str>, Arc<str>>> = Lazy::new(DashMap::new);
 
@@ -1094,6 +1287,7 @@ pub struct RoutingClient {
     http: HttpClient,
     config: RoutingConfig,
     extension_hub: Arc<ExtensionHub>,
+    db: Option<DbStore>,
 }
 
 impl RoutingClient {
@@ -1102,6 +1296,7 @@ impl RoutingClient {
             http,
             config,
             extension_hub: Arc::clone(ExtensionHub::global()),
+            db: None,
         }
     }
 
@@ -1115,6 +1310,12 @@ impl RoutingClient {
     /// runtime extension enable/disable toggles immediately govern Tier-1 and Tier-2 routing.
     pub fn with_extension_hub(mut self, hub: Arc<ExtensionHub>) -> Self {
         self.extension_hub = hub;
+        self
+    }
+
+    /// Binds an explicit [`DbStore`] for persistent `DRIVE_TIME_MATRIX` read/write in `shared_data_records`.
+    pub fn with_db(mut self, db: DbStore) -> Self {
+        self.db = Some(db);
         self
     }
 
@@ -1172,8 +1373,43 @@ impl RoutingClient {
             vec![vec![Vec::new(); dst_keys.len()]; src_keys.len()];
         let mut tier1_failure_warnings: Vec<String> = Vec::new();
         let mut cloud_failure_reasons: Vec<String> = Vec::new();
+        let db_opt = self.db.clone().or_else(|| self.extension_hub.active_db());
 
         if !src_keys.is_empty() && !dst_keys.is_empty() {
+            let dest_hash = drive_matrix_dest_hash(&dst_keys);
+            let origin_geohashes: Vec<Option<String>> = src_keys
+                .iter()
+                .map(|&(slat, slon)| {
+                    encode_geohash(f64::from(slat) / 1e5, f64::from(slon) / 1e5, 7)
+                })
+                .collect();
+
+            if let Some(ref db_store) = db_opt {
+                for (s, gh7_opt) in origin_geohashes.iter().enumerate() {
+                    let Some(ref gh7) = gh7_opt else {
+                        continue;
+                    };
+                    for (d, cell) in load_drive_matrix_from_shared_store(
+                        db_store,
+                        gh7,
+                        &dest_hash,
+                        &dst_keys,
+                        &self.extension_hub,
+                        osrm_active,
+                        cloud_active,
+                    )
+                    .await
+                    {
+                        grid[s][d] = Some(cell);
+                    }
+                }
+            }
+
+            let had_cell_before: Vec<Vec<bool>> = grid
+                .iter()
+                .map(|row| row.iter().map(Option::is_some).collect())
+                .collect();
+
             // ------------------------------------------------------------------
             // Tier 1: Self-hosted OSRM with ascending-bbox-area regional cascade
             // ------------------------------------------------------------------
@@ -1397,6 +1633,28 @@ impl RoutingClient {
                     }
 
                     requests += cloud_attempted.load(Ordering::Relaxed);
+                }
+            }
+
+            if let Some(ref db_store) = db_opt {
+                for (s, gh7_opt) in origin_geohashes.iter().enumerate() {
+                    let Some(ref gh7) = gh7_opt else {
+                        continue;
+                    };
+                    let any_new_routed = (0..dst_keys.len()).any(|d| {
+                        !had_cell_before[s][d] && matches!(grid[s][d], Some(Resolved::Routed { .. }))
+                    });
+                    if any_new_routed {
+                        persist_drive_matrix_to_shared_store(
+                            db_store,
+                            gh7,
+                            src_keys[s],
+                            &dest_hash,
+                            &grid[s],
+                            &dst_keys,
+                        )
+                        .await;
+                    }
                 }
             }
 
@@ -2095,5 +2353,82 @@ mod tests {
             "must not misreport OSRM unavailable when no OSRM region is configured: {:?}",
             matrix.warnings
         );
+    }
+
+    #[tokio::test]
+    async fn drive_time_matrix_persists_and_hydrates_from_shared_data_records() {
+        let db = DbStore::connect_url(":memory:", Some("sqlite"))
+            .await
+            .expect("sqlite memory db");
+        crate::extensions::shared_cache::seed_builtin_shared_datasets(&db)
+            .await
+            .expect("seed shared datasets");
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let closed_addr = listener.local_addr().expect("addr");
+        drop(listener);
+
+        let origin_a = LatLon::new(37.2872, -121.9500);
+        let origin_b = LatLon::new(37.2874, -121.9498);
+        let gh7_a = encode_geohash(origin_a.lat, origin_a.lon, 7).expect("gh7 a");
+        let gh7_b = encode_geohash(origin_b.lat, origin_b.lon, 7).expect("gh7 b");
+        assert_eq!(gh7_a, gh7_b, "two nearby origins share geohash7 cell");
+
+        let dst = vec![
+            LatLon::new(37.3382, -121.8863),
+            LatLon::new(37.4220, -122.0841),
+        ];
+        let (dst_keys, _) = unique_keys(&dst);
+        let dest_hash = drive_matrix_dest_hash(&dst_keys);
+        let src_key = ((origin_a.lat * 1e5).round() as i32, (origin_a.lon * 1e5).round() as i32);
+
+        let row = vec![
+            Some(Resolved::Routed {
+                seconds: 642.0,
+                meters: 10_420.0,
+                provider: RoutingProviderKind::Osrm,
+            }),
+            Some(Resolved::Routed {
+                seconds: 1_510.0,
+                meters: 31_800.0,
+                provider: RoutingProviderKind::Osrm,
+            }),
+        ];
+        persist_drive_matrix_to_shared_store(&db, &gh7_a, src_key, &dest_hash, &row, &dst_keys)
+            .await;
+
+        let (_stored, proto) = get_shared_dataset_proto::<DriveTimeMatrixProto>(
+            None,
+            &db,
+            dataset_ids::DRIVE_TIME_MATRIX,
+            ShareScope::Geohash7,
+            &gh7_b,
+            &dest_hash,
+        )
+        .await
+        .expect("read proto")
+        .expect("DRIVE_TIME_MATRIX persisted");
+        assert_eq!(proto.origin_geohash7, gh7_b);
+        assert_eq!(proto.entries.len(), 2);
+
+        let mut env_map = HashMap::new();
+        env_map.insert(ENV_OSRM_BASE_URL.to_string(), format!("http://{closed_addr}"));
+        let env = EnvConfig::from_map(env_map);
+        let http = HttpClient::from_env(&env, None);
+        let hub = ExtensionHub::new_default();
+        let client = RoutingClient::from_http(&http)
+            .with_extension_hub(hub)
+            .with_db(db);
+
+        let matrix = client.drive_matrix(&[origin_b], &dst).await;
+        assert_eq!(matrix.routed, 2);
+        assert_eq!(matrix.estimated, 0);
+        assert_eq!(matrix.requests, 0, "DB hit must avoid upstream HTTP calls");
+        let first = matrix.cells[0][0].expect("first cell");
+        assert!(!first.estimated);
+        assert!((first.distance_mi - (10_420.0 / MILE_M)).abs() < 1e-6);
+        assert!((first.free_flow_min - 642.0 / 60.0).abs() < 1e-6);
     }
 }

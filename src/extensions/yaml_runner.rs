@@ -103,9 +103,6 @@ fn round2(v: f64) -> f64 {
 /// carrier footprint entries (`"AT&T Fiber"`, `"Xfinity (Comcast)"`).
 pub fn normalize_carrier_brand_key(raw: &str) -> String {
     let lc = raw.trim().to_ascii_lowercase();
-    if lc.contains("sonic") {
-        return "sonic".to_string();
-    }
     if lc.contains("at&t") || lc.contains("att ") || lc == "att" || lc.contains("southwestern bell") || lc.contains("pacific bell") {
         return "att".to_string();
     }
@@ -178,12 +175,71 @@ pub fn normalize_carrier_brand_key(raw: &str) -> String {
         .join("_")
 }
 
+fn derive_house_number_and_street_stem(street: &str) -> (String, String) {
+    let tokens: Vec<&str> = street.split_whitespace().collect();
+    if tokens.is_empty() {
+        return (String::new(), String::new());
+    }
+    let (house_num, rest) = if tokens[0]
+        .chars()
+        .next()
+        .map(|c| c.is_ascii_digit())
+        .unwrap_or(false)
+        && tokens.len() > 1
+    {
+        (tokens[0].to_string(), &tokens[1..])
+    } else {
+        (String::new(), tokens.as_slice())
+    };
+    let mut upper_words: Vec<String> = rest
+        .iter()
+        .map(|t| t.trim_matches(|c: char| !c.is_ascii_alphanumeric()).to_ascii_uppercase())
+        .filter(|t| !t.is_empty())
+        .collect();
+    if upper_words.len() >= 2 {
+        let last = upper_words.last().map(String::as_str).unwrap_or("");
+        if matches!(
+            last,
+            "ST" | "STREET"
+                | "AVE"
+                | "AVENUE"
+                | "RD"
+                | "ROAD"
+                | "DR"
+                | "DRIVE"
+                | "LN"
+                | "LANE"
+                | "BLVD"
+                | "BOULEVARD"
+                | "CT"
+                | "COURT"
+                | "PL"
+                | "PLACE"
+                | "WAY"
+                | "PKWY"
+                | "PARKWAY"
+                | "TER"
+                | "TERRACE"
+                | "CIR"
+                | "CIRCLE"
+        ) {
+            upper_words.pop();
+        }
+    }
+    let stem = upper_words.join(" ").replace('\'', "''");
+    (house_num.replace('\'', "''"), stem)
+}
+
 /// Build the `minijinja` template context map from `ExtensionQueryProto`.
 pub fn build_template_context(query: &ExtensionQueryProto) -> BTreeMap<String, String> {
     let mut ctx = BTreeMap::new();
     let zip5: String = query.zip.trim().chars().take(5).collect();
     ctx.insert("address".to_string(), query.address.trim().to_string());
-    ctx.insert("street".to_string(), query.street.trim().to_string());
+    let street_trimmed = query.street.trim();
+    ctx.insert("street".to_string(), street_trimmed.to_string());
+    let (house_number, street_stem) = derive_house_number_and_street_stem(street_trimmed);
+    ctx.insert("house_number".to_string(), house_number);
+    ctx.insert("street_stem".to_string(), street_stem);
     ctx.insert("city".to_string(), query.city.trim().to_string());
     ctx.insert("state".to_string(), query.state.trim().to_ascii_uppercase());
     ctx.insert("zip".to_string(), zip5);
@@ -1085,7 +1141,17 @@ pub async fn execute_live_http(
         resolved.body.as_deref().unwrap_or("")
     );
 
-    if pkg.doc.cache_ttl_secs > 0 {
+    let force_shared_refresh = query
+        .extra_params
+        .get(crate::extensions::shared_cache::FORCE_REFRESH_PARAM)
+        .map(|s| s.trim() == "1")
+        .unwrap_or(false);
+    let bypass_url_cache = force_shared_refresh
+        || crate::extensions::shared_cache::sharing_spec_from_manifest(manifest)
+            .map(|s| s.is_active())
+            .unwrap_or(false);
+
+    if !bypass_url_cache && pkg.doc.cache_ttl_secs > 0 {
         if let Some(hit) = cache.get(&cache_key).await {
             if hit.fetched_at.elapsed().as_secs() < pkg.doc.cache_ttl_secs {
                 let mut out = hit.envelopes;
@@ -1143,16 +1209,35 @@ pub async fn execute_live_http(
             Ok(resp) => {
                 let status = resp.status();
                 if status.is_success() {
-                    match resp.json::<Value>().await {
-                        Ok(j) => {
-                            response_json = Some(j);
-                            break;
+                    match resp.bytes().await {
+                        Ok(body_bytes) => {
+                            http.record_external_http_response(
+                                &resolved.url,
+                                body_bytes.len() as u64,
+                            );
+                            match serde_json::from_slice::<Value>(&body_bytes) {
+                                Ok(j) => {
+                                    response_json = Some(j);
+                                    break;
+                                }
+                                Err(e) => {
+                                    last_err = Some(anyhow!(
+                                        "Invalid JSON from '{}': {e}",
+                                        pkg.extension_id
+                                    ));
+                                }
+                            }
                         }
                         Err(e) => {
-                            last_err = Some(anyhow!("Invalid JSON from '{}': {e}", pkg.extension_id));
+                            http.record_external_http_response(&resolved.url, 0);
+                            last_err = Some(anyhow!(
+                                "Failed reading response body from '{}': {e}",
+                                pkg.extension_id
+                            ));
                         }
                     }
                 } else if status.is_server_error() || status.as_u16() == 429 {
+                    http.record_external_http_response(&resolved.url, 0);
                     last_err = Some(anyhow!(
                         "Upstream HTTP {} from '{}'",
                         status.as_u16(),
@@ -1160,6 +1245,7 @@ pub async fn execute_live_http(
                     ));
                     continue;
                 } else {
+                    http.record_external_http_response(&resolved.url, 0);
                     return Err(anyhow!(
                         "Upstream HTTP {} from '{}'",
                         status.as_u16(),
@@ -1168,6 +1254,7 @@ pub async fn execute_live_http(
                 }
             }
             Err(e) => {
+                http.record_external_http_response(&resolved.url, 0);
                 last_err = Some(anyhow!("HTTP transport error in '{}': {e}", pkg.extension_id));
             }
         }
@@ -1192,7 +1279,7 @@ pub async fn execute_live_http(
         latency_ms,
     )?;
 
-    if pkg.doc.cache_ttl_secs > 0 && !envelopes.is_empty() {
+    if !bypass_url_cache && pkg.doc.cache_ttl_secs > 0 && !envelopes.is_empty() {
         cache
             .insert(
                 cache_key,
@@ -2064,7 +2151,6 @@ pub fn typical_isp_plan_label(_tier_category: &str, _down_mbps: i64) -> String {
 
 pub fn carrier_check_url_for_name(name: &str, fallback_fcc_url: &str) -> String {
     match normalize_carrier_brand_key(name).as_str() {
-        "sonic" => "https://www.sonic.com/".to_string(),
         "att" => "https://www.att.com/internet/fiber/".to_string(),
         "google_fiber" => "https://fiber.google.com/".to_string(),
         "verizon" => "https://www.verizon.com/home/internet/fios-fastest-internet/".to_string(),

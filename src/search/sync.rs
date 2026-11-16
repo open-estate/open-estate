@@ -2,8 +2,8 @@
 // `csv`-crate MLS/Redfin CSV parser, school-grade enricher, and diff event tracker.
 
 use crate::db::{
-    format_listing_row, listing_slug, normalize_listing_status,
-    normalize_property_category, score_to_school_grade, DbStore, ListingRow, SqlParam,
+    format_listing_row, listing_slug, normalize_listing_status, normalize_property_category,
+    score_to_school_grade, DbStore, ListingRow, SqlParam,
 };
 use crate::shared::{haversine_m, now_iso, round_n, EnvConfig, HttpClient, MILE_M};
 use anyhow::{anyhow, Result};
@@ -18,7 +18,6 @@ use std::time::Duration;
 use url::Url;
 use uuid::Uuid;
 
-const RC_BASE: &str = "https://api.rentcast.io/v1";
 const ATTOM_BASE: &str = "https://api.gateway.attomdata.com/propertyapi/v1.0.0";
 const SIMPLYRETS_BASE: &str = "https://api.simplyrets.com";
 const TIGER_ZCTA_URL: &str =
@@ -30,25 +29,18 @@ const SCHOOL_CACHE_TTL_SECS: i64 = 14 * 24 * 3600;
 static ZIP5_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\b(\d{5})\b").unwrap());
 static HDR_CELL_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"(?i)^(address|street|property\s*type|price|sale\s*type)$").unwrap());
-static DISCLAIMER_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"(?i)^in accordance with").unwrap());
+static DISCLAIMER_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)^in accordance with").unwrap());
 static PAST_SOLD_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)past|sold|closed").unwrap());
 static ELEM_GRADE_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)K.?5|K.?6").unwrap());
 static MID_GRADE_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)6.?8|7.?8").unwrap());
 static HIGH_GRADE_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)9.?12").unwrap());
 static ACTIVE_SUBJECT_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)active|for\s*sale").unwrap());
-static PENDING_SUBJECT_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"(?i)pending|contract").unwrap());
+static PENDING_SUBJECT_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)pending|contract").unwrap());
 static ONE_STORY_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)1-story|single-story").unwrap());
 static TWO_STORY_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)2-story|two-story").unwrap());
 
 pub fn sync_connector_status(env: &EnvConfig) -> Value {
     json!([
-        {
-            "id": "rentcast_zip",
-            "name": "RentCast ZIP Sale & Sold Feed",
-            "active": env.get("RENTCAST_API_KEY").is_some(),
-        },
         {
             "id": "reso_zip",
             "name": "RESO Web API 2.0 ZIP IDX",
@@ -66,7 +58,7 @@ pub fn sync_connector_status(env: &EnvConfig) -> Value {
         },
         {
             "id": "public_feed",
-            "name": format!("Public Feed / {} Report & Comp Harvester", env.brand_name()),
+            "name": "Public Feed / Open Estate Report & Comp Harvester",
             "active": true,
         }
     ])
@@ -182,8 +174,8 @@ impl ListingInput {
         let get = |k1: &str, k2: &str| obj.get(k1).or_else(|| obj.get(k2));
 
         let street = str_from_val(get("street", "addressLine1"));
-        let address = str_from_val(get("address", "formattedAddress"))
-            .or_else(|| street.clone())?;
+        let address =
+            str_from_val(get("address", "formattedAddress")).or_else(|| street.clone())?;
         let zip_raw = str_from_val(get("zip", "zip_code"))
             .or_else(|| str_from_val(obj.get("postalCode")))
             .unwrap_or_else(|| fallback_zip.to_string());
@@ -332,7 +324,10 @@ impl ListingInput {
             self.features_text = other.features_text.clone();
         }
         if let Some(ref other_raw) = other.raw_json {
-            self.raw_json = Some(merge_two_raw_json_blobs(self.raw_json.as_deref(), other_raw));
+            self.raw_json = Some(merge_two_raw_json_blobs(
+                self.raw_json.as_deref(),
+                other_raw,
+            ));
         }
     }
 }
@@ -590,9 +585,13 @@ pub fn parse_listing_csv(csv_text: &str, fallback_zip: &str) -> Vec<ListingInput
             .filter(|s| !s.trim().is_empty())
             .or_else(|| {
                 csv_url.as_deref().and_then(|u| {
-                    crate::modules::engagement::detect_platform_id(None, Some(u)).map(|pid| match pid {
-                        "zillow" | "redfin" | "realtor" | "homes" => "Public Listing".to_string(),
-                        _ => "CSV Listing Import".to_string(),
+                    crate::modules::engagement::detect_platform_id(None, Some(u)).map(|pid| {
+                        match pid {
+                            "zillow" | "redfin" | "realtor" | "homes" => {
+                                "Public Listing".to_string()
+                            }
+                            _ => "CSV Listing Import".to_string(),
+                        }
                     })
                 })
             })
@@ -727,13 +726,19 @@ fn infer_feature_tags_and_flags(
     seismic_pga: Option<f64>,
     safety_score: Option<f64>,
     extra_tags: &[String],
-) -> (Option<i64>, Option<i64>, Option<i64>, Option<i64>, Vec<String>) {
+) -> (
+    Option<i64>,
+    Option<i64>,
+    Option<i64>,
+    Option<i64>,
+    Vec<String>,
+) {
     let has_hardwood = (text_lc.contains("hardwood")
         || text_lc.contains("wood floor")
         || text_lc.contains("oak floor")
         || text_lc.contains("maple floor")
         || text_lc.contains("engineered wood"))
-        .then_some(1_i64);
+    .then_some(1_i64);
 
     let has_updated_kitchen = (text_lc.contains("updated kitchen")
         || text_lc.contains("remodeled kitchen")
@@ -744,7 +749,7 @@ fn infer_feature_tags_and_flags(
         || text_lc.contains("granite kitchen")
         || text_lc.contains("new kitchen")
         || text_lc.contains("quartz countertops"))
-        .then_some(1_i64);
+    .then_some(1_i64);
 
     let has_remodeled = (text_lc.contains("remodeled")
         || text_lc.contains("renovated")
@@ -752,7 +757,7 @@ fn infer_feature_tags_and_flags(
         || text_lc.contains("fully updated")
         || text_lc.contains("upgraded bath")
         || text_lc.contains("new laminate floors"))
-        .then_some(1_i64);
+    .then_some(1_i64);
 
     let loud_signal = text_lc.contains("busy road")
         || text_lc.contains("freeway")
@@ -856,7 +861,11 @@ fn extract_report_safety_noise_seismic_and_tags(
                     (Some(p), Some(u)) if u > 0.0 => p / u,
                     _ => 1.0,
                 };
-                Some((100.0 - (vr * 0.6 + pr * 0.4) * 34.0).clamp(20.0, 96.0).round())
+                Some(
+                    (100.0 - (vr * 0.6 + pr * 0.4) * 34.0)
+                        .clamp(20.0, 96.0)
+                        .round(),
+                )
             } else {
                 None
             }
@@ -889,10 +898,7 @@ fn extract_report_safety_noise_seismic_and_tags(
             }
         }
     }
-    if let Some(noise_notes) = facts
-        .pointer("/localNotes/noise")
-        .and_then(Value::as_array)
-    {
+    if let Some(noise_notes) = facts.pointer("/localNotes/noise").and_then(Value::as_array) {
         for n in noise_notes {
             if let Some(s) = n.as_str() {
                 text_parts.push(s.to_string());
@@ -901,13 +907,7 @@ fn extract_report_safety_noise_seismic_and_tags(
     }
     let combined_lc = text_parts.join(" · ").to_ascii_lowercase();
     let (has_hardwood_floors, has_updated_kitchen, has_remodeled, quiet_street, tags) =
-        infer_feature_tags_and_flags(
-            &combined_lc,
-            noise_max_db,
-            seismic_pga,
-            safety_score,
-            &[],
-        );
+        infer_feature_tags_and_flags(&combined_lc, noise_max_db, seismic_pga, safety_score, &[]);
 
     ReportExtractedFacets {
         safety_score,
@@ -917,7 +917,8 @@ fn extract_report_safety_noise_seismic_and_tags(
         quiet_street,
         noise_max_db,
         seismic_pga,
-        tags_json: (!tags.is_empty()).then(|| serde_json::to_string(&tags).unwrap_or_else(|_| "[]".into())),
+        tags_json: (!tags.is_empty())
+            .then(|| serde_json::to_string(&tags).unwrap_or_else(|_| "[]".into())),
     }
 }
 
@@ -961,9 +962,11 @@ pub fn extract_listings_from_report(report: &Value) -> Vec<ListingInput> {
     // read; facts only supply a school *name* for a level the civic module did not cover. No official
     // value means null (unknown).
     let assigned_schools = crate::modules::civic::assigned_official_schools(civic);
-    let level_name = |a: &Option<crate::modules::civic::AssignedSchool>| a.as_ref().map(|s| s.name.clone());
+    let level_name =
+        |a: &Option<crate::modules::civic::AssignedSchool>| a.as_ref().map(|s| s.name.clone());
     let level_rating = |a: &Option<crate::modules::civic::AssignedSchool>| {
-        a.as_ref().and_then(|s| s.official.as_ref().map(|o| o.score))
+        a.as_ref()
+            .and_then(|s| s.official.as_ref().map(|o| o.score))
     };
     let mut school_elem_name = level_name(&assigned_schools.elementary);
     let school_elem_rating = level_rating(&assigned_schools.elementary);
@@ -979,7 +982,10 @@ pub fn extract_listings_from_report(report: &Value) -> Vec<ListingInput> {
             };
             let grades_str = str_from_val(s.get("grades")).unwrap_or_default();
             let nm_low = nm.to_ascii_lowercase();
-            if nm_low.contains("elem") || nm_low.contains("primary") || ELEM_GRADE_RE.is_match(&grades_str) {
+            if nm_low.contains("elem")
+                || nm_low.contains("primary")
+                || ELEM_GRADE_RE.is_match(&grades_str)
+            {
                 school_elem_name.get_or_insert(nm);
             } else if nm_low.contains("middle")
                 || nm_low.contains("junior")
@@ -1068,13 +1074,8 @@ pub fn extract_listings_from_report(report: &Value) -> Vec<ListingInput> {
     let subject_prop_type =
         normalize_property_category(str_from_val(facts.get("propertyType")).as_deref());
     let features_joined = features_parts.join(" · ");
-    let report_facets = extract_report_safety_noise_seismic_and_tags(
-        report,
-        facts,
-        civic,
-        haz,
-        &features_joined,
-    );
+    let report_facets =
+        extract_report_safety_noise_seismic_and_tags(report, facts, civic, haz, &features_joined);
 
     let mut out = vec![ListingInput {
         id: Some(slug.clone()),
@@ -1203,7 +1204,10 @@ pub fn extract_listings_from_report(report: &Value) -> Vec<ListingInput> {
     if let Some(arr) = facts.get("nearbyListings").and_then(Value::as_array) {
         nearby_vals.extend(arr.iter());
     }
-    if let Some(arr) = val.pointer("/activeNearby/forSale").and_then(Value::as_array) {
+    if let Some(arr) = val
+        .pointer("/activeNearby/forSale")
+        .and_then(Value::as_array)
+    {
         nearby_vals.extend(arr.iter());
     }
     let state_zip = format!("{} {}", state.as_deref().unwrap_or(""), zip)
@@ -1223,12 +1227,16 @@ pub fn extract_listings_from_report(report: &Value) -> Vec<ListingInput> {
         let full_addr = if raw_addr.contains(',') {
             raw_addr.clone()
         } else {
-            [Some(raw_addr.as_str()), city.as_deref(), Some(state_zip.as_str())]
-                .into_iter()
-                .flatten()
-                .filter(|s| !s.is_empty())
-                .collect::<Vec<_>>()
-                .join(", ")
+            [
+                Some(raw_addr.as_str()),
+                city.as_deref(),
+                Some(state_zip.as_str()),
+            ]
+            .into_iter()
+            .flatten()
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
+            .join(", ")
         };
         let l_slug = listing_slug(&full_addr, None, None, None);
         if l_slug.is_empty() || !seen_slugs.insert(l_slug.clone()) {
@@ -1282,7 +1290,10 @@ pub fn extract_listings_from_report(report: &Value) -> Vec<ListingInput> {
                     .as_deref(),
             )),
             mls_number: str_from_val(l.get("mlsNumber")),
-            url: Some(format!("/report?address={}", urlencoding::encode(&full_addr))),
+            url: Some(format!(
+                "/report?address={}",
+                urlencoding::encode(&full_addr)
+            )),
             features_text: Some(f_txt),
             source: Some(
                 str_from_val(l.get("source"))
@@ -1313,12 +1324,16 @@ pub fn extract_listings_from_report(report: &Value) -> Vec<ListingInput> {
         let full_addr = if raw_addr.contains(',') {
             raw_addr.clone()
         } else {
-            [Some(raw_addr.as_str()), city.as_deref(), Some(state_zip.as_str())]
-                .into_iter()
-                .flatten()
-                .filter(|s| !s.is_empty())
-                .collect::<Vec<_>>()
-                .join(", ")
+            [
+                Some(raw_addr.as_str()),
+                city.as_deref(),
+                Some(state_zip.as_str()),
+            ]
+            .into_iter()
+            .flatten()
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
+            .join(", ")
         };
         let c_slug = listing_slug(&full_addr, None, None, None);
         if c_slug.is_empty() || !seen_slugs.insert(c_slug.clone()) {
@@ -1381,10 +1396,14 @@ pub fn extract_listings_from_report(report: &Value) -> Vec<ListingInput> {
                     .as_deref(),
             )),
             mls_number: str_from_val(c.get("mlsNumber")),
-            url: Some(format!("/report?address={}", urlencoding::encode(&full_addr))),
+            url: Some(format!(
+                "/report?address={}",
+                urlencoding::encode(&full_addr)
+            )),
             features_text: Some(f_txt),
             source: Some(
-                str_from_val(c.get("source")).unwrap_or_else(|| "Open Estate Sold Comp".to_string()),
+                str_from_val(c.get("source"))
+                    .unwrap_or_else(|| "Open Estate Sold Comp".to_string()),
             ),
             ..Default::default()
         });
@@ -1458,7 +1477,10 @@ pub async fn lookup_zip_centroid(http: &HttpClient, zip: &str) -> Option<(f64, f
         ("outFields", "ZCTA5,CENTLAT,CENTLON".to_string()),
         ("returnGeometry", "false".to_string()),
     ];
-    let j = http.arcgis_query(TIGER_ZCTA_URL, &params, 6500).await.ok()?;
+    let j = http
+        .arcgis_query(TIGER_ZCTA_URL, &params, 6500)
+        .await
+        .ok()?;
     let attr = j.pointer("/features/0/attributes")?;
     let lat = num_from_val(attr.get("CENTLAT"))?;
     let lon = num_from_val(attr.get("CENTLON"))?;
@@ -1540,14 +1562,12 @@ async fn attach_official_school_ratings(
     env: &EnvConfig,
     schools: &mut [CachedSchoolEntry],
 ) {
-    let nces_ids: Vec<String> = schools
-        .iter()
-        .filter_map(|s| s.nces_id.clone())
-        .collect();
+    let nces_ids: Vec<String> = schools.iter().filter_map(|s| s.nces_id.clone()).collect();
     if nces_ids.is_empty() {
         return;
     }
-    let metrics = crate::modules::school_metrics::ca_metrics_for_report(Some(db), env, &nces_ids).await;
+    let metrics =
+        crate::modules::school_metrics::ca_metrics_for_report(Some(db), env, &nces_ids).await;
     if metrics.is_empty() {
         return;
     }
@@ -1568,7 +1588,8 @@ pub async fn get_zip_school_context(
     hint_lat: Option<f64>,
     hint_lon: Option<f64>,
 ) -> Result<ZipSchoolContext> {
-    if let Some((c_lat, c_lon, schools_json, updated_at)) = db.get_zip_school_cache_row(zip).await? {
+    if let Some((c_lat, c_lon, schools_json, updated_at)) = db.get_zip_school_cache_row(zip).await?
+    {
         let fresh = chrono::DateTime::parse_from_rfc3339(&updated_at)
             .map(|dt| {
                 chrono::Utc::now()
@@ -1643,8 +1664,7 @@ pub fn assign_schools_to_listing(item: &mut ListingInput, ctx: Option<&ZipSchool
     if school_ctx.schools.is_empty() {
         return;
     }
-    let (Some(lat), Some(lon)) = (item.lat.or(school_ctx.lat), item.lon.or(school_ctx.lon))
-    else {
+    let (Some(lat), Some(lon)) = (item.lat.or(school_ctx.lat), item.lon.or(school_ctx.lon)) else {
         return;
     };
 
@@ -1656,7 +1676,8 @@ pub fn assign_schools_to_listing(item: &mut ListingInput, ctx: Option<&ZipSchool
             .min_by(|a, b| {
                 let da = haversine_m(lat, lon, a.lat, a.lon);
                 let db_dist = haversine_m(lat, lon, b.lat, b.lon);
-                da.partial_cmp(&db_dist).unwrap_or(std::cmp::Ordering::Equal)
+                da.partial_cmp(&db_dist)
+                    .unwrap_or(std::cmp::Ordering::Equal)
             })
     };
 
@@ -1747,7 +1768,10 @@ fn str_or_joined_array(v: Option<&Value>) -> Option<String> {
                 .map(str::trim)
                 .filter(|s| !s.is_empty());
             if let Some(n) = nm {
-                if !names.iter().any(|existing: &String| existing.eq_ignore_ascii_case(n)) {
+                if !names
+                    .iter()
+                    .any(|existing: &String| existing.eq_ignore_ascii_case(n))
+                {
                     names.push(n.to_string());
                 }
             }
@@ -1789,7 +1813,10 @@ fn merge_two_raw_json_blobs(prev: Option<&str>, next: &str) -> String {
     serde_json::to_string(&Value::Object(p_map)).unwrap_or_else(|_| next.to_string())
 }
 
-fn attach_shopping_facets_to_raw(existing_raw: Option<String>, sf: serde_json::Map<String, Value>) -> Option<String> {
+fn attach_shopping_facets_to_raw(
+    existing_raw: Option<String>,
+    sf: serde_json::Map<String, Value>,
+) -> Option<String> {
     if sf.is_empty() {
         return existing_raw;
     }
@@ -1802,7 +1829,9 @@ fn attach_shopping_facets_to_raw(existing_raw: Option<String>, sf: serde_json::M
         })
         .unwrap_or_default();
     root.insert("_shoppingFacets".to_string(), Value::Object(sf));
-    serde_json::to_string(&Value::Object(root)).ok().or(existing_raw)
+    serde_json::to_string(&Value::Object(root))
+        .ok()
+        .or(existing_raw)
 }
 
 fn merge_explicit_shopping_json(existing_raw: Option<String>, v: &Value) -> Option<String> {
@@ -1819,13 +1848,21 @@ fn merge_explicit_shopping_json(existing_raw: Option<String>, v: &Value) -> Opti
 
     for (canon, k1, k2) in [
         ("electricCarrier", "electricCarrier", "electric_carrier"),
-        ("electricUtilityType", "electricUtilityType", "electric_utility_type"),
+        (
+            "electricUtilityType",
+            "electricUtilityType",
+            "electric_utility_type",
+        ),
         ("gasCarrier", "gasCarrier", "gas_carrier"),
         ("waterCarrier", "waterCarrier", "water_carrier"),
         ("waterSourceType", "waterSourceType", "water_source_type"),
         ("sewerType", "sewerType", "sewer_type"),
         ("internetTier", "internetTier", "internet_tier"),
-        ("architecturalStyle", "architecturalStyle", "architectural_style"),
+        (
+            "architecturalStyle",
+            "architecturalStyle",
+            "architectural_style",
+        ),
         ("countyFips", "countyFips", "county_fips"),
     ] {
         if let Some(s) = str_from_val(get(k1, k2)) {
@@ -1851,7 +1888,11 @@ fn merge_explicit_shopping_json(existing_raw: Option<String>, v: &Value) -> Opti
         }
     }
     for (canon, k1, k2) in [
-        ("estMonthlyUtilities", "estMonthlyUtilities", "est_monthly_utilities"),
+        (
+            "estMonthlyUtilities",
+            "estMonthlyUtilities",
+            "est_monthly_utilities",
+        ),
         ("maxDownloadMbps", "maxDownloadMbps", "max_download_mbps"),
         ("maxUploadMbps", "maxUploadMbps", "max_upload_mbps"),
         ("allInMonthly", "allInMonthly", "all_in_monthly"),
@@ -1862,7 +1903,11 @@ fn merge_explicit_shopping_json(existing_raw: Option<String>, v: &Value) -> Opti
     }
     for (canon, k1, k2) in [
         ("fiberAvailable", "fiberAvailable", "fiber_available"),
-        ("highSpeedInternet", "highSpeedInternet", "high_speed_internet"),
+        (
+            "highSpeedInternet",
+            "highSpeedInternet",
+            "high_speed_internet",
+        ),
         ("hasSpecialTax", "hasSpecialTax", "has_special_tax"),
         ("hasSolar", "hasSolar", "has_solar"),
         ("hasEvCharger", "hasEvCharger", "has_ev_charger"),
@@ -1885,8 +1930,8 @@ fn merge_report_shopping_json(existing_raw: Option<String>, report: &Value) -> O
         .get("geo")
         .or_else(|| report.pointer("/modules/geocode/data"))
         .unwrap_or(&Value::Null);
-    if let Some(fips) = str_from_val(geo.pointer("/fips/county"))
-        .or_else(|| str_from_val(geo.get("countyFips")))
+    if let Some(fips) =
+        str_from_val(geo.pointer("/fips/county")).or_else(|| str_from_val(geo.get("countyFips")))
     {
         sf.insert("countyFips".to_string(), json!(fips));
     }
@@ -1931,12 +1976,16 @@ fn merge_report_shopping_json(existing_raw: Option<String>, report: &Value) -> O
     if let Some(tot_u) = int_from_val(mu.get("totalMonthlyUtilitiesUsd")) {
         sf.insert("estMonthlyUtilities".to_string(), json!(tot_u));
     }
-    if let Some(burn) = int_from_val(bd.pointer("/ongoingCosts/allInMonthlyBurn/allInMonthlyBurnUsd"))
-        .or_else(|| int_from_val(report.pointer("/modules/valuation/data/ownership/monthly/total")))
+    if let Some(burn) = int_from_val(
+        bd.pointer("/ongoingCosts/allInMonthlyBurn/allInMonthlyBurnUsd"),
+    )
+    .or_else(|| int_from_val(report.pointer("/modules/valuation/data/ownership/monthly/total")))
     {
         sf.insert("allInMonthly".to_string(), json!(burn));
     }
-    if let Some(sp) = bool_as_flag(bd.pointer("/ongoingCosts/specialTaxDistricts/hasConfirmedOrSuspectedDistrict")) {
+    if let Some(sp) = bool_as_flag(
+        bd.pointer("/ongoingCosts/specialTaxDistricts/hasConfirmedOrSuspectedDistrict"),
+    ) {
         sf.insert("hasSpecialTax".to_string(), json!(sp));
     }
 
@@ -1945,10 +1994,7 @@ fn merge_report_shopping_json(existing_raw: Option<String>, report: &Value) -> O
         .unwrap_or(&Value::Null);
     let bc_vs = str_from_val(bc.get("verificationStatus")).unwrap_or_default();
     let bc_verified = bool_as_flag(bc.get("fiberConfirmedFcc")) == Some(1)
-        || matches!(
-            bc_vs.as_str(),
-            "fcc_location_verified" | "address_verified" | "sonic_verified"
-        );
+        || matches!(bc_vs.as_str(), "fcc_location_verified" | "address_verified");
     if bc_verified {
         if let Some(tier) = str_from_val(bc.get("internetTier")) {
             sf.insert("internetTier".to_string(), json!(tier));
@@ -1995,8 +2041,10 @@ fn merge_report_shopping_json(existing_raw: Option<String>, report: &Value) -> O
         .get("facts")
         .or_else(|| report.pointer("/modules/facts/data"))
         .unwrap_or(&Value::Null);
-    if let Some(txr) = num_from_val(report.pointer("/modules/valuation/data/ownership/assumptions/propertyTaxRate"))
-        .or_else(|| num_from_val(facts.get("propertyTaxRate")))
+    if let Some(txr) = num_from_val(
+        report.pointer("/modules/valuation/data/ownership/assumptions/propertyTaxRate"),
+    )
+    .or_else(|| num_from_val(facts.get("propertyTaxRate")))
     {
         let norm_rate = if txr > 0.25 { txr / 100.0 } else { txr };
         sf.insert("propertyTaxRate".to_string(), json!(round_n(norm_rate, 4)));
@@ -2009,8 +2057,8 @@ fn merge_report_shopping_json(existing_raw: Option<String>, report: &Value) -> O
     if let Some(gar) = num_from_val(facts.get("garageSpaces")) {
         sf.insert("garageSpaces".to_string(), json!(gar));
     }
-    if let Some(pool) = bool_as_flag(mu.get("hasPoolSignal"))
-        .or_else(|| bool_as_flag(facts.get("hasPool")))
+    if let Some(pool) =
+        bool_as_flag(mu.get("hasPoolSignal")).or_else(|| bool_as_flag(facts.get("hasPool")))
     {
         sf.insert("hasPool".to_string(), json!(pool));
     }
@@ -2041,10 +2089,14 @@ fn merge_report_shopping_json(existing_raw: Option<String>, report: &Value) -> O
             if id_lc.contains("ev") || id_lc.contains("charger") || id_lc.contains("nema") {
                 sf.insert("hasEvCharger".to_string(), json!(1));
             }
-            if id_lc.contains("heat_pump") || id_lc.contains("heat pump") || id_lc.contains("mini-split") {
+            if id_lc.contains("heat_pump")
+                || id_lc.contains("heat pump")
+                || id_lc.contains("mini-split")
+            {
                 sf.insert("hasHeatPump".to_string(), json!(1));
             }
-            if id_lc.contains("adu") && !id_lc.contains("eligible") && !id_lc.contains("potential") {
+            if id_lc.contains("adu") && !id_lc.contains("eligible") && !id_lc.contains("potential")
+            {
                 sf.insert("hasAdu".to_string(), json!(1));
             }
             if id_lc.contains("pool") {
@@ -2052,8 +2104,10 @@ fn merge_report_shopping_json(existing_raw: Option<String>, report: &Value) -> O
             }
         }
     }
-    if let Some(adu_f) = bool_as_flag(report.pointer("/modules/remodelAndRebuild/data/adu/eligible"))
-        .or_else(|| bool_as_flag(report.pointer("/modules/remodelAndRebuild/data/aduPotential/feasible")))
+    if let Some(adu_f) =
+        bool_as_flag(report.pointer("/modules/remodelAndRebuild/data/adu/eligible")).or_else(|| {
+            bool_as_flag(report.pointer("/modules/remodelAndRebuild/data/aduPotential/feasible"))
+        })
     {
         sf.insert("aduFeasible".to_string(), json!(adu_f));
     }
@@ -2276,13 +2330,17 @@ fn compute_listing_shopping_facets(
         || feat_lc.contains("level 2 charger")
         || feat_lc.contains("nema 14-50")
         || feat_lc.contains("ev charging");
-    let has_hp_kw = feat_lc.contains("heat pump") || feat_lc.contains("mini-split") || feat_lc.contains("minisplit");
+    let has_hp_kw = feat_lc.contains("heat pump")
+        || feat_lc.contains("mini-split")
+        || feat_lc.contains("minisplit");
     let has_adu_kw = feat_lc.contains("adu")
         || feat_lc.contains("in-law unit")
         || feat_lc.contains("guest house")
         || feat_lc.contains("casita")
         || feat_lc.contains("granny flat");
-    let has_pool_kw = feat_lc.contains("pool") && !feat_lc.contains("community pool") && !feat_lc.contains("no pool");
+    let has_pool_kw = feat_lc.contains("pool")
+        && !feat_lc.contains("community pool")
+        && !feat_lc.contains("no pool");
 
     let sqft_real = sqft_opt.filter(|&s| s > 0);
     let u_inp = UtilityLookupInput {
@@ -2308,11 +2366,7 @@ fn compute_listing_shopping_facets(
     let elec = resolve_electric_utility(&u_inp);
     let gas = resolve_gas_utility(&u_inp);
     let wst = resolve_water_sewer_trash(&u_inp);
-    let bb = resolve_broadband_catalog(
-        &u_inp,
-        "https://broadbandmap.fcc.gov/home",
-        None,
-    );
+    let bb = resolve_broadband_catalog(&u_inp, "https://broadbandmap.fcc.gov/home", None);
 
     let elec_verified = elec.utility_type != "unverified" && elec.rate_per_kwh_usd > 0.0;
     let electric_carrier = str_from_val(sf_map.get("electricCarrier"))
@@ -2378,7 +2432,7 @@ fn compute_listing_shopping_facets(
         .or_else(|| existing.and_then(|e| e.est_monthly_utilities))
         .or(modeled_utilities_mo);
 
-    // Only write broadband availability / speeds when address-verified (never promote unverified regional guesses such as Sonic 10G footprint assumptions).
+    // Only write broadband availability / speeds when address-verified (never promote unverified regional guesses as confirmed fiber).
     let bb_address_verified = bb.fiber_confirmed_fcc
         || bb.verification_status == "fcc_location_verified"
         || bb.verification_status == "address_verified";
@@ -2410,7 +2464,10 @@ fn compute_listing_shopping_facets(
             .chain(bb.cable_carriers.iter())
             .chain(bb.wireless_carriers.iter().take(1))
         {
-            if !names.iter().any(|e| e.eq_ignore_ascii_case(&c.carrier_name)) {
+            if !names
+                .iter()
+                .any(|e| e.eq_ignore_ascii_case(&c.carrier_name))
+            {
                 names.push(&c.carrier_name);
             }
         }
@@ -2426,7 +2483,9 @@ fn compute_listing_shopping_facets(
         .or(default_isp_str);
     let max_download_mbps = int_from_val(sf_map.get("maxDownloadMbps"))
         .or_else(|| existing.and_then(|e| e.max_download_mbps))
-        .or_else(|| (bb_address_verified && bb.max_download_mbps > 0).then_some(bb.max_download_mbps));
+        .or_else(|| {
+            (bb_address_verified && bb.max_download_mbps > 0).then_some(bb.max_download_mbps)
+        });
     let max_upload_mbps = int_from_val(sf_map.get("maxUploadMbps"))
         .or_else(|| existing.and_then(|e| e.max_upload_mbps))
         .or_else(|| (bb_address_verified && bb.max_upload_mbps > 0).then_some(bb.max_upload_mbps));
@@ -2444,7 +2503,9 @@ fn compute_listing_shopping_facets(
         || feat_lc.contains("mello roos")
         || feat_lc.contains("mud tax")
         || feat_lc.contains("cdd ")
-        || (eff_state == "CA" && year_built_opt.map(|y| y >= 2002).unwrap_or(false) && !is_condo_attached)
+        || (eff_state == "CA"
+            && year_built_opt.map(|y| y >= 2002).unwrap_or(false)
+            && !is_condo_attached)
         || (eff_state == "TX" && year_built_opt.map(|y| y >= 2004).unwrap_or(false));
     let has_special_tax = bool_as_flag(sf_map.get("hasSpecialTax"))
         .or_else(|| existing.and_then(|e| e.has_special_tax))
@@ -2460,9 +2521,17 @@ fn compute_listing_shopping_facets(
                 p,
                 sqft_real.map(|s| s as f64),
                 &eff_state,
-                if eff_fips.is_empty() { None } else { Some(eff_fips.as_str()) },
+                if eff_fips.is_empty() {
+                    None
+                } else {
+                    Some(eff_fips.as_str())
+                },
             ) / 12.0;
-            let sp_mo = if has_special_tax == Some(1) { 185.0 } else { 0.0 };
+            let sp_mo = if has_special_tax == Some(1) {
+                185.0
+            } else {
+                0.0
+            };
             let util_mo = est_monthly_utilities.unwrap_or(0) as f64;
             Some((pi + tx_mo + ins_mo + (hoa_mo as f64) + sp_mo + util_mo).round() as i64)
         });
@@ -2489,10 +2558,16 @@ fn compute_listing_shopping_facets(
         eff_state.as_str(),
         "CA" | "WA" | "OR" | "TX" | "FL" | "CO" | "AZ" | "MA" | "NY" | "UT"
     );
-    let adu_lot_ok = !is_condo_attached && lot_sqft_opt.map(|l| l >= 4_500).unwrap_or(false) && adu_state_permissive;
+    let adu_lot_ok = !is_condo_attached
+        && lot_sqft_opt.map(|l| l >= 4_500).unwrap_or(false)
+        && adu_state_permissive;
     let adu_feasible = bool_as_flag(sf_map.get("aduFeasible"))
         .or_else(|| existing.and_then(|e| e.adu_feasible))
-        .or(Some(if has_adu == Some(1) || adu_lot_ok { 1 } else { 0 }));
+        .or(Some(if has_adu == Some(1) || adu_lot_ok {
+            1
+        } else {
+            0
+        }));
     let has_pool = bool_as_flag(sf_map.get("hasPool"))
         .or_else(|| existing.and_then(|e| e.has_pool))
         .or(Some(if has_pool_kw { 1 } else { 0 }));
@@ -2632,9 +2707,9 @@ pub async fn upsert_listings_batch(
 
     let mut school_by_zip: HashMap<String, ZipSchoolContext> = HashMap::new();
     for z in unique_zips.iter() {
-        let needs_schools = merged_by_id.values().any(|x| {
-            &x.zip == z && (x.school_score.is_none() || x.school_grade.is_none())
-        });
+        let needs_schools = merged_by_id
+            .values()
+            .any(|x| &x.zip == z && (x.school_score.is_none() || x.school_grade.is_none()));
         if needs_schools {
             let sample = merged_by_id
                 .values()
@@ -2687,9 +2762,7 @@ pub async fn upsert_listings_batch(
         let price = item.price.or_else(|| existing.and_then(|e| e.price));
         let sqft = item.sqft.or_else(|| existing.and_then(|e| e.sqft));
         let ppsf = match (price, sqft) {
-            (Some(p), Some(s)) if p > 0 && s > 0 => {
-                Some(((p as f64) / (s as f64)).round() as i64)
-            }
+            (Some(p), Some(s)) if p > 0 && s > 0 => Some(((p as f64) / (s as f64)).round() as i64),
             _ => existing.and_then(|e| e.price_per_sqft),
         };
 
@@ -3041,11 +3114,17 @@ pub async fn upsert_listings_batch(
                 ("sold_date", row_record.sold_date.clone().into()),
                 ("school_score", row_record.school_score.into()),
                 ("school_grade", row_record.school_grade.clone().into()),
-                ("school_elem_name", row_record.school_elem_name.clone().into()),
+                (
+                    "school_elem_name",
+                    row_record.school_elem_name.clone().into(),
+                ),
                 ("school_elem_rating", row_record.school_elem_rating.into()),
                 ("school_mid_name", row_record.school_mid_name.clone().into()),
                 ("school_mid_rating", row_record.school_mid_rating.into()),
-                ("school_high_name", row_record.school_high_name.clone().into()),
+                (
+                    "school_high_name",
+                    row_record.school_high_name.clone().into(),
+                ),
                 ("school_high_rating", row_record.school_high_rating.into()),
                 ("school_district", row_record.school_district.clone().into()),
                 ("walk_score", row_record.walk_score.into()),
@@ -3060,7 +3139,10 @@ pub async fn upsert_listings_batch(
                 ("report_slug", row_record.report_slug.clone().into()),
                 ("features_text", row_record.features_text.clone().into()),
                 ("raw_json", row_record.raw_json.clone().into()),
-                ("electric_carrier", row_record.electric_carrier.clone().into()),
+                (
+                    "electric_carrier",
+                    row_record.electric_carrier.clone().into(),
+                ),
                 (
                     "electric_utility_type",
                     row_record.electric_utility_type.clone().into(),
@@ -3116,7 +3198,10 @@ pub async fn upsert_listings_batch(
                     "status_changed_at",
                     row_record.status_changed_at.clone().into(),
                 ),
-                ("price_changed_at", row_record.price_changed_at.clone().into()),
+                (
+                    "price_changed_at",
+                    row_record.price_changed_at.clone().into(),
+                ),
             ],
             &["id"],
         )
@@ -3297,7 +3382,9 @@ pub async fn ingest_report_into_db(
                 serde_json::to_string(&brief).unwrap_or_default(),
                 schema,
             );
-            if let Ok(resp) = crate::ai::llm::responses_json_with_cache(client, env, opts, Some(&cache)).await {
+            if let Ok(resp) =
+                crate::ai::llm::responses_json_with_cache(client, env, opts, Some(&cache)).await
+            {
                 if let Some(arr) = resp.data.get("tags").and_then(Value::as_array) {
                     let mut merged: Vec<String> = subj
                         .tags_json
@@ -3446,159 +3533,21 @@ struct ConnectorFeedOutput {
     source_name: Option<String>,
 }
 
-async fn fetch_rentcast_zip(
-    http: &HttpClient,
-    zip: &str,
-    api_key: &str,
-) -> ConnectorFeedOutput {
-    let hdrs = [("X-Api-Key", api_key), ("Accept", "application/json")];
-    let u_act = format!("{RC_BASE}/listings/sale?zipCode={zip}&status=Active&limit=50");
-    let u_inact = format!("{RC_BASE}/listings/sale?zipCode={zip}&status=Inactive&limit=35");
-    let u_props = format!("{RC_BASE}/properties?zipCode={zip}&limit=50");
-
-    let (r_act, r_inact, r_props) = tokio::join!(
-        http.get_json_opts(&u_act, 15000, 1, 300, Some(&hdrs)),
-        http.get_json_opts(&u_inact, 15000, 1, 300, Some(&hdrs)),
-        http.get_json_opts(&u_props, 15000, 1, 900, Some(&hdrs)),
-    );
-
-    let mut items = Vec::new();
-    let mut warnings = Vec::new();
-
-    let map_rc_listing = |l: &Value, default_status: &str| -> Option<ListingInput> {
-        let formatted = str_from_val(l.get("formattedAddress"))?;
-        let price = int_from_val(l.get("price"))?;
-        let status_raw = str_from_val(l.get("status"));
-        let status = normalize_listing_status(status_raw.as_deref().or(Some(default_status)));
-        let z: String = str_from_val(l.get("zipCode"))
-            .unwrap_or_else(|| zip.to_string())
-            .chars()
-            .take(5)
-            .collect();
-        Some(ListingInput {
-            street: str_from_val(l.get("addressLine1"))
-                .or_else(|| Some(formatted.split(',').next().unwrap_or("").trim().to_string())),
-            address: formatted,
-            city: str_from_val(l.get("city")),
-            state: str_from_val(l.get("state")),
-            zip: z,
-            lat: num_from_val(l.get("latitude")),
-            lon: num_from_val(l.get("longitude")),
-            status: Some(status.to_string()),
-            price: Some(price),
-            list_price: Some(price),
-            beds: num_from_val(l.get("bedrooms")),
-            baths: num_from_val(l.get("bathrooms")),
-            sqft: int_from_val(l.get("squareFootage")),
-            lot_sqft: int_from_val(l.get("lotSize")),
-            year_built: int_from_val(l.get("yearBuilt")),
-            hoa_monthly: int_from_val(l.pointer("/hoa/fee")),
-            days_on_market: int_from_val(l.get("daysOnMarket")),
-            listed_date: str_from_val(l.get("listedDate")).map(|s| s.chars().take(10).collect()),
-            sold_date: if status != "for_sale" {
-                str_from_val(l.get("removedDate")).map(|s| s.chars().take(10).collect())
-            } else {
-                None
-            },
-            property_type: Some(normalize_property_category(
-                str_from_val(l.get("propertyType")).as_deref(),
-            )),
-            mls_number: str_from_val(l.get("mlsNumber")),
-            source: Some("RentCast MLS".to_string()),
-            raw_json: crate::modules::engagement::extract_raw_engagement_json(l), // [feat/report-ux-likes]
-            ..Default::default()
-        })
-    };
-
-    match r_act {
-        Ok(v) => {
-            if let Some(arr) = v.as_array() {
-                for l in arr {
-                    if let Some(it) = map_rc_listing(l, "for_sale") {
-                        items.push(it);
-                    }
-                }
-            }
-        }
-        Err(e) => warnings.push(format!("RentCast active ZIP query failed: {e}")),
-    }
-
-    if let Ok(v) = r_inact {
-        if let Some(arr) = v.as_array() {
-            for l in arr {
-                if let Some(it) = map_rc_listing(l, "sold") {
-                    items.push(it);
-                }
-            }
-        }
-    }
-
-    if let Ok(v) = r_props {
-        if let Some(arr) = v.as_array() {
-            for p in arr {
-                let Some(formatted) = str_from_val(p.get("formattedAddress")) else {
-                    continue;
-                };
-                let Some(last_price) = int_from_val(p.get("lastSalePrice")) else {
-                    continue;
-                };
-                let z: String = str_from_val(p.get("zipCode"))
-                    .unwrap_or_else(|| zip.to_string())
-                    .chars()
-                    .take(5)
-                    .collect();
-                items.push(ListingInput {
-                    street: str_from_val(p.get("addressLine1")).or_else(|| {
-                        Some(formatted.split(',').next().unwrap_or("").trim().to_string())
-                    }),
-                    address: formatted,
-                    city: str_from_val(p.get("city")),
-                    state: str_from_val(p.get("state")),
-                    zip: z,
-                    lat: num_from_val(p.get("latitude")),
-                    lon: num_from_val(p.get("longitude")),
-                    status: Some("sold".to_string()),
-                    price: Some(last_price),
-                    sold_price: Some(last_price),
-                    beds: num_from_val(p.get("bedrooms")),
-                    baths: num_from_val(p.get("bathrooms")),
-                    sqft: int_from_val(p.get("squareFootage")),
-                    lot_sqft: int_from_val(p.get("lotSize")),
-                    year_built: int_from_val(p.get("yearBuilt")),
-                    stories: num_from_val(p.pointer("/features/floorCount")),
-                    hoa_monthly: int_from_val(p.pointer("/hoa/fee")),
-                    sold_date: str_from_val(p.get("lastSaleDate"))
-                        .map(|s| s.chars().take(10).collect()),
-                    property_type: Some(normalize_property_category(
-                        str_from_val(p.get("propertyType")).as_deref(),
-                    )),
-                    source: Some("RentCast County Records".to_string()),
-                    ..Default::default()
-                });
-            }
-        }
-    }
-
-    ConnectorFeedOutput {
-        source_name: if items.is_empty() {
-            None
-        } else {
-            Some("RentCast".to_string())
-        },
-        items,
-        warnings,
-    }
-}
-
 async fn fetch_reso_zip(http: &HttpClient, zip: &str, env: &EnvConfig) -> ConnectorFeedOutput {
-    let base = env.get_or("RESO_API_URL", "").trim_end_matches('/').to_string();
+    let base = env
+        .get_or("RESO_API_URL", "")
+        .trim_end_matches('/')
+        .to_string();
     let token = env.get_or("RESO_BEARER_TOKEN", "");
     let filter = format!(
         "PostalCode eq '{}' and (StandardStatus eq 'Active' or StandardStatus eq 'Pending' or StandardStatus eq 'Closed')",
         zip.replace('\'', "''")
     );
     let auth = format!("Bearer {token}");
-    let hdrs = [("Authorization", auth.as_str()), ("Accept", "application/json")];
+    let hdrs = [
+        ("Authorization", auth.as_str()),
+        ("Accept", "application/json"),
+    ];
 
     let Ok(mut url) = Url::parse(&format!("{base}/Property")) else {
         return ConnectorFeedOutput {
@@ -3701,8 +3650,7 @@ async fn fetch_reso_zip(http: &HttpClient, zip: &str, env: &EnvConfig) -> Connec
                 .or_else(|| int_from_val(p.get("BuildingAreaTotal"))),
             lot_sqft: int_from_val(p.get("LotSizeSquareFeet")),
             year_built: int_from_val(p.get("YearBuilt")),
-            stories: num_from_val(p.get("StoriesTotal"))
-                .or_else(|| num_from_val(p.get("Stories"))),
+            stories: num_from_val(p.get("StoriesTotal")).or_else(|| num_from_val(p.get("Stories"))),
             hoa_monthly: int_from_val(p.get("AssociationFee")),
             days_on_market: int_from_val(p.get("DaysOnMarket"))
                 .or_else(|| int_from_val(p.get("CumulativeDaysOnMarket"))),
@@ -3720,7 +3668,8 @@ async fn fetch_reso_zip(http: &HttpClient, zip: &str, env: &EnvConfig) -> Connec
                     .or_else(|| str_from_val(p.get("PropertyType")))
                     .as_deref(),
             )),
-            mls_number: str_from_val(p.get("ListingId")).or_else(|| str_from_val(p.get("ListingKey"))),
+            mls_number: str_from_val(p.get("ListingId"))
+                .or_else(|| str_from_val(p.get("ListingKey"))),
             features_text: str_from_val(p.get("PublicRemarks")),
             source: Some("RESO Web API".to_string()),
             ..Default::default()
@@ -3743,7 +3692,10 @@ async fn fetch_simplyrets_zip(http: &HttpClient, zip: &str, auth: &str) -> Conne
         "Basic {}",
         base64::engine::general_purpose::STANDARD.encode(auth.as_bytes())
     );
-    let hdrs = [("Authorization", basic.as_str()), ("Accept", "application/json")];
+    let hdrs = [
+        ("Authorization", basic.as_str()),
+        ("Accept", "application/json"),
+    ];
     let url = format!(
         "{SIMPLYRETS_BASE}/properties?postalCodes={}&status=Active&status=Pending&status=Closed&limit=50",
         urlencoding::encode(zip)
@@ -3976,7 +3928,10 @@ async fn fetch_public_feeds_zip(
                     }
                 }
             }
-            Ok(resp) => warnings.push(format!("Public feed URL returned HTTP {}", resp.status().as_u16())),
+            Ok(resp) => warnings.push(format!(
+                "Public feed URL returned HTTP {}",
+                resp.status().as_u16()
+            )),
             Err(e) => warnings.push(format!("Public feed fetch failed: {e}")),
         }
     }
@@ -4053,13 +4008,6 @@ pub async fn sync_zip_listings_with_provider(
         }
     };
     let pub_fut = fetch_public_feeds_zip(http, &clean_zip, env);
-    let rc_fut = async {
-        if let Some(k) = env.get("RENTCAST_API_KEY") {
-            Some(fetch_rentcast_zip(http, &clean_zip, k).await)
-        } else {
-            None
-        }
-    };
     let reso_fut = async {
         if env.get("RESO_API_URL").is_some() && env.get("RESO_BEARER_TOKEN").is_some() {
             Some(fetch_reso_zip(http, &clean_zip, env).await)
@@ -4081,8 +4029,8 @@ pub async fn sync_zip_listings_with_provider(
             None
         }
     };
-    let (provider_res, pub_res, rc_res, reso_res, sr_res, attom_res) =
-        tokio::join!(provider_fut, pub_fut, rc_fut, reso_fut, sr_fut, attom_fut);
+    let (provider_res, pub_res, reso_res, sr_res, attom_res) =
+        tokio::join!(provider_fut, pub_fut, reso_fut, sr_fut, attom_fut);
 
     if let Some(mut hook_items) = provider_res {
         if !hook_items.is_empty() {
@@ -4120,15 +4068,9 @@ pub async fn sync_zip_listings_with_provider(
         }
     }
 
-    for feed_out in [
-        Some(pub_res),
-        rc_res,
-        reso_res,
-        sr_res,
-        attom_res,
-    ]
-    .into_iter()
-    .flatten()
+    for feed_out in [Some(pub_res), reso_res, sr_res, attom_res]
+        .into_iter()
+        .flatten()
     {
         if !feed_out.items.is_empty() {
             all_items.extend(feed_out.items);
@@ -4142,7 +4084,9 @@ pub async fn sync_zip_listings_with_provider(
     }
 
     // 3. Load ZIP centroid + school context
-    let sample_coord = all_items.iter().find(|x| x.lat.is_some() && x.lon.is_some());
+    let sample_coord = all_items
+        .iter()
+        .find(|x| x.lat.is_some() && x.lon.is_some());
     let school_ctx = get_zip_school_context(
         db,
         Some(http),
@@ -4223,7 +4167,11 @@ pub async fn sync_zip_listings_with_provider(
             ),
             (
                 "active",
-                existing_watch.as_ref().map(|w| w.active).unwrap_or(1).into(),
+                existing_watch
+                    .as_ref()
+                    .map(|w| w.active)
+                    .unwrap_or(1)
+                    .into(),
             ),
             (
                 "subscriber_count",
@@ -4243,7 +4191,10 @@ pub async fn sync_zip_listings_with_provider(
             ),
             ("last_synced_at", Some(now.clone()).into()),
             ("last_sync_status", Some(last_sync_status).into()),
-            ("last_new_count", (batch_res.new_listings.len() as i64).into()),
+            (
+                "last_new_count",
+                (batch_res.new_listings.len() as i64).into(),
+            ),
             (
                 "last_sold_count",
                 (batch_res.sold_listings.len() as i64).into(),
@@ -4280,13 +4231,17 @@ pub async fn sync_zip_listings_with_provider(
                 };
                 match tokio::time::timeout(
                     Duration::from_secs(6),
-                    crate::search::light_scan::light_scan_listings(db, http, env, &zip_rows, &scan_opts),
+                    crate::search::light_scan::light_scan_listings(
+                        db, http, env, &zip_rows, &scan_opts,
+                    ),
                 )
                 .await
                 {
                     Ok(Ok(_)) => {}
                     Ok(Err(e)) => warnings.push(format!("Light factor scan partial warning: {e}")),
-                    Err(_) => warnings.push("Light factor scan timed out after batch sync".to_string()),
+                    Err(_) => {
+                        warnings.push("Light factor scan timed out after batch sync".to_string())
+                    }
                 }
             }
         }
@@ -4412,7 +4367,8 @@ async fn sync_areas_owned(
                     if let Some(places) = val.get("places").and_then(Value::as_array) {
                         for p in places.iter().take(3) {
                             if let Some(pz) = p.get("post code").and_then(Value::as_str) {
-                                let d: String = pz.chars().filter(|c| c.is_ascii_digit()).take(5).collect();
+                                let d: String =
+                                    pz.chars().filter(|c| c.is_ascii_digit()).take(5).collect();
                                 if d.len() == 5
                                     && seen.insert(d.clone())
                                     && target_zips.len() < 16
@@ -4479,7 +4435,9 @@ async fn sync_areas_owned(
                     summary.warnings.extend(sr.warnings);
                 }
                 Ok((z, Err(e))) => summary.warnings.push(format!("ZIP {z} sync failed: {e}")),
-                Err(je) => summary.warnings.push(format!("ZIP sync task join error: {je}")),
+                Err(je) => summary
+                    .warnings
+                    .push(format!("ZIP sync task join error: {je}")),
             }
         }
     }
@@ -4487,13 +4445,19 @@ async fn sync_areas_owned(
     if let Some(opts) = light_scan_opts {
         if !summary.synced.is_empty() {
             let synced_zips: Vec<String> = summary.synced.iter().map(|s| s.zip.clone()).collect();
-            if let Ok(rows) = db.query_listings_in_areas(&synced_zips, &[], None, 1_000).await {
+            if let Ok(rows) = db
+                .query_listings_in_areas(&synced_zips, &[], None, 1_000)
+                .await
+            {
                 if !rows.is_empty() {
-                    if let Err(e) =
-                        crate::search::light_scan::light_scan_listings(&db, &http, &env, &rows, &opts)
-                            .await
+                    if let Err(e) = crate::search::light_scan::light_scan_listings(
+                        &db, &http, &env, &rows, &opts,
+                    )
+                    .await
                     {
-                        summary.warnings.push(format!("Area light scan warning: {e}"));
+                        summary
+                            .warnings
+                            .push(format!("Area light scan warning: {e}"));
                     }
                 }
             }

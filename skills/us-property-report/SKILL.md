@@ -38,7 +38,7 @@ modules need none.
    orchestrator then snaps the point to the actual building ("rooftop") using the OpenStreetMap footprint
    (`fetch_rooftop_building`), stored as `geo.refined`.
 2. **Collect property facts** — follow the `property-facts` skill. Preferred order:
-   1. licensed connectors configured in the environment (`RENTCAST_API_KEY`, RESO, SimplyRETS, ATTOM) → fetched
+   1. licensed connectors configured in the environment (RESO, SimplyRETS, ATTOM) → fetched
       automatically, together with keyless county assessor / city GIS records;
    2. otherwise do agent web research (listing sites, county assessor, city GIS) into a facts object following
       `skills/property-facts/references/facts-schema.md` and pass it as `given_facts` through the Rust API

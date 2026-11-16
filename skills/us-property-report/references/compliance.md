@@ -41,7 +41,7 @@ tenant-screening-guide, comparative-market-analysis, real-estate-expert) and US 
   insurance broker, NHD provider).
 - RESPA: no referral fees or steering to specific lenders/inspectors/insurers in the report.
 - MLS data: don't scrape listing portals at scale or redistribute MLS content; for production use licensed feeds
-  (RESO Web API / IDX via a broker, RentCast, ATTOM) and honour their display rules.
+  (RESO Web API / IDX via a broker, SimplyRETS, ATTOM) and honour their display rules.
 
 ## Data-provider terms
 - OSM/Overpass: attribute "© OpenStreetMap contributors", cache, keep queries small (ODbL).

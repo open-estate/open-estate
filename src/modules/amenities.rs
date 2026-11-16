@@ -8,10 +8,20 @@ use geo::{Coord, LineString, Point, Simplify};
 use geojson::{Feature, Geometry};
 use once_cell::sync::Lazy;
 use regex::Regex;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use std::collections::HashMap;
 use url::Url;
 
+use crate::db::shared_cache_store::GeoIndexColumns;
+use crate::db::DbStore;
+use crate::extensions::shared_cache::{
+    dataset_ids, decode_geohash_bbox, encode_geohash, get_shared_dataset_proto,
+    put_shared_dataset_proto,
+    shared_v1::{AmenityCellProto, AmenityPoiSummaryProto, GeoBoundingBoxProto},
+    ShareScope, SharedExtensionCache,
+};
+use crate::extensions::ExtensionHub;
 use crate::modules::fengshui::resolve_osm_ways;
 use crate::modules::osm_mirror::{
     mirror_lines, mirror_macro, mirror_pois, with_fallback, MirrorConfig, OsmVia, AIRPORT_RADIUS_M,
@@ -35,6 +45,216 @@ const ARCGIS_GEOCODER: &str =
     "https://geocode.arcgis.com/arcgis/rest/services/World/GeocodeServer/findAddressCandidates";
 const HAVERSINE_ROUTING_PROVIDER: &str = "haversine_estimate";
 const HAVERSINE_ESTIMATE_BASIS: &str = "straight_line_haversine_factor";
+const AMENITIES_CELL_TTL_SECS: u64 = 14 * 86_400;
+const AMENITIES_CELL_PARAMS_HASH: &str = "pois_v1";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CachedPoiTagEntry {
+    category: String,
+    name: Option<String>,
+    lat: f64,
+    lon: f64,
+    tags: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CachedAmenitiesCellPayload {
+    via: String,
+    used_arcgis: bool,
+    pois: Vec<CachedPoiTagEntry>,
+}
+
+fn amenities_geo_index_cols(lat: f64, lon: f64, gh6: &str, geo: &Value) -> GeoIndexColumns {
+    let bbox = decode_geohash_bbox(gh6);
+    let str_field = |key: &str| {
+        geo.get(key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    };
+    GeoIndexColumns {
+        geohash5: encode_geohash(lat, lon, 5),
+        geohash6: Some(gh6.to_string()),
+        geohash7: encode_geohash(lat, lon, 7),
+        tract: str_field("censusTract").or_else(|| str_field("tract")),
+        zip: str_field("zip").or_else(|| str_field("postalCode")),
+        county: str_field("county"),
+        state: str_field("state"),
+        bbox_south: bbox.map(|(s, _, _, _)| s),
+        bbox_west: bbox.map(|(_, w, _, _)| w),
+        bbox_north: bbox.map(|(_, _, n, _)| n),
+        bbox_east: bbox.map(|(_, _, _, e)| e),
+    }
+}
+
+fn parse_osm_via_label(raw: &str) -> Option<OsmVia> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "overpass" | "overpass+directory" => Some(OsmVia::Overpass),
+        "mirror" | "mirror+directory" => Some(OsmVia::Mirror),
+        _ => None,
+    }
+}
+
+async fn load_cached_amenities_cell(
+    db: &DbStore,
+    gh6: &str,
+    lat: f64,
+    lon: f64,
+) -> Option<(Vec<PoiItem>, Option<OsmVia>, bool)> {
+    let (_row, cell) = match get_shared_dataset_proto::<AmenityCellProto>(
+        Some(SharedExtensionCache::global()),
+        db,
+        dataset_ids::AMENITIES_CELL,
+        ShareScope::Geohash6,
+        gh6,
+        AMENITIES_CELL_PARAMS_HASH,
+    )
+    .await
+    {
+        Ok(Some(hit)) => hit,
+        Ok(None) => return None,
+        Err(err) => {
+            tracing::warn!(geohash6 = gh6, error = %err, "amenities: shared AMENITIES_CELL decode failed");
+            return None;
+        }
+    };
+
+    if let Some(raw_json) = _row.payload_json.as_deref() {
+        if let Ok(payload) = serde_json::from_str::<CachedAmenitiesCellPayload>(raw_json) {
+            let mut items = Vec::with_capacity(payload.pois.len());
+            for entry in payload.pois {
+                let Some(cdef) = CATEGORIES.iter().find(|c| c.id == entry.category) else {
+                    continue;
+                };
+                items.push(PoiItem {
+                    cat: cdef.id,
+                    name: entry.name,
+                    lat: r5(entry.lat),
+                    lon: r5(entry.lon),
+                    dist_m: haversine_m(lat, lon, entry.lat, entry.lon).round() as i64,
+                    brg: bearing_deg(lat, lon, entry.lat, entry.lon).round() as i64,
+                    tags: entry.tags,
+                });
+            }
+            if !items.is_empty() {
+                return Some((items, parse_osm_via_label(&payload.via), payload.used_arcgis));
+            }
+        }
+    }
+
+    let mut items = Vec::with_capacity(cell.pois.len());
+    for entry in cell.pois {
+        let Some(cdef) = CATEGORIES.iter().find(|c| c.id == entry.category) else {
+            continue;
+        };
+        items.push(PoiItem {
+            cat: cdef.id,
+            name: (!entry.name.trim().is_empty()).then_some(entry.name),
+            lat: r5(entry.lat),
+            lon: r5(entry.lon),
+            dist_m: haversine_m(lat, lon, entry.lat, entry.lon).round() as i64,
+            brg: bearing_deg(lat, lon, entry.lat, entry.lon).round() as i64,
+            tags: HashMap::new(),
+        });
+    }
+    if items.is_empty() {
+        None
+    } else {
+        let used_arcgis = cell.source_name.contains("directory");
+        Some((items, parse_osm_via_label(&cell.source_name), used_arcgis))
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn persist_amenities_cell(
+    db: &DbStore,
+    gh6: &str,
+    lat: f64,
+    lon: f64,
+    geo: &Value,
+    dedup: &[PoiItem],
+    by_cat: &HashMap<&'static str, Vec<PoiItem>>,
+    walkability_index: Option<i64>,
+    pois_via: Option<OsmVia>,
+    used_arcgis_pois: bool,
+) {
+    let source_name = match (pois_via, used_arcgis_pois) {
+        (Some(via), true) => format!("{}+directory", via.as_str()),
+        (Some(via), false) => via.as_str().to_string(),
+        (None, true) => "directory".to_string(),
+        (None, false) => "overpass".to_string(),
+    };
+    let category_counts: HashMap<String, u32> = by_cat
+        .iter()
+        .map(|(k, v)| ((*k).to_string(), v.len() as u32))
+        .collect();
+    let pois: Vec<AmenityPoiSummaryProto> = dedup
+        .iter()
+        .map(|p| AmenityPoiSummaryProto {
+            category: p.cat.to_string(),
+            name: p.name.clone().unwrap_or_default(),
+            lat: p.lat,
+            lon: p.lon,
+            osm_id: None,
+        })
+        .collect();
+    let cell_proto = AmenityCellProto {
+        geohash6: gh6.to_string(),
+        bbox: decode_geohash_bbox(gh6).map(|(south, west, north, east)| GeoBoundingBoxProto {
+            south,
+            west,
+            north,
+            east,
+        }),
+        category_counts,
+        pois,
+        walkability_index: walkability_index.map(|s| s as f64),
+        source_name: source_name.clone(),
+        fetched_at_rfc3339: chrono::Utc::now().to_rfc3339(),
+    };
+    let payload_json = serde_json::to_string(&CachedAmenitiesCellPayload {
+        via: source_name.clone(),
+        used_arcgis: used_arcgis_pois,
+        pois: dedup
+            .iter()
+            .map(|p| CachedPoiTagEntry {
+                category: p.cat.to_string(),
+                name: p.name.clone(),
+                lat: p.lat,
+                lon: p.lon,
+                tags: p.tags.clone(),
+            })
+            .collect(),
+    })
+    .ok();
+    let provenance_json = serde_json::to_string(&json!({
+        "dataset": dataset_ids::AMENITIES_CELL,
+        "scope": "geohash6",
+        "scopeKey": gh6,
+        "sourceName": source_name,
+    }))
+    .ok();
+    let geo_cols = amenities_geo_index_cols(lat, lon, gh6, geo);
+    if let Err(err) = put_shared_dataset_proto(
+        Some(SharedExtensionCache::global()),
+        db,
+        dataset_ids::AMENITIES_CELL,
+        ShareScope::Geohash6,
+        gh6,
+        AMENITIES_CELL_PARAMS_HASH,
+        geo_cols,
+        &cell_proto,
+        payload_json,
+        provenance_json,
+        None,
+        AMENITIES_CELL_TTL_SECS,
+    )
+    .await
+    {
+        tracing::warn!(geohash6 = gh6, error = %err, "amenities: failed to persist AMENITIES_CELL");
+    }
+}
 
 fn estimate_haversine_drive_min(dist_m: i64, road_factor: f64, meters_per_min: f64) -> i64 {
     ((dist_m as f64 * road_factor) / meters_per_min)
@@ -1082,6 +1302,19 @@ pub async fn run_amenities(
     geo: &Value,
     vicinity_elements: Option<&[Value]>,
 ) -> Result<ModuleOutput> {
+    let db = ExtensionHub::global().active_db();
+    run_amenities_with_db(http, env, db.as_ref(), lat, lon, geo, vicinity_elements).await
+}
+
+pub async fn run_amenities_with_db(
+    http: &HttpClient,
+    env: &EnvConfig,
+    db: Option<&DbStore>,
+    lat: f64,
+    lon: f64,
+    geo: &Value,
+    vicinity_elements: Option<&[Value]>,
+) -> Result<ModuleOutput> {
     let mut warnings = Vec::new();
     let (gas_id, _elec_id, area_label) = bls_utility_series_for_geo(geo);
     // [feat/commercial-saas]
@@ -1093,6 +1326,11 @@ pub async fn run_amenities(
 
     // Each OpenStreetMap-backed dataset comes from the live Overpass API with an independent
     // fallback source behind it, so an Overpass outage costs freshness instead of the dataset.
+    let geohash6 = encode_geohash(lat, lon, 6);
+    let cached_pois = match (db, geohash6.as_deref()) {
+        (Some(db_store), Some(gh6)) => load_cached_amenities_cell(db_store, gh6, lat, lon).await,
+        _ => None,
+    };
     let mirror_cfg = MirrorConfig::from_env(env);
     let arcgis_token = env.get("ARCGIS_API_KEY");
     let custom_geocoder_url = env.get("ARCGIS_GEOCODER_URL");
@@ -1101,12 +1339,21 @@ pub async fn run_amenities(
     let q_pois = poi_query(lat, lon);
     let q_lines = line_query(lat, lon);
     let q_macro = macro_query(lat, lon);
-    let (f_pois, f_lines, f_macro, r_gas) = tokio::join!(
-        with_fallback(
-            http.overpass_with_env(env, &q_pois, OVERPASS_BUDGET_MS, 3),
-            mirror_pois(http, &mirror_cfg, lat, lon),
-            FALLBACK_HEDGE,
-        ),
+    let (f_pois_res, f_lines, f_macro, r_gas) = tokio::join!(
+        async {
+            if cached_pois.is_some() {
+                None
+            } else {
+                Some(
+                    with_fallback(
+                        http.overpass_with_env(env, &q_pois, OVERPASS_BUDGET_MS, 3),
+                        mirror_pois(http, &mirror_cfg, lat, lon),
+                        FALLBACK_HEDGE,
+                    )
+                    .await,
+                )
+            }
+        },
         with_fallback(
             http.overpass_with_env(env, &q_lines, OVERPASS_BUDGET_MS, 3),
             mirror_lines(http, &mirror_cfg, lat, lon),
@@ -1129,7 +1376,6 @@ pub async fn run_amenities(
             }
         }
     };
-    let (r_pois, pois_via) = split("places", f_pois);
     let (r_lines, lines_via) = split("roads, rail, power & water", f_lines);
     let (r_macro, macro_via) = split("airports & peaks", f_macro);
     let flag = |r: &Result<Value>, key: &str| {
@@ -1143,64 +1389,73 @@ pub async fn run_amenities(
     let used_aviation_facilities = flag(&r_macro, "usedAviationFacilities");
 
     let mut raw_pois: Vec<PoiItem> = Vec::new();
-    let pois_ok = r_pois.is_ok();
-    if let Ok(ref j) = r_pois {
-        for (pla, plo, tags) in extract_overpass_points(j) {
-            let Some(cdef) = CATEGORIES.iter().find(|c| (c.matcher)(&tags)) else { continue };
-            let dist_m = haversine_m(lat, lon, pla, plo);
-            let is_ext = matches!(cdef.id, "grocery" | "emergency" | "transit")
-                || tag_in(&tags, "amenity", &["hospital", "pharmacy"]);
-            if dist_m > if is_ext { EXT_RADIUS_M } else { POI_RADIUS_M } {
-                continue;
-            }
-            let name = tags
-                .get("name")
-                .or_else(|| tags.get("brand"))
-                .or_else(|| tags.get("operator"))
-                .or_else(|| tags.get("ref"))
-                .cloned();
-            raw_pois.push(PoiItem {
-                cat: cdef.id,
-                name,
-                lat: r5(pla),
-                lon: r5(plo),
-                dist_m: dist_m.round() as i64,
-                brg: bearing_deg(lat, lon, pla, plo).round() as i64,
-                tags: pick_tags(&tags),
-            });
-        }
-    }
-
-    let has_groceries = raw_pois.iter().any(|p| p.cat == "grocery" && p.name.is_some());
-    // Optional BYOK POI directory backs OpenStreetMap up only when `ARCGIS_API_KEY` (or test `ARCGIS_GEOCODER_URL`) is configured.
-    let directory_pois = if !arcgis_enabled {
-        Vec::new()
-    } else if pois_via.is_none() || !has_groceries || raw_pois.len() < 6 {
-        fetch_arcgis_pois_fallback(http, geocoder_url, arcgis_token, lat, lon).await
-    } else {
-        let missing_kinds: Vec<&str> = EMERGENCY_KINDS
-            .iter()
-            .copied()
-            .filter(|kind| !raw_pois.iter().any(|p| tag_eq(&p.tags, "amenity", kind)))
-            .collect();
-        let include_schools = pois_via == Some(OsmVia::Mirror);
-        if missing_kinds.is_empty() && !include_schools {
-            Vec::new()
+    let (pois_ok, pois_via, used_arcgis_pois) =
+        if let Some((loaded_pois, via_opt, arcgis_flag)) = cached_pois.as_ref() {
+            raw_pois = loaded_pois.clone();
+            (true, *via_opt, *arcgis_flag)
         } else {
-            fetch_arcgis_gap_fill(
-                http,
-                geocoder_url,
-                arcgis_token,
-                lat,
-                lon,
-                &missing_kinds,
-                include_schools,
-            )
-            .await
-        }
-    };
-    let used_arcgis_pois = !directory_pois.is_empty();
-    raw_pois.extend(directory_pois);
+            let f_pois = f_pois_res.expect("uncached amenities query must fetch POIs");
+            let (r_pois, pois_via) = split("places", f_pois);
+            let pois_ok = r_pois.is_ok();
+            if let Ok(ref j) = r_pois {
+                for (pla, plo, tags) in extract_overpass_points(j) {
+                    let Some(cdef) = CATEGORIES.iter().find(|c| (c.matcher)(&tags)) else { continue };
+                    let dist_m = haversine_m(lat, lon, pla, plo);
+                    let is_ext = matches!(cdef.id, "grocery" | "emergency" | "transit")
+                        || tag_in(&tags, "amenity", &["hospital", "pharmacy"]);
+                    if dist_m > if is_ext { EXT_RADIUS_M } else { POI_RADIUS_M } {
+                        continue;
+                    }
+                    let name = tags
+                        .get("name")
+                        .or_else(|| tags.get("brand"))
+                        .or_else(|| tags.get("operator"))
+                        .or_else(|| tags.get("ref"))
+                        .cloned();
+                    raw_pois.push(PoiItem {
+                        cat: cdef.id,
+                        name,
+                        lat: r5(pla),
+                        lon: r5(plo),
+                        dist_m: dist_m.round() as i64,
+                        brg: bearing_deg(lat, lon, pla, plo).round() as i64,
+                        tags: pick_tags(&tags),
+                    });
+                }
+            }
+
+            let has_groceries = raw_pois.iter().any(|p| p.cat == "grocery" && p.name.is_some());
+            // Optional BYOK POI directory backs OpenStreetMap up only when `ARCGIS_API_KEY` (or test `ARCGIS_GEOCODER_URL`) is configured.
+            let directory_pois = if !arcgis_enabled {
+                Vec::new()
+            } else if pois_via.is_none() || !has_groceries || raw_pois.len() < 6 {
+                fetch_arcgis_pois_fallback(http, geocoder_url, arcgis_token, lat, lon).await
+            } else {
+                let missing_kinds: Vec<&str> = EMERGENCY_KINDS
+                    .iter()
+                    .copied()
+                    .filter(|kind| !raw_pois.iter().any(|p| tag_eq(&p.tags, "amenity", kind)))
+                    .collect();
+                let include_schools = pois_via == Some(OsmVia::Mirror);
+                if missing_kinds.is_empty() && !include_schools {
+                    Vec::new()
+                } else {
+                    fetch_arcgis_gap_fill(
+                        http,
+                        geocoder_url,
+                        arcgis_token,
+                        lat,
+                        lon,
+                        &missing_kinds,
+                        include_schools,
+                    )
+                    .await
+                }
+            };
+            let used_arcgis_pois = !directory_pois.is_empty();
+            raw_pois.extend(directory_pois);
+            (pois_ok, pois_via, used_arcgis_pois)
+        };
     if pois_via.is_none() {
         warnings.push(
             if used_arcgis_pois {
@@ -1476,6 +1731,24 @@ pub async fn run_amenities(
         None
     };
 
+    if cached_pois.is_none() && pois_ok && !dedup.is_empty() {
+        if let (Some(db_store), Some(ref gh6)) = (db, geohash6.as_ref()) {
+            persist_amenities_cell(
+                db_store,
+                gh6,
+                lat,
+                lon,
+                geo,
+                &dedup,
+                &by_cat,
+                score,
+                pois_via,
+                used_arcgis_pois,
+            )
+            .await;
+        }
+    }
+
     let supermarkets: Vec<Value> = by_cat
         .get("grocery")
         .map(|l| {
@@ -1712,7 +1985,6 @@ pub async fn run_amenities(
 mod tests {
     use super::*;
     use std::collections::HashMap;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
     #[tokio::test]
@@ -1720,20 +1992,12 @@ mod tests {
         assert_eq!(estimate_haversine_drive_min(4_000, 1.35, 580.0), 9);
 
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
-        let addr = listener.local_addr().expect("addr");
-        tokio::spawn(async move {
-            while let Ok((mut sock, _)) = listener.accept().await {
-                let mut buf = [0u8; 512];
-                let _ = sock.read(&mut buf).await;
-                let _ = sock
-                    .write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
-                    .await;
-            }
-        });
+        let closed_addr = listener.local_addr().expect("addr");
+        drop(listener);
 
         let env = EnvConfig::from_map(HashMap::from([(
             "FRED_BASE_URL".to_string(),
-            format!("http://{addr}"),
+            format!("http://{closed_addr}"),
         )]));
         let http = HttpClient::from_env(&env, None);
         let geo = serde_json::json!({ "state": "CA", "county": "Santa Clara County" });
@@ -1755,11 +2019,7 @@ mod tests {
         let out = run_amenities(&http, &env, 37.2839, -121.9317, &geo, Some(&vicinity))
             .await
             .expect("run_amenities");
-        let emerg_arr = out.data["mobilityHub"]["emergencyMedical"]
-            .as_array()
-            .expect("emergencyMedical array");
-        assert!(!emerg_arr.is_empty());
-        let emerg = &emerg_arr[0];
+        let emerg = &out.data["mobilityHub"]["emergencyMedical"];
         assert_eq!(emerg["estimated"], true);
         assert_eq!(emerg["routingSource"], HAVERSINE_ROUTING_PROVIDER);
         assert_eq!(emerg["estimateBasis"], HAVERSINE_ESTIMATE_BASIS);
@@ -1769,5 +2029,86 @@ mod tests {
         assert!(!markets.is_empty());
         assert_eq!(markets[0]["estimated"], true);
         assert_eq!(markets[0]["routingSource"], HAVERSINE_ROUTING_PROVIDER);
+    }
+
+    #[tokio::test]
+    async fn amenities_cell_persists_and_hydrates_shared_data_record() {
+        let db = DbStore::connect_url(":memory:", Some("sqlite"))
+            .await
+            .expect("sqlite memory db");
+        crate::extensions::shared_cache::seed_builtin_shared_datasets(&db)
+            .await
+            .expect("seed shared datasets");
+
+        let (lat_a, lon_a) = (37.2839_f64, -121.9317_f64);
+        let (lat_b, lon_b) = (37.2842_f64, -121.9312_f64);
+        let gh6_a = encode_geohash(lat_a, lon_a, 6).expect("gh6 a");
+        let gh6_b = encode_geohash(lat_b, lon_b, 6).expect("gh6 b");
+        assert_eq!(gh6_a, gh6_b, "both parcels must share geohash6 cell");
+
+        let dedup = vec![
+            PoiItem {
+                cat: "grocery",
+                name: Some("Trader Joe's".to_string()),
+                lat: 37.2890,
+                lon: -121.9330,
+                dist_m: haversine_m(lat_a, lon_a, 37.2890, -121.9330).round() as i64,
+                brg: bearing_deg(lat_a, lon_a, 37.2890, -121.9330).round() as i64,
+                tags: HashMap::from([("shop".to_string(), "supermarket".to_string())]),
+            },
+            PoiItem {
+                cat: "emergency",
+                name: Some("Station 1".to_string()),
+                lat: 37.2800,
+                lon: -121.9300,
+                dist_m: haversine_m(lat_a, lon_a, 37.2800, -121.9300).round() as i64,
+                brg: bearing_deg(lat_a, lon_a, 37.2800, -121.9300).round() as i64,
+                tags: HashMap::from([("amenity".to_string(), "fire_station".to_string())]),
+            },
+        ];
+        let mut by_cat: HashMap<&'static str, Vec<PoiItem>> = HashMap::new();
+        for p in &dedup {
+            by_cat.entry(p.cat).or_default().push(p.clone());
+        }
+        let geo = serde_json::json!({ "state": "CA", "county": "Santa Clara County" });
+        persist_amenities_cell(
+            &db,
+            &gh6_a,
+            lat_a,
+            lon_a,
+            &geo,
+            &dedup,
+            &by_cat,
+            Some(74),
+            Some(OsmVia::Overpass),
+            false,
+        )
+        .await;
+
+        let (row, proto) = get_shared_dataset_proto::<AmenityCellProto>(
+            None,
+            &db,
+            dataset_ids::AMENITIES_CELL,
+            ShareScope::Geohash6,
+            &gh6_b,
+            AMENITIES_CELL_PARAMS_HASH,
+        )
+        .await
+        .expect("query proto")
+        .expect("persisted AMENITIES_CELL");
+        assert_eq!(row.dataset_id, dataset_ids::AMENITIES_CELL);
+        assert_eq!(proto.geohash6, gh6_b);
+        assert_eq!(proto.pois.len(), 2);
+        assert_eq!(proto.walkability_index, Some(74.0));
+
+        let (hydrated, via_opt, used_arcgis) =
+            load_cached_amenities_cell(&db, &gh6_b, lat_b, lon_b)
+                .await
+                .expect("hydrate for parcel B");
+        assert_eq!(via_opt, Some(OsmVia::Overpass));
+        assert!(!used_arcgis);
+        assert_eq!(hydrated.len(), 2);
+        let expected_dist_b = haversine_m(lat_b, lon_b, 37.2890, -121.9330).round() as i64;
+        assert_eq!(hydrated[0].dist_m, expected_dist_b);
     }
 }

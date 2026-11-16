@@ -308,6 +308,322 @@ fn dedup_model_specs(raw_chain: Vec<ModelSpec>) -> Vec<ModelSpec> {
     deduped
 }
 
+/// Resolves ordered match/OCR model chain (`LLM_MATCH_MODEL` defaulting to `DEFAULT_MATCH_MODEL`,
+/// accepting `@effort` suffixes, followed by `LLM_FALLBACK_MODEL`).
+pub fn resolve_match_models(env: &EnvConfig) -> Vec<ModelSpec> {
+    let primary_raw = env.get("LLM_MATCH_MODEL").unwrap_or(DEFAULT_MATCH_MODEL);
+    let primary = parse_model_spec(primary_raw, env.get("LLM_EFFORT"));
+    let fb_raw = env
+        .get("LLM_FALLBACK_MODEL")
+        .unwrap_or(DEFAULT_FALLBACK_MODEL);
+    let mut raw_chain = vec![primary];
+    for part in fb_raw.split(',') {
+        let trimmed = part.trim();
+        if !trimmed.is_empty() && !trimmed.eq_ignore_ascii_case("none") {
+            raw_chain.push(parse_model_spec(trimmed, None));
+        }
+    }
+    dedup_model_specs(raw_chain)
+}
+
+/// Formats [`resolve_match_models`] into `"model@effort"` / `"model"` strings suitable for [`LlmCallOptions::models`].
+pub fn resolve_match_model_specs(env: &EnvConfig) -> Vec<String> {
+    resolve_match_models(env)
+        .into_iter()
+        .map(|m| match m.effort {
+            Some(eff) => format!("{}@{eff}", m.model),
+            None => m.model,
+        })
+        .collect()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum EffortSlot {
+    Unset,
+    ExplicitNone,
+    Explicit(String),
+}
+
+impl EffortSlot {
+    fn is_unset(&self) -> bool {
+        matches!(self, Self::Unset)
+    }
+
+    fn into_option(self) -> Option<String> {
+        match self {
+            Self::Explicit(s) => Some(s),
+            Self::Unset | Self::ExplicitNone => None,
+        }
+    }
+}
+
+fn norm_env_segment(raw: &str) -> String {
+    raw.trim()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_uppercase() } else { '_' })
+        .collect()
+}
+
+fn parse_effort_slot(raw: Option<&str>) -> EffortSlot {
+    let Some(s) = raw.map(str::trim) else {
+        return EffortSlot::Unset;
+    };
+    if s.is_empty() || s.eq_ignore_ascii_case("default") {
+        EffortSlot::Unset
+    } else if s.eq_ignore_ascii_case("none") || s.eq_ignore_ascii_case("off") {
+        EffortSlot::ExplicitNone
+    } else {
+        EffortSlot::Explicit(s.to_ascii_lowercase())
+    }
+}
+
+fn apply_effort_slot(slot: &mut EffortSlot, raw: Option<&str>) {
+    if slot.is_unset() {
+        let parsed = parse_effort_slot(raw);
+        if !parsed.is_unset() {
+            *slot = parsed;
+        }
+    }
+}
+
+fn apply_model_spec_str(
+    model_slot: &mut Option<String>,
+    effort_slot: &mut EffortSlot,
+    raw: Option<&str>,
+) {
+    let Some(trimmed) = raw.map(str::trim).filter(|s| !s.is_empty()) else {
+        return;
+    };
+    if trimmed.eq_ignore_ascii_case("none") {
+        return;
+    }
+    if let Some(at) = trimmed.rfind('@') {
+        if at > 0 {
+            let m = trimmed[..at].trim();
+            let e = trimmed[at + 1..].trim();
+            if model_slot.is_none() && !m.is_empty() {
+                *model_slot = Some(m.to_string());
+            }
+            apply_effort_slot(effort_slot, Some(e));
+            return;
+        }
+    }
+    if model_slot.is_none() {
+        *model_slot = Some(trimmed.to_string());
+    }
+}
+
+fn default_effort_for_profile(profile: &str) -> Option<&'static str> {
+    match norm_env_segment(profile).as_str() {
+        "DEEP_ANALYSIS" => Some("max"),
+        "REASONING_STANDARD" => Some("high"),
+        "WRITING_LIGHT" => Some("low"),
+        "EXTRACTION_FAST" => Some("low"),
+        _ => None,
+    }
+}
+
+fn apply_profile_spec(
+    env: &EnvConfig,
+    model_slot: &mut Option<String>,
+    effort_slot: &mut EffortSlot,
+    profile_raw: Option<&str>,
+    resolved_profile: &mut Option<String>,
+) {
+    let Some(prof) = profile_raw.map(str::trim).filter(|s| !s.is_empty()) else {
+        return;
+    };
+    if resolved_profile.is_none() {
+        *resolved_profile = Some(prof.to_string());
+    }
+    let seg = norm_env_segment(prof);
+    let eff_key = format!("LLM_PROFILE_{seg}_EFFORT");
+    let mod_key = format!("LLM_PROFILE_{seg}_MODEL");
+    let combined_key = format!("LLM_PROFILE_{seg}");
+    let combined_alt = format!("LLM_PROFILE__{seg}");
+    apply_effort_slot(effort_slot, env.get(&eff_key));
+    apply_model_spec_str(model_slot, effort_slot, env.get(&mod_key));
+    apply_model_spec_str(
+        model_slot,
+        effort_slot,
+        env.get(&combined_key).or_else(|| env.get(&combined_alt)),
+    );
+    if effort_slot.is_unset() {
+        if let Some(builtin_eff) = default_effort_for_profile(prof) {
+            apply_effort_slot(effort_slot, Some(builtin_eff));
+        }
+    }
+}
+
+/// Resolved per-call LLM model fallback chain and metadata from the 5-step profile/manifest/env precedence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedLlmCallSpec {
+    pub models: Vec<ModelSpec>,
+    pub max_output_tokens: Option<u32>,
+    pub extension_id: Option<String>,
+    pub task: Option<String>,
+    pub profile: Option<String>,
+}
+
+/// Resolves per-call model + reasoning effort using:
+/// `LLM_MODEL__<EXT>[__<TASK>]` / `LLM_EFFORT__...` -> manifest `llm.tasks[task]` (+ task profile)
+/// -> manifest `llm` (+ manifest profile) -> call `profile` -> built-in profile effort fallback
+/// -> global `LLM_MODEL` / `LLM_EFFORT`, reading the active [`crate::metering::ActiveLlmSpec`]
+/// from [`crate::metering::MeterScope`] when `active_spec_override` is `None`.
+pub fn resolve_llm_spec_for_call_with_active(
+    env: &EnvConfig,
+    active_spec_override: Option<&crate::metering::ActiveLlmSpec>,
+    explicit_extension_id: Option<&str>,
+    task: Option<&str>,
+    profile: Option<&str>,
+) -> ResolvedLlmCallSpec {
+    let scoped_spec = if active_spec_override.is_none() {
+        crate::metering::MeterScope::active_llm_spec()
+    } else {
+        None
+    };
+    let active_spec = active_spec_override.or(scoped_spec.as_ref());
+
+    let ext_opt = explicit_extension_id
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            active_spec
+                .map(|s| s.extension_id.trim().to_string())
+                .filter(|s| !s.is_empty())
+        })
+        .or_else(crate::metering::active_extension_id);
+
+    let task_opt = task
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    let call_profile = profile
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+
+    let mut model: Option<String> = None;
+    let mut effort = EffortSlot::Unset;
+    let mut resolved_profile: Option<String> = None;
+    let mut resolved_max_tokens: Option<u32> = None;
+
+    // 1. Env override: extension + task (`LLM_EFFORT__<EXT>__<TASK>`, `LLM_MODEL__<EXT>__<TASK>`)
+    if let (Some(ref ext), Some(ref t)) = (&ext_opt, &task_opt) {
+        let ext_seg = norm_env_segment(ext);
+        let task_seg = norm_env_segment(t);
+        let eff_key = format!("LLM_EFFORT__{ext_seg}__{task_seg}");
+        let mod_key = format!("LLM_MODEL__{ext_seg}__{task_seg}");
+        apply_effort_slot(&mut effort, env.get(&eff_key));
+        apply_model_spec_str(&mut model, &mut effort, env.get(&mod_key));
+    }
+
+    // 2. Env override: extension level (`LLM_EFFORT__<EXT>`, `LLM_MODEL__<EXT>`)
+    if let Some(ref ext) = ext_opt {
+        let ext_seg = norm_env_segment(ext);
+        let eff_key = format!("LLM_EFFORT__{ext_seg}");
+        let mod_key = format!("LLM_MODEL__{ext_seg}");
+        apply_effort_slot(&mut effort, env.get(&eff_key));
+        apply_model_spec_str(&mut model, &mut effort, env.get(&mod_key));
+    }
+
+    // 3. Active extension manifest `llm.tasks[task]` (+ task profile BEFORE manifest default)
+    if let (Some(spec), Some(ref t)) = (active_spec, &task_opt) {
+        if let Some(task_spec) = spec
+            .tasks
+            .iter()
+            .find(|item| item.task.trim().eq_ignore_ascii_case(t))
+        {
+            apply_effort_slot(&mut effort, task_spec.effort.as_deref());
+            apply_model_spec_str(&mut model, &mut effort, task_spec.model.as_deref());
+            apply_profile_spec(
+                env,
+                &mut model,
+                &mut effort,
+                task_spec.profile.as_deref(),
+                &mut resolved_profile,
+            );
+            if resolved_max_tokens.is_none() {
+                resolved_max_tokens = task_spec.max_output_tokens;
+            }
+        }
+    }
+
+    // 4. Active extension manifest `llm` (+ manifest profile if task didn't set a profile)
+    if let Some(spec) = active_spec {
+        apply_effort_slot(&mut effort, spec.effort.as_deref());
+        apply_model_spec_str(&mut model, &mut effort, spec.model.as_deref());
+        if resolved_profile.is_none() {
+            apply_profile_spec(
+                env,
+                &mut model,
+                &mut effort,
+                spec.profile.as_deref(),
+                &mut resolved_profile,
+            );
+        }
+        if resolved_max_tokens.is_none() {
+            resolved_max_tokens = spec.max_output_tokens;
+        }
+    }
+
+    // 5. Call-site profile fallback (`LLM_PROFILE_<PROFILE>` / built-in effort fallback)
+    if resolved_profile.is_none() {
+        apply_profile_spec(
+            env,
+            &mut model,
+            &mut effort,
+            call_profile.as_deref(),
+            &mut resolved_profile,
+        );
+    }
+
+    // 6. Global `LLM_MODEL` / `LLM_EFFORT`
+    apply_effort_slot(&mut effort, env.get("LLM_EFFORT"));
+    apply_model_spec_str(
+        &mut model,
+        &mut effort,
+        Some(env.get("LLM_MODEL").unwrap_or(DEFAULT_LLM_MODEL)),
+    );
+    if effort.is_unset() {
+        effort = parse_effort_slot(Some(DEFAULT_LLM_EFFORT));
+    }
+
+    let primary = ModelSpec {
+        model: model.unwrap_or_else(|| DEFAULT_LLM_MODEL.to_string()),
+        effort: effort.into_option(),
+    };
+    let mut raw_chain = vec![primary];
+    let fb_raw = env
+        .get("LLM_FALLBACK_MODEL")
+        .unwrap_or(DEFAULT_FALLBACK_MODEL);
+    for part in fb_raw.split(',') {
+        let trimmed = part.trim();
+        if !trimmed.is_empty() && !trimmed.eq_ignore_ascii_case("none") {
+            raw_chain.push(parse_model_spec(trimmed, None));
+        }
+    }
+
+    ResolvedLlmCallSpec {
+        models: dedup_model_specs(raw_chain),
+        max_output_tokens: resolved_max_tokens,
+        extension_id: ext_opt,
+        task: task_opt,
+        profile: resolved_profile,
+    }
+}
+
+/// Resolves per-call LLM model + effort using the active task-local [`crate::metering::ActiveLlmSpec`].
+pub fn resolve_llm_spec_for_call(
+    env: &EnvConfig,
+    explicit_extension_id: Option<&str>,
+    task: Option<&str>,
+    profile: Option<&str>,
+) -> ResolvedLlmCallSpec {
+    resolve_llm_spec_for_call_with_active(env, None, explicit_extension_id, task, profile)
+}
+
 /// Resolves ordered primary -> fallback model chain from `env` or explicit override list.
 pub fn resolve_models(env: &EnvConfig, explicit: &[String]) -> Vec<ModelSpec> {
     if !explicit.is_empty() {
@@ -487,11 +803,37 @@ pub fn compute_llm_cache_key(schema_name: &str, system: &str, prompt: &str) -> S
     format!("llm:v1:{schema_name}:{hex_digest}")
 }
 
+/// Deterministic SHA-256 cache key over `(schemaName, system, prompt, primaryModel, primaryEffort)`
+/// so calls under different model/reasoning profiles never collide on cached responses.
+pub fn compute_llm_cache_key_for_spec(
+    schema_name: &str,
+    system: &str,
+    prompt: &str,
+    primary_model: &str,
+    primary_effort: Option<&str>,
+) -> String {
+    let effort_str = primary_effort.unwrap_or("none");
+    let canonical = serde_json::to_string(&(
+        schema_name,
+        system,
+        prompt,
+        primary_model,
+        effort_str,
+    ))
+    .unwrap_or_default();
+    let mut hasher = Sha256::new();
+    hasher.update(canonical.as_bytes());
+    let hex_digest = hex::encode(hasher.finalize());
+    format!("llm:v2:{schema_name}:{hex_digest}")
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct LlmUsage {
     pub input_tokens: Option<u64>,
     pub cached_input_tokens: u64,
+    #[serde(default)]
+    pub cache_write_tokens: u64,
     pub output_tokens: Option<u64>,
     pub reasoning_tokens: u64,
     pub total_tokens: Option<u64>,
@@ -524,6 +866,9 @@ pub struct LlmCallOptions {
     pub refresh: bool,
     pub use_cache: bool,
     pub validator: Option<Arc<dyn Fn(&Value) -> Vec<String> + Send + Sync>>,
+    pub task: Option<String>,
+    pub profile: Option<String>,
+    pub extension_id: Option<String>,
 }
 
 impl LlmCallOptions {
@@ -547,7 +892,43 @@ impl LlmCallOptions {
             refresh: false,
             use_cache: true,
             validator: None,
+            task: None,
+            profile: None,
+            extension_id: None,
         }
+    }
+
+    pub fn with_task(mut self, task: impl Into<String>) -> Self {
+        self.task = Some(task.into());
+        self
+    }
+
+    pub fn with_profile(mut self, profile: impl Into<String>) -> Self {
+        self.profile = Some(profile.into());
+        self
+    }
+
+    pub fn with_extension_id(mut self, extension_id: impl Into<String>) -> Self {
+        self.extension_id = Some(extension_id.into());
+        self
+    }
+
+    pub fn with_llm_context(
+        mut self,
+        extension_id: Option<&str>,
+        task: Option<&str>,
+        profile: Option<&str>,
+    ) -> Self {
+        if let Some(ext) = extension_id.map(str::trim).filter(|s| !s.is_empty()) {
+            self.extension_id = Some(ext.to_string());
+        }
+        if let Some(t) = task.map(str::trim).filter(|s| !s.is_empty()) {
+            self.task = Some(t.to_string());
+        }
+        if let Some(p) = profile.map(str::trim).filter(|s| !s.is_empty()) {
+            self.profile = Some(p.to_string());
+        }
+        self
     }
 }
 
@@ -612,7 +993,7 @@ pub(crate) fn extract_response_text(j: &Value) -> Result<String, LlmError> {
     }
 }
 
-fn extract_usage(u: Option<&Value>) -> Option<LlmUsage> {
+pub fn extract_usage(u: Option<&Value>) -> Option<LlmUsage> {
     let obj = u?.as_object()?;
     Some(LlmUsage {
         input_tokens: obj.get("input_tokens").and_then(|v| v.as_u64()),
@@ -620,6 +1001,16 @@ fn extract_usage(u: Option<&Value>) -> Option<LlmUsage> {
             .get("input_tokens_details")
             .and_then(|d| d.get("cached_tokens"))
             .and_then(|v| v.as_u64())
+            .unwrap_or(0),
+        cache_write_tokens: obj
+            .get("input_tokens_details")
+            .and_then(|d| d.get("cache_write_tokens"))
+            .and_then(|v| v.as_u64())
+            .or_else(|| obj.get("cache_write_tokens").and_then(|v| v.as_u64()))
+            .or_else(|| {
+                obj.get("cache_creation_input_tokens")
+                    .and_then(|v| v.as_u64())
+            })
             .unwrap_or(0),
         output_tokens: obj.get("output_tokens").and_then(|v| v.as_u64()),
         reasoning_tokens: obj
@@ -810,14 +1201,19 @@ struct SingleCallOutput {
     text: String,
     usage: Option<LlmUsage>,
     response_model: String,
+    echoed_effort: Option<String>,
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn call_responses_once(
     http: &HttpClient,
+    env: &EnvConfig,
     base_url: &str,
     api_key: &str,
     model: &str,
     effort: Option<&str>,
+    resolved_profile: Option<&str>,
+    resolved_task: Option<&str>,
     guarded_instructions: &str,
     normalized_input: &Value,
     schema: &Value,
@@ -950,11 +1346,31 @@ async fn call_responses_once(
         .and_then(|m| m.as_str())
         .unwrap_or(model)
         .to_string();
+    let echoed_effort = j
+        .pointer("/reasoning/effort")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .or_else(|| effort.map(str::to_string));
+    let usage = extract_usage(j.get("usage"));
+    if let Some(ref u) = usage {
+        crate::metering::add_llm_usage_detailed(
+            Some(env),
+            u,
+            &response_model,
+            Some(model),
+            echoed_effort.as_deref(),
+            resolved_profile,
+            resolved_task,
+        );
+    }
 
     Ok(SingleCallOutput {
         text,
-        usage: extract_usage(j.get("usage")),
+        usage,
         response_model,
+        echoed_effort,
     })
 }
 
@@ -968,10 +1384,7 @@ pub async fn responses_json_with_cache(
     if !ALLOWED_AI_PURPOSES.contains(&opts.purpose.as_str()) {
         return Err(GuardrailError::new(
             "DIRECT_LLM_ACCESS_DENIED",
-            format!(
-                "Direct or unguarded calls to the LLM backend are prohibited. AI access is strictly limited to verified {} residential property skills.",
-                env.brand_name()
-            ),
+            "Direct or unguarded calls to the LLM backend are prohibited. AI access is strictly limited to verified Open Estate residential property skills.",
             403,
         )
         .into());
@@ -988,11 +1401,43 @@ pub async fn responses_json_with_cache(
 
     let normalized_input = normalize_input(&opts.input)?;
     let prompt_canonical = serde_json::to_string(&normalized_input).unwrap_or_default();
-    let cache_key = compute_llm_cache_key(&opts.schema_name, &guarded_instructions, &prompt_canonical);
+
+    let (chain, effective_max_tokens, effective_profile, effective_task) = if opts.models.is_empty()
+    {
+        let resolved = resolve_llm_spec_for_call(
+            env,
+            opts.extension_id.as_deref(),
+            opts.task.as_deref(),
+            opts.profile.as_deref(),
+        );
+        (
+            resolved.models,
+            opts.max_output_tokens.or(resolved.max_output_tokens),
+            resolved.profile,
+            resolved.task,
+        )
+    } else {
+        (
+            resolve_models(env, &opts.models),
+            opts.max_output_tokens,
+            opts.profile.clone(),
+            opts.task.clone(),
+        )
+    };
+    if chain.is_empty() {
+        return Err(LlmError::new("no_model", "No LLM model configured").into());
+    }
+    let cache_key = compute_llm_cache_key_for_spec(
+        &opts.schema_name,
+        &guarded_instructions,
+        &prompt_canonical,
+        &chain[0].model,
+        chain[0].effort.as_deref(),
+    );
 
     let t0 = Instant::now();
 
-    // 1. Check L1 `moka` cache & optional L2 cache BEFORE requiring network calls
+    // 1. Check L1 `moka` cache & optional L2 cache BEFORE requiring API credentials/network calls
     if opts.use_cache && !opts.refresh {
         if let Some(hit) = Cache::get(&GLOBAL_L1_LLM_CACHE, &cache_key).await {
             if let Ok(mut parsed) = serde_json::from_value::<LlmCallResult>(hit) {
@@ -1020,11 +1465,6 @@ pub async fn responses_json_with_cache(
         .llm_base_url()
         .ok_or_else(|| LlmError::new("no_base_url", "AI backend endpoint is not configured"))?;
 
-    let chain = resolve_models(env, &opts.models);
-    if chain.is_empty() {
-        return Err(LlmError::new("no_model", "No LLM model configured").into());
-    }
-
     let timeout_ms = opts
         .timeout_ms
         .or_else(|| env.get("LLM_TIMEOUT_MS").and_then(|s| s.parse::<u64>().ok()))
@@ -1038,16 +1478,19 @@ pub async fn responses_json_with_cache(
         for attempt in 0..=retries_per_model {
             let call_res = call_responses_once(
                 http,
+                env,
                 base_url,
                 api_key,
                 &spec.model,
                 current_effort.as_deref(),
+                effective_profile.as_deref(),
+                effective_task.as_deref(),
                 &guarded_instructions,
                 &normalized_input,
                 &opts.schema,
                 &opts.schema_name,
                 timeout_ms,
-                opts.max_output_tokens,
+                effective_max_tokens,
             )
             .await;
 
@@ -1058,16 +1501,19 @@ pub async fn responses_json_with_cache(
                     current_effort = None;
                     match call_responses_once(
                         http,
+                        env,
                         base_url,
                         api_key,
                         &spec.model,
                         None,
+                        effective_profile.as_deref(),
+                        effective_task.as_deref(),
                         &guarded_instructions,
                         &normalized_input,
                         &opts.schema,
                         &opts.schema_name,
                         timeout_ms,
-                        opts.max_output_tokens,
+                        effective_max_tokens,
                     )
                     .await
                     {
@@ -1151,11 +1597,10 @@ pub async fn responses_json_with_cache(
                 }
             }
 
-            let _ = single_out.response_model;
             let result = LlmCallResult {
                 data,
-                model: spec.model.clone(),
-                effort: current_effort.clone(),
+                model: single_out.response_model,
+                effort: single_out.echoed_effort.or_else(|| current_effort.clone()),
                 fallback_used: idx > 0,
                 cached: false,
                 ms: t0.elapsed().as_millis() as u64,

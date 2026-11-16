@@ -825,6 +825,558 @@ pub fn clip_and_simplify_arcgis_geometry(
     None
 }
 
+const HAZARD_TILE_TTL_SECS: u64 = 30 * 86_400;
+const TRACT_INDICATORS_TTL_SECS: u64 = 90 * 86_400;
+
+fn digits_only(raw: &str) -> String {
+    raw.chars().filter(|c| c.is_ascii_digit()).collect()
+}
+
+fn valid_tract11(raw: Option<&str>) -> Option<String> {
+    raw.map(digits_only)
+        .filter(|s| s.len() == 11 && s.chars().all(|c| c.is_ascii_digit()))
+}
+
+fn geo_str(geo: &Value, key: &str) -> Option<String> {
+    geo.get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+fn extract_tract11_from_geo(geo: &Value) -> Option<String> {
+    if let Some(t) = valid_tract11(
+        geo_str(geo, "tractGeoid")
+            .or_else(|| geo_str(geo, "censusTract"))
+            .as_deref(),
+    ) {
+        return Some(t);
+    }
+    let raw_tract = digits_only(geo_str(geo, "tract").as_deref().unwrap_or(""));
+    if raw_tract.len() == 11 {
+        return Some(raw_tract);
+    }
+    let county_fips = digits_only(geo_str(geo, "countyFips").as_deref().unwrap_or(""));
+    if raw_tract.len() == 6 && county_fips.len() == 5 {
+        return Some(format!("{county_fips}{raw_tract}"));
+    }
+    None
+}
+
+fn geohash5_geo_index(
+    lat: f64,
+    lon: f64,
+    gh5: &str,
+    geo: &Value,
+) -> crate::db::shared_cache_store::GeoIndexColumns {
+    let bbox = crate::extensions::shared_cache::decode_geohash_bbox(gh5);
+    crate::db::shared_cache_store::GeoIndexColumns {
+        geohash5: Some(gh5.to_string()),
+        geohash6: crate::extensions::shared_cache::encode_geohash(lat, lon, 6),
+        geohash7: crate::extensions::shared_cache::encode_geohash(lat, lon, 7),
+        tract: extract_tract11_from_geo(geo),
+        zip: geo_str(geo, "zip").or_else(|| geo_str(geo, "postalCode")),
+        county: geo_str(geo, "county"),
+        state: geo_str(geo, "state"),
+        bbox_south: bbox.map(|(s, _, _, _)| s),
+        bbox_west: bbox.map(|(_, w, _, _)| w),
+        bbox_north: bbox.map(|(_, _, n, _)| n),
+        bbox_east: bbox.map(|(_, _, _, e)| e),
+    }
+}
+
+fn tract_geo_index(
+    lat: f64,
+    lon: f64,
+    tract11: &str,
+    geo: &Value,
+) -> crate::db::shared_cache_store::GeoIndexColumns {
+    crate::db::shared_cache_store::GeoIndexColumns {
+        geohash5: crate::extensions::shared_cache::encode_geohash(lat, lon, 5),
+        geohash6: crate::extensions::shared_cache::encode_geohash(lat, lon, 6),
+        geohash7: crate::extensions::shared_cache::encode_geohash(lat, lon, 7),
+        tract: Some(tract11.to_string()),
+        zip: geo_str(geo, "zip").or_else(|| geo_str(geo, "postalCode")),
+        county: geo_str(geo, "county"),
+        state: geo_str(geo, "state"),
+        ..Default::default()
+    }
+}
+
+fn geohash_proto_bbox(
+    gh5: &str,
+) -> Option<crate::extensions::proto::shared_v1::GeoBoundingBoxProto> {
+    crate::extensions::shared_cache::decode_geohash_bbox(gh5).map(|(s, w, n, e)| {
+        crate::extensions::proto::shared_v1::GeoBoundingBoxProto {
+            south: s,
+            west: w,
+            north: n,
+            east: e,
+        }
+    })
+}
+
+fn feature_bbox_proto(
+    geom: &Value,
+) -> Option<crate::extensions::proto::shared_v1::GeoBoundingBoxProto> {
+    let mut south = f64::INFINITY;
+    let mut west = f64::INFINITY;
+    let mut north = f64::NEG_INFINITY;
+    let mut east = f64::NEG_INFINITY;
+    let mut any = false;
+    for list in parse_coord_lists(geom.get("rings").or_else(|| geom.get("paths"))) {
+        for (lat, lon) in list {
+            if lat.is_finite() && lon.is_finite() {
+                south = south.min(lat);
+                north = north.max(lat);
+                west = west.min(lon);
+                east = east.max(lon);
+                any = true;
+            }
+        }
+    }
+    any.then_some(crate::extensions::proto::shared_v1::GeoBoundingBoxProto {
+        south,
+        west,
+        north,
+        east,
+    })
+}
+
+fn stringify_attributes(attrs: Option<&Value>) -> HashMap<String, String> {
+    let mut out = HashMap::new();
+    let Some(obj) = attrs.and_then(Value::as_object) else {
+        return out;
+    };
+    for (k, v) in obj {
+        match v {
+            Value::Null => {}
+            Value::String(s) if !s.trim().is_empty() => {
+                out.insert(k.clone(), s.trim().to_string());
+            }
+            Value::Number(n) => {
+                out.insert(k.clone(), n.to_string());
+            }
+            Value::Bool(b) => {
+                out.insert(k.clone(), b.to_string());
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+async fn get_cached_hazard_polygon_tile(
+    http: &HttpClient,
+    db: Option<&crate::db::DbStore>,
+    gh5: &str,
+    layer: &str,
+) -> Option<(Vec<Value>, String, String)> {
+    if http.is_bypassing_cache_reads() {
+        return None;
+    }
+    let db = db?;
+    let (row, tile) = crate::extensions::shared_cache::get_shared_dataset_proto::<
+        crate::extensions::proto::shared_v1::HazardPolygonTileProto,
+    >(
+        Some(crate::extensions::shared_cache::SharedExtensionCache::global()),
+        db,
+        crate::extensions::shared_cache::dataset_ids::HAZARD_POLYGON_TILE,
+        crate::extensions::shared_cache::ShareScope::Geohash5,
+        gh5,
+        layer,
+    )
+    .await
+    .ok()??;
+    let raw_json = row.payload_json.as_deref()?;
+    let payload: Value = serde_json::from_str(raw_json).ok()?;
+    let feats = payload.get("features")?.as_array()?.clone();
+    let src_name = payload
+        .get("sourceName")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(tile.source_name.as_str())
+        .to_string();
+    let src_url = payload
+        .get("sourceUrl")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(tile.source_url.as_str())
+        .to_string();
+    Some((feats, src_name, src_url))
+}
+
+async fn put_cached_hazard_polygon_tile(
+    db: Option<&crate::db::DbStore>,
+    lat: f64,
+    lon: f64,
+    gh5: &str,
+    layer: &str,
+    geo: &Value,
+    feats: &[Value],
+    source_name: &str,
+    source_url: &str,
+    radius_m: f64,
+) {
+    let Some(db) = db else {
+        return;
+    };
+    if feats.len() >= 900 {
+        return;
+    }
+    let (clat, clon) = crate::extensions::shared_cache::decode_geohash_center(gh5).unwrap_or((lat, lon));
+    let mut proto_feats = Vec::with_capacity(feats.len().min(200));
+    for f in feats.iter().take(200) {
+        let a = f.get("attributes");
+        let geom = f.get("geometry");
+        let zone_code = a
+            .and_then(|x| {
+                val_str(x.get("FLD_ZONE"))
+                    .or_else(|| val_str(x.get("HAZ_CLASS")))
+                    .or_else(|| val_str(x.get("FHSZ_Description")))
+                    .or_else(|| val_str(x.get("FHSZ")))
+            })
+            .unwrap_or("")
+            .to_string();
+        let label = a
+            .and_then(|x| {
+                val_str(x.get("ZONE_SUBTY"))
+                    .or_else(|| val_str(x.get("HAZ_NAME")))
+                    .or_else(|| val_str(x.get("DAM_NAME")))
+                    .or_else(|| val_str(x.get("SRA")))
+            })
+            .unwrap_or(zone_code.as_str())
+            .to_string();
+        let high_hazard = a
+            .and_then(|x| val_str(x.get("SFHA_TF")))
+            .map(|s| s.eq_ignore_ascii_case("T"))
+            .unwrap_or_else(|| !zone_code.is_empty());
+        let geometry_geojson = geom
+            .and_then(|g| clip_and_simplify_arcgis_geometry(g, clat, clon, radius_m, 0.00018, 120))
+            .map(|v| v.to_string())
+            .unwrap_or_default();
+        proto_feats.push(crate::extensions::proto::shared_v1::HazardPolygonFeatureProto {
+            layer: layer.to_string(),
+            zone_code,
+            label,
+            high_hazard,
+            bbox: geom.and_then(feature_bbox_proto),
+            geometry_geojson,
+            attributes: stringify_attributes(a),
+        });
+    }
+    let tile = crate::extensions::proto::shared_v1::HazardPolygonTileProto {
+        tile_key: gh5.to_string(),
+        layer: layer.to_string(),
+        bbox: geohash_proto_bbox(gh5),
+        features: proto_feats,
+        blob_hash: None,
+        source_name: source_name.to_string(),
+        source_url: source_url.to_string(),
+        fetched_at_rfc3339: crate::shared::now_iso(),
+    };
+    let payload_json = serde_json::to_string(&json!({
+        "sourceName": source_name,
+        "sourceUrl": source_url,
+        "features": feats,
+    }))
+    .ok();
+    let provenance_json = serde_json::to_string(&json!({
+        "dataset": crate::extensions::shared_cache::dataset_ids::HAZARD_POLYGON_TILE,
+        "layer": layer,
+        "scope": "geohash5",
+        "scopeKey": gh5,
+        "sourceName": source_name,
+        "sourceUrl": source_url,
+    }))
+    .ok();
+    let geo_cols = geohash5_geo_index(lat, lon, gh5, geo);
+    if let Err(err) = crate::extensions::shared_cache::put_shared_dataset_proto(
+        Some(crate::extensions::shared_cache::SharedExtensionCache::global()),
+        db,
+        crate::extensions::shared_cache::dataset_ids::HAZARD_POLYGON_TILE,
+        crate::extensions::shared_cache::ShareScope::Geohash5,
+        gh5,
+        layer,
+        geo_cols,
+        &tile,
+        payload_json,
+        provenance_json,
+        None,
+        HAZARD_TILE_TTL_SECS,
+    )
+    .await
+    {
+        tracing::warn!(geohash5 = gh5, layer = layer, error = %err, "hazards: failed to persist HAZARD_POLYGON_TILE");
+    }
+}
+
+async fn arcgis_radius_tile_cached(
+    http: &HttpClient,
+    db: Option<&crate::db::DbStore>,
+    lat: f64,
+    lon: f64,
+    geo: &Value,
+    layer: &str,
+    url: &str,
+    out_fields: &str,
+    parcel_radius_m: f64,
+    extra: &[(&str, String)],
+    source_name: &str,
+) -> Result<Vec<Value>> {
+    let filter_parcel_polygons = |feats: Vec<Value>| -> Vec<Value> {
+        feats
+            .into_iter()
+            .filter(|f| {
+                f.get("geometry")
+                    .and_then(|g| polygon_distance(lat, lon, g))
+                    .map(|(dm, _, _)| dm <= parcel_radius_m)
+                    .unwrap_or(true)
+            })
+            .collect()
+    };
+    let gh5 = crate::extensions::shared_cache::encode_geohash(lat, lon, 5);
+    if let Some(ref gh5) = gh5 {
+        if let Some((feats, _, _)) = get_cached_hazard_polygon_tile(http, db, gh5, layer).await {
+            return Ok(filter_parcel_polygons(feats));
+        }
+    }
+    if db.is_some() && !http.is_offline_external_blocked() {
+        if let Some(ref gh5) = gh5 {
+            if let Some((clat, clon)) = crate::extensions::shared_cache::decode_geohash_center(gh5) {
+                let tile_radius_m = parcel_radius_m + 3_500.0;
+                let feats = http
+                    .arcgis_radius_query(url, clat, clon, tile_radius_m, out_fields, extra, REQ_TIMEOUT_MS)
+                    .await?;
+                put_cached_hazard_polygon_tile(
+                    db,
+                    lat,
+                    lon,
+                    gh5,
+                    layer,
+                    geo,
+                    &feats,
+                    source_name,
+                    url,
+                    tile_radius_m,
+                )
+                .await;
+                return Ok(filter_parcel_polygons(feats));
+            }
+        }
+    }
+    http.arcgis_radius_query(url, lat, lon, parcel_radius_m, out_fields, extra, REQ_TIMEOUT_MS)
+        .await
+}
+
+const FAULT_TILE_PARAMS_HASH: &str = "usgs_qfaults_33km";
+
+async fn q_faults_tile_cached(
+    http: &HttpClient,
+    db: Option<&crate::db::DbStore>,
+    lat: f64,
+    lon: f64,
+    geo: &Value,
+    out_fields: &str,
+    extra: &[(&str, String)],
+) -> Result<Vec<Value>> {
+    let filter_parcel_radius = |feats: Vec<Value>| -> Vec<Value> {
+        feats
+            .into_iter()
+            .filter(|f| {
+                f.get("geometry")
+                    .and_then(|g| paths_distance(lat, lon, &parse_coord_lists(g.get("paths"))))
+                    .map(|(dm, _, _)| dm <= 30_000.0)
+                    .unwrap_or(false)
+            })
+            .collect()
+    };
+    let gh5 = crate::extensions::shared_cache::encode_geohash(lat, lon, 5);
+    if !http.is_bypassing_cache_reads() {
+        if let (Some(db), Some(ref gh5)) = (db, &gh5) {
+            if let Ok(Some((row, _tile))) = crate::extensions::shared_cache::get_shared_dataset_proto::<
+                crate::extensions::proto::shared_v1::FaultLinesTileProto,
+            >(
+                Some(crate::extensions::shared_cache::SharedExtensionCache::global()),
+                db,
+                crate::extensions::shared_cache::dataset_ids::FAULT_LINES,
+                crate::extensions::shared_cache::ShareScope::Geohash5,
+                gh5,
+                FAULT_TILE_PARAMS_HASH,
+            )
+            .await
+            {
+                if let Some(feats) = row
+                    .payload_json
+                    .as_deref()
+                    .and_then(|s| serde_json::from_str::<Vec<Value>>(s).ok())
+                {
+                    return Ok(filter_parcel_radius(feats));
+                }
+            }
+        }
+    }
+
+    if let (Some(db), Some(ref gh5)) = (db, &gh5) {
+        if !http.is_offline_external_blocked() {
+            if let Some((clat, clon)) = crate::extensions::shared_cache::decode_geohash_center(gh5) {
+                let feats = http
+                    .arcgis_radius_query(URL_QFAULTS, clat, clon, 33_500.0, out_fields, extra, REQ_TIMEOUT_MS)
+                    .await?;
+                if feats.len() < 1990 {
+                    let mut proto_faults = Vec::with_capacity(feats.len().min(200));
+                    for f in feats.iter().take(200) {
+                        let Some(a) = f.get("attributes") else { continue };
+                        let age = val_str(a.get("age")).unwrap_or("");
+                        proto_faults.push(crate::extensions::proto::shared_v1::FaultLineFeatureProto {
+                            fault_id: val_str(a.get("fault_id")).unwrap_or("").to_string(),
+                            fault_name: val_str(a.get("fault_name")).unwrap_or("Unnamed fault").to_string(),
+                            slip_rate: val_str(a.get("slip_rate")).unwrap_or("").to_string(),
+                            age_class: age.to_string(),
+                            alquist_priolo: fault_age_rank(age) >= 4,
+                            geometry_geojson: f
+                                .get("geometry")
+                                .and_then(|g| clip_and_simplify_arcgis_geometry(g, clat, clon, 33_500.0, 0.00025, 120))
+                                .map(|v| v.to_string())
+                                .unwrap_or_default(),
+                        });
+                    }
+                    let tile = crate::extensions::proto::shared_v1::FaultLinesTileProto {
+                        tile_key: gh5.clone(),
+                        bbox: geohash_proto_bbox(gh5),
+                        faults: proto_faults,
+                        source_url: URL_QFAULTS.to_string(),
+                        fetched_at_rfc3339: crate::shared::now_iso(),
+                    };
+                    let payload_json = serde_json::to_string(&feats).ok();
+                    let provenance_json = serde_json::to_string(&json!({
+                        "dataset": crate::extensions::shared_cache::dataset_ids::FAULT_LINES,
+                        "scope": "geohash5",
+                        "scopeKey": gh5,
+                        "sourceUrl": URL_QFAULTS,
+                    }))
+                    .ok();
+                    let geo_cols = geohash5_geo_index(lat, lon, gh5, geo);
+                    if let Err(err) = crate::extensions::shared_cache::put_shared_dataset_proto(
+                        Some(crate::extensions::shared_cache::SharedExtensionCache::global()),
+                        db,
+                        crate::extensions::shared_cache::dataset_ids::FAULT_LINES,
+                        crate::extensions::shared_cache::ShareScope::Geohash5,
+                        gh5,
+                        FAULT_TILE_PARAMS_HASH,
+                        geo_cols,
+                        &tile,
+                        payload_json,
+                        provenance_json,
+                        None,
+                        HAZARD_TILE_TTL_SECS,
+                    )
+                    .await
+                    {
+                        tracing::warn!(geohash5 = %gh5, error = %err, "hazards: failed to persist FAULT_LINES");
+                    }
+                }
+                return Ok(filter_parcel_radius(feats));
+            }
+        }
+    }
+
+    http.arcgis_radius_query(URL_QFAULTS, lat, lon, 30_000.0, out_fields, extra, REQ_TIMEOUT_MS)
+        .await
+}
+
+async fn q_nri_with_db(
+    http: &HttpClient,
+    db: Option<&crate::db::DbStore>,
+    lat: f64,
+    lon: f64,
+    tract11: Option<&str>,
+    geo: &Value,
+) -> Result<Option<Value>> {
+    let valid_hint = valid_tract11(tract11);
+    if !http.is_bypassing_cache_reads() {
+        if let (Some(db), Some(ref t)) = (db, &valid_hint) {
+            if let Ok(Some((row, _proto))) = crate::extensions::shared_cache::get_shared_dataset_proto::<
+                crate::extensions::proto::shared_v1::TractIndicatorsProto,
+            >(
+                Some(crate::extensions::shared_cache::SharedExtensionCache::global()),
+                db,
+                crate::extensions::shared_cache::dataset_ids::TRACT_INDICATORS,
+                crate::extensions::shared_cache::ShareScope::CensusTract,
+                t,
+                "fema_nri",
+            )
+            .await
+            {
+                if let Some(v) = row
+                    .payload_json
+                    .as_deref()
+                    .and_then(|s| serde_json::from_str::<Value>(s).ok())
+                    .filter(|v| v.is_object())
+                {
+                    return Ok(Some(v));
+                }
+            }
+        }
+    }
+
+    let attr_opt = q_nri(http, lat, lon, tract11).await?;
+    if let (Some(db), Some(ref attr)) = (db, &attr_opt) {
+        let tract_key = valid_tract11(val_str(attr.get("TRACTFIPS"))).or(valid_hint);
+        if let Some(t11) = tract_key {
+            let mut nri_hazard_scores = HashMap::new();
+            for &(code, _) in NRI_HAZ {
+                if let Some(sc) = val_num(attr.get(&format!("{code}_RISKS"))) {
+                    nri_hazard_scores.insert(code.to_string(), sc);
+                }
+            }
+            let proto = crate::extensions::proto::shared_v1::TractIndicatorsProto {
+                tract_geoid: t11.clone(),
+                state_fips: t11.get(..2).unwrap_or("").to_string(),
+                county_fips: t11.get(..5).unwrap_or("").to_string(),
+                nri_composite_score: val_num(attr.get("RISK_SCORE")),
+                nri_composite_rating: val_str(attr.get("RISK_RATNG")).map(str::to_string),
+                nri_hazard_scores,
+                vintage: val_str(attr.get("NRI_VER"))
+                    .unwrap_or("FEMA NRI")
+                    .to_string(),
+                fetched_at_rfc3339: crate::shared::now_iso(),
+                ..Default::default()
+            };
+            let payload_json = serde_json::to_string(attr).ok();
+            let provenance_json = serde_json::to_string(&json!({
+                "dataset": crate::extensions::shared_cache::dataset_ids::TRACT_INDICATORS,
+                "scope": "census_tract",
+                "scopeKey": t11,
+                "sourceName": "FEMA National Risk Index",
+                "sourceUrl": URL_NRI,
+            }))
+            .ok();
+            let geo_cols = tract_geo_index(lat, lon, &t11, geo);
+            if let Err(err) = crate::extensions::shared_cache::put_shared_dataset_proto(
+                Some(crate::extensions::shared_cache::SharedExtensionCache::global()),
+                db,
+                crate::extensions::shared_cache::dataset_ids::TRACT_INDICATORS,
+                crate::extensions::shared_cache::ShareScope::CensusTract,
+                &t11,
+                "fema_nri",
+                geo_cols,
+                &proto,
+                payload_json,
+                provenance_json,
+                None,
+                TRACT_INDICATORS_TTL_SECS,
+            )
+            .await
+            {
+                tracing::warn!(tract = %t11, error = %err, "hazards: failed to persist TRACT_INDICATORS (fema_nri)");
+            }
+        }
+    }
+    Ok(attr_opt)
+}
+
 async fn q_nri(http: &HttpClient, lat: f64, lon: f64, tract11: Option<&str>) -> Result<Option<Value>> {
     let mut flds = vec![
         "NRI_ID".to_string(), "TRACTFIPS".to_string(), "COUNTY".to_string(), "STATEABBRV".to_string(),
@@ -1297,9 +1849,30 @@ fn label_fema_res<T>(
 }
 
 /// Fetches FEMA NFHL flood zone (point), nearby SFHA polygons (2 km), and FIRM panel info
+/// using the default official FEMA primary and mirror endpoints and optional shared SQLite DB.
+pub async fn fetch_flood_with_db(
+    http: &HttpClient,
+    db: Option<&crate::db::DbStore>,
+    lat: f64,
+    lon: f64,
+    geo: &Value,
+) -> FloodFetch {
+    fetch_flood_with_endpoints_and_db(http, db, lat, lon, geo, &NfhlEndpoints::default()).await
+}
+
+/// Fetches FEMA NFHL flood zone (point), nearby SFHA polygons (2 km), and FIRM panel info
 /// using the default official FEMA primary and mirror endpoints.
 pub async fn fetch_flood(http: &HttpClient, lat: f64, lon: f64) -> FloodFetch {
-    fetch_flood_with_endpoints(http, lat, lon, &NfhlEndpoints::default()).await
+    let hub_db = crate::extensions::ExtensionHub::global().active_db();
+    fetch_flood_with_endpoints_and_db(
+        http,
+        hub_db.as_ref(),
+        lat,
+        lon,
+        &Value::Null,
+        &NfhlEndpoints::default(),
+    )
+    .await
 }
 
 /// Fetches FEMA NFHL flood zone, nearby SFHA polygons, and FIRM panel info against `endpoints`,
@@ -1309,6 +1882,17 @@ pub async fn fetch_flood_with_endpoints(
     http: &HttpClient,
     lat: f64,
     lon: f64,
+    endpoints: &NfhlEndpoints,
+) -> FloodFetch {
+    fetch_flood_with_endpoints_and_db(http, None, lat, lon, &Value::Null, endpoints).await
+}
+
+async fn fetch_flood_with_endpoints_and_db(
+    http: &HttpClient,
+    db: Option<&crate::db::DbStore>,
+    lat: f64,
+    lon: f64,
+    geo: &Value,
     endpoints: &NfhlEndpoints,
 ) -> FloodFetch {
     let pt_fields = "FLD_ZONE,ZONE_SUBTY,SFHA_TF,STATIC_BFE,DEPTH,DFIRM_ID";
@@ -1393,13 +1977,53 @@ pub async fn fetch_flood_with_endpoints(
     });
 
     let near_fut = Box::pin(async {
+        let gh5 = crate::extensions::shared_cache::encode_geohash(lat, lon, 5);
+        let filter_near_sfha = |feats: Vec<Value>| -> Vec<Value> {
+            feats
+                .into_iter()
+                .filter(|f| {
+                    f.get("geometry")
+                        .and_then(|g| polygon_distance(lat, lon, g))
+                        .map(|(dm, _, _)| dm <= 2_000.0)
+                        .unwrap_or(true)
+                })
+                .collect()
+        };
+        if let Some(ref gh5) = gh5 {
+            if let Some((feats, src_name, src_url)) =
+                get_cached_hazard_polygon_tile(http, db, gh5, "fema_nfhl_sfha").await
+            {
+                let name = if src_name == NFHL_SOURCE_MSC {
+                    NFHL_SOURCE_MSC
+                } else if src_name == NFHL_SOURCE_LIVING_ATLAS {
+                    NFHL_SOURCE_LIVING_ATLAS
+                } else {
+                    NFHL_SOURCE_PRIMARY
+                };
+                return Ok((
+                    filter_near_sfha(feats),
+                    NfhlSourceAttribution {
+                        name,
+                        url: src_url,
+                    },
+                ));
+            }
+        }
+        let tile_center = gh5
+            .as_deref()
+            .and_then(crate::extensions::shared_cache::decode_geohash_center)
+            .filter(|_| db.is_some() && !http.is_offline_external_blocked());
+        let (q_lat, q_lon, q_rad) = match tile_center {
+            Some((clat, clon)) => (clat, clon, 5_500.0),
+            None => (lat, lon, 2_000.0),
+        };
         let res = resolve_nfhl_with_hedge(
             nfhl_radius_query(
                 http,
                 &endpoints.primary_zones,
-                lat,
-                lon,
-                2000.0,
+                q_lat,
+                q_lon,
+                q_rad,
                 near_fields,
                 &sfha_extra,
                 endpoints.req_timeout_ms,
@@ -1408,9 +2032,9 @@ pub async fn fetch_flood_with_endpoints(
             nfhl_radius_query(
                 http,
                 &endpoints.msc_zones,
-                lat,
-                lon,
-                2000.0,
+                q_lat,
+                q_lon,
+                q_rad,
                 near_fields,
                 &sfha_extra,
                 endpoints.req_timeout_ms,
@@ -1421,18 +2045,19 @@ pub async fn fetch_flood_with_endpoints(
             endpoints.total_budget,
         )
         .await;
-        match label_fema_res(res, &endpoints.primary_zones, &endpoints.msc_zones) {
+        let out = match label_fema_res(res, &endpoints.primary_zones, &endpoints.msc_zones) {
             Ok(ok) => Ok(ok),
             Err(fema_err) => {
+                let mut fb_res = Err(fema_err);
                 if let Some(la_url) = endpoints.living_atlas_zones.as_deref() {
                     let la_res = tokio::time::timeout(
                         la_timeout,
                         nfhl_radius_query(
                             http,
                             la_url,
-                            lat,
-                            lon,
-                            2000.0,
+                            q_lat,
+                            q_lon,
+                            q_rad,
                             near_fields,
                             &sfha_extra,
                             endpoints.req_timeout_ms,
@@ -1442,7 +2067,7 @@ pub async fn fetch_flood_with_endpoints(
                     .await;
                     match la_res {
                         Ok(Ok(feats)) => {
-                            return Ok((
+                            fb_res = Ok((
                                 feats,
                                 NfhlSourceAttribution {
                                     name: NFHL_SOURCE_LIVING_ATLAS,
@@ -1451,15 +2076,39 @@ pub async fn fetch_flood_with_endpoints(
                             ));
                         }
                         Ok(Err(la_err)) => {
-                            return Err(anyhow!("{fema_err}; living atlas: {la_err}"));
+                            fb_res = Err(anyhow!("{}; living atlas: {la_err}", fb_res.unwrap_err()));
                         }
                         Err(_) => {
-                            return Err(anyhow!("{fema_err}; living atlas timed out"));
+                            fb_res = Err(anyhow!("{}; living atlas timed out", fb_res.unwrap_err()));
                         }
                     }
                 }
-                Err(fema_err)
+                fb_res
             }
+        };
+        match out {
+            Ok((feats, attr)) => {
+                if let (Some(gh5), Some(_)) = (gh5.as_deref(), tile_center) {
+                    if feats.len() < 900 && (!feats.is_empty() || attr.name != NFHL_SOURCE_LIVING_ATLAS) {
+                        put_cached_hazard_polygon_tile(
+                            db,
+                            lat,
+                            lon,
+                            gh5,
+                            "fema_nfhl_sfha",
+                            geo,
+                            &feats,
+                            attr.name,
+                            &attr.url,
+                            5_500.0,
+                        )
+                        .await;
+                    }
+                    return Ok((filter_near_sfha(feats), attr));
+                }
+                Ok((feats, attr))
+            }
+            Err(e) => Err(e),
         }
     });
 
@@ -2197,6 +2846,18 @@ pub async fn run_hazards(
     lon: f64,
     geo: &Value,
 ) -> Result<ModuleOutput> {
+    let hub_db = crate::extensions::ExtensionHub::global().active_db();
+    run_hazards_with_db(http, env, hub_db.as_ref(), lat, lon, geo).await
+}
+
+pub async fn run_hazards_with_db(
+    http: &HttpClient,
+    env: &EnvConfig,
+    db: Option<&crate::db::DbStore>,
+    lat: f64,
+    lon: f64,
+    geo: &Value,
+) -> Result<ModuleOutput> {
     if !lat.is_finite() || !lon.is_finite() || lat.abs() > 90.0 || lon.abs() > 180.0 {
         return Err(anyhow!("hazards: lat/lon must be valid WGS84 coordinates"));
     }
@@ -2206,14 +2867,7 @@ pub async fn run_hazards(
     let state_fips = val_str(geo.get("stateFips")).unwrap_or("");
     let is_ca = state == "CA" || state_fips == "06" || county_fips.starts_with("06");
 
-    let raw_tract: String = val_str(geo.get("tract")).unwrap_or("").chars().filter(|c| c.is_ascii_digit()).collect();
-    let tract11 = if raw_tract.len() == 11 {
-        Some(raw_tract)
-    } else if raw_tract.len() == 6 && county_fips.len() == 5 {
-        Some(format!("{county_fips}{raw_tract}"))
-    } else {
-        None
-    };
+    let tract11 = extract_tract11_from_geo(geo);
 
     let mut warnings = Vec::new();
     let mut sources = Vec::new();
@@ -2240,8 +2894,8 @@ pub async fn run_hazards(
     let nat_fut = Box::pin(async {
         let g1 = Box::pin(async {
             tokio::join!(
-                fetch_flood(http, lat, lon),
-                q_nri(http, lat, lon, tract11.as_deref()),
+                fetch_flood_with_db(http, db, lat, lon, geo),
+                q_nri_with_db(http, db, lat, lon, tract11.as_deref(), geo),
             )
         });
         let g2 = Box::pin(async {
@@ -2254,7 +2908,7 @@ pub async fn run_hazards(
         });
         let g3 = Box::pin(async {
             tokio::join!(
-                http.arcgis_radius_query(URL_QFAULTS, lat, lon, 30_000.0, "OBJECTID,fault_name,section_name,fault_id,section_id,age,slip_rate,slip_sense,class", &fault_extra, REQ_TIMEOUT_MS),
+                q_faults_tile_cached(http, db, lat, lon, geo, "OBJECTID,fault_name,section_name,fault_id,section_id,age,slip_rate,slip_sense,class", &fault_extra),
                 q_whp(http, lat, lon),
                 http.arcgis_point_query(URL_GRP, lat, lon, "AREANAME,GRP,RI,STATE", &[], REQ_TIMEOUT_MS),
                 q_elevation(http, lat, lon),
@@ -2278,15 +2932,15 @@ pub async fn run_hazards(
         let c1 = Box::pin(async {
             tokio::join!(
                 http.arcgis_point_query(&cgs_ap, lat, lon, "QUAD_NAME,ZN_RELEASED,ZN_REVISED", &[], REQ_TIMEOUT_MS),
-                http.arcgis_radius_query(&cgs_ap, lat, lon, 5000.0, "QUAD_NAME", &ap_off, REQ_TIMEOUT_MS),
+                arcgis_radius_tile_cached(http, db, lat, lon, geo, "ca_ap", &cgs_ap, "QUAD_NAME", 5000.0, &ap_off, "California Geological Survey (Alquist-Priolo)"),
                 http.arcgis_point_query(&cgs_liq, lat, lon, "QUAD_NAME,RELEASED,REVISED", &[], REQ_TIMEOUT_MS),
-                http.arcgis_radius_query(&cgs_liq, lat, lon, 2000.0, "QUAD_NAME", &ap_off, REQ_TIMEOUT_MS),
+                arcgis_radius_tile_cached(http, db, lat, lon, geo, "ca_liq", &cgs_liq, "QUAD_NAME", 2000.0, &ap_off, "California Geological Survey (Liquefaction)"),
                 http.arcgis_point_query(&cgs_ls, lat, lon, "QUAD_NAME,RELEASED,REVISED", &[], REQ_TIMEOUT_MS),
             )
         });
         let c2 = Box::pin(async {
             tokio::join!(
-                http.arcgis_radius_query(&cgs_ls, lat, lon, 2000.0, "QUAD_NAME", &ap_off, REQ_TIMEOUT_MS),
+                arcgis_radius_tile_cached(http, db, lat, lon, geo, "ca_ls", &cgs_ls, "QUAD_NAME", 2000.0, &ap_off, "California Geological Survey (Landslide)"),
                 http.arcgis_point_query(&cgs_uneval, lat, lon, "QUAD_NAME,LABEL", &[], REQ_TIMEOUT_MS),
                 http.arcgis_point_query(&cgs_quads, lat, lon, "CELL_NAME,ZoneType,PopupInfo", &[], REQ_TIMEOUT_MS),
                 http.arcgis_point_query(&fhsz_sra, lat, lon, "SRA,FHSZ,FHSZ_Description", &[], REQ_TIMEOUT_MS),
@@ -2295,8 +2949,8 @@ pub async fn run_hazards(
         });
         let c3 = Box::pin(async {
             tokio::join!(
-                http.arcgis_radius_query(&fhsz_sra, lat, lon, 5000.0, "SRA,FHSZ,FHSZ_Description", &fhsz_extra, REQ_TIMEOUT_MS),
-                http.arcgis_radius_query(&fhsz_lra, lat, lon, 5000.0, "SRA,FHSZ,FHSZ_Description", &fhsz_extra, REQ_TIMEOUT_MS),
+                arcgis_radius_tile_cached(http, db, lat, lon, geo, "ca_fhsz_sra", &fhsz_sra, "SRA,FHSZ,FHSZ_Description", 5000.0, &fhsz_extra, "CAL FIRE FHSZ SRA"),
+                arcgis_radius_tile_cached(http, db, lat, lon, geo, "ca_fhsz_lra", &fhsz_lra, "SRA,FHSZ,FHSZ_Description", 5000.0, &fhsz_extra, "CAL FIRE FHSZ LRA"),
                 http.arcgis_point_query(&calfire_sra, lat, lon, "SRA", &[], REQ_TIMEOUT_MS),
                 http.arcgis_point_query(cgs_radon, lat, lon, "Rn_ZONE_POTENTIAL,DESCRIPTION_RN_ZONE,CGS_REPORT,REPORT_NAME,LINK_REPORT,STUDY_AREA", &[], REQ_TIMEOUT_MS),
                 q_mapserver_identify(http, cgs_ls_susc, lat, lon),
@@ -2306,7 +2960,7 @@ pub async fn run_hazards(
             tokio::join!(
                 http.arcgis_point_query(cgs_tsunami, lat, lon, "Evacuate,County,Map_Link", &[], REQ_TIMEOUT_MS),
                 http.arcgis_point_query(&oes_dam, lat, lon, "DamName,NID,HazardCl,LoadingScn,FailedStr", &[], REQ_TIMEOUT_MS),
-                http.arcgis_radius_query(&oes_dam, lat, lon, 1000.0, "DamName,NID,HazardCl", &dam_geom_ex, REQ_TIMEOUT_MS),
+                arcgis_radius_tile_cached(http, db, lat, lon, geo, "ca_dam", &oes_dam, "DamName,NID,HazardCl", 1000.0, &dam_geom_ex, "Cal OES Dam Inundation"),
                 http.arcgis_point_query(&oes_slr, lat, lon, "hazard_description,source_agency,source_title", &[], REQ_TIMEOUT_MS),
                 http.arcgis_point_query(&oes_levee, lat, lon, "Flood_Type,Depth_Rang,hazard_description", &[], REQ_TIMEOUT_MS),
             )

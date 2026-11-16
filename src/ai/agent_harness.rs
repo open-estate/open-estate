@@ -1062,7 +1062,6 @@ pub fn build_housing_concept_tie_in(
     report: &Value,
     uploaded: &UploadedDocContext<'_>,
 ) -> ConceptTieIn {
-    let (brand_name, _) = crate::shared::report_brand(report);
     let address = report
         .pointer("/meta/displayAddress")
         .or_else(|| report.pointer("/geo/displayAddress"))
@@ -1324,7 +1323,7 @@ pub fn build_housing_concept_tie_in(
                 .unwrap_or(0);
             let general = "Title insurance protects against hidden defects in past ownership records—such as unreleased prior mortgages, mechanics' liens from unpaid contractors, tax/HOA liens, forged deeds, unknown heirs, or undisclosed utility/driveway easements. A Lender's ALTA Policy protects only the mortgage lender's loan balance, whereas an Owner's Policy (standard CLTA or extended ALTA Homeowner's Policy) protects your equity. Before closing, escrow issues a Preliminary Title Report ('Prelim') whose Schedule B-II lists every exception that will NOT be covered unless cleared prior to closing.".to_string();
             let tie_in = format!(
-                "How this applies to {address}: Public chain-of-title records show {transfers} historical transfer record(s){}. Review Preliminary Title Report Schedule B-II line-by-line for utility/access easements, CC&Rs, solar UCC-1 filings, and tax/HOA liens—you can also upload your Prelim PDF directly into {brand_name}'s Title Review tab for automated Schedule B exception extraction.",
+                "How this applies to {address}: Public chain-of-title records show {transfers} historical transfer record(s){}. Review Preliminary Title Report Schedule B-II line-by-line for utility/access easements, CC&Rs, solar UCC-1 filings, and tax/HOA liens—you can also upload your Prelim PDF directly into Open Estate's Title Review tab for automated Schedule B exception extraction.",
                 if uploaded.title_review.is_some() {
                     " and an uploaded Preliminary Title Review is attached to this session"
                 } else {
@@ -1699,14 +1698,18 @@ pub async fn run_housing_agent_loop(
     cache: Option<&dyn LlmCache>,
 ) -> Result<(Value, String, Option<String>, bool, bool, u64)> {
     let brief = build_brief(report);
-    let system_instructions = crate::shared::apply_brand_to_str(
-        &build_agent_system_instructions(),
-        &env.brand_name(),
-        &env.brand_domain(),
-    );
+    let system_instructions = build_agent_system_instructions();
 
-    let qa_effort = env.get("LLM_QA_EFFORT").unwrap_or("medium");
-    let qa_models = resolve_model_specs_with_effort(env, Some(qa_effort));
+    let qa_models = match env.get("LLM_QA_EFFORT").map(str::trim).filter(|s| !s.is_empty()) {
+        Some(qa_effort)
+            if crate::metering::MeterScope::active_llm_spec().is_none()
+                && crate::metering::active_extension_id().is_none()
+                && env.get("LLM_PROFILE_REASONING_STANDARD").is_none() =>
+        {
+            resolve_model_specs_with_effort(env, Some(qa_effort))
+        }
+        _ => Vec::new(),
+    };
 
     let mut observations: Vec<(HousingSkillTool, String, Value)> = Vec::new();
     let mut total_ms: u64 = 0;
@@ -1741,7 +1744,9 @@ pub async fn run_housing_agent_loop(
             &system_instructions,
             LlmInput::Messages(messages),
             schema,
-        );
+        )
+        .with_task("property_qa")
+        .with_profile("reasoning_standard");
         opts.models = qa_models.clone();
         opts.max_output_tokens = Some(8_192);
         opts.timeout_ms = Some(90_000);
@@ -1975,7 +1980,6 @@ fn build_valuation_qa_section(
     q_lc: &str,
     standalone: bool,
 ) -> (String, Vec<String>) {
-    let (brand_name, _) = crate::shared::report_brand(report);
     let val_mod = report_module(report, "valuation");
     let est_val = val_mod
         .and_then(|v| v.pointer("/estimate/value"))
@@ -2091,7 +2095,7 @@ fn build_valuation_qa_section(
         }
 
         format!(
-            "For {address}, {brand_name}'s True Estimate (blended statistical value) is {}{} ({}){}.{sale_sentence}{standalone_pga}",
+            "For {address}, Open Estate's True Estimate (blended statistical value) is {}{} ({}){}.{sale_sentence}{standalone_pga}",
             fmt_usd_dual(val),
             range_clause,
             meta_bits.join("; "),

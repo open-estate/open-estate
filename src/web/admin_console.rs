@@ -424,7 +424,7 @@ fn validate_and_parse_manifest(
         .ok_or_else(|| anyhow!("manifest.yaml requires a 'domain' field (e.g. DOMAIN_NATURAL_HAZARDS or DOMAIN_ELECTRIC_UTILITY)."))?;
     let (canon_domain, default_proto) = canonicalize_extension_domain(raw_domain).ok_or_else(|| {
         anyhow!(
-            "Unsupported extension domain '{raw_domain}'. Expected a canonical extension domain such as DOMAIN_ELECTRIC_UTILITY, DOMAIN_GAS_UTILITY, DOMAIN_WATER_SEWER_TRASH, DOMAIN_BROADBAND, DOMAIN_NATURAL_HAZARDS, DOMAIN_ENVIRONMENTAL, DOMAIN_PROPERTY_FACTS, DOMAIN_VALUATION, DOMAIN_MARKET_TRENDS, DOMAIN_LIVABILITY, or DOMAIN_GEOCODE."
+            "Unsupported extension domain '{raw_domain}'. Expected a canonical Open Estate domain such as DOMAIN_ELECTRIC_UTILITY, DOMAIN_GAS_UTILITY, DOMAIN_WATER_SEWER_TRASH, DOMAIN_BROADBAND, DOMAIN_NATURAL_HAZARDS, DOMAIN_ENVIRONMENTAL, DOMAIN_PROPERTY_FACTS, DOMAIN_VALUATION, DOMAIN_MARKET_TRENDS, DOMAIN_LIVABILITY, or DOMAIN_GEOCODE."
         )
     })?;
 
@@ -6320,8 +6320,7 @@ pub async fn handle_admin_audit_logs_list(
 // =================================================================================================
 
 pub fn render_admin_login_gate_html(err: &AdminAuthError, brand_name: &str) -> String {
-    let eff_brand = crate::shared::effective_brand_name(brand_name);
-    let safe_brand = encode_text(eff_brand);
+    let safe_brand = encode_text(brand_name);
     let logo_svg = logo_mark_img(34);
     let favicon_tags = FAVICON_HEAD_TAGS.as_str();
     let safe_msg = encode_text(err.message);
@@ -6346,11 +6345,7 @@ pub fn render_admin_login_gate_html(err: &AdminAuthError, brand_name: &str) -> S
 }
 
 pub fn render_admin_console_html(overview: &Value, brand_name: &str) -> String {
-    let eff_brand = crate::shared::effective_brand_name(brand_name);
-    let safe_brand = encode_text(eff_brand);
-    let brand_js = safe_inline_json(
-        &serde_json::to_string(eff_brand).unwrap_or_else(|_| "\"Open Estate\"".into()),
-    );
+    let safe_brand = encode_text(brand_name);
     let logo_svg = logo_mark_img(32);
     let favicon_tags = FAVICON_HEAD_TAGS.as_str();
     let initial_json =
@@ -6359,7 +6354,6 @@ pub fn render_admin_console_html(overview: &Value, brand_name: &str) -> String {
     ADMIN_CONSOLE_TEMPLATE
         .replace("__FAVICON_TAGS__", favicon_tags)
         .replace("__BRAND__", &safe_brand)
-        .replace("__BRAND_JSON__", &brand_js)
         .replace("__LOGO_SVG__", &logo_svg)
         .replace("__INITIAL_JSON__", &initial_json)
 }
@@ -6926,6 +6920,7 @@ pre.json-view {
         <a class="btn sm" id="topHomeBtn" href="/">Home</a>
         <a class="btn sm" href="/shop">Shop</a>
         <a class="btn sm" href="/ops">Ops ↗</a>
+        <a class="btn sm" href="/admin/scheduler">Scheduler ↗</a>
         <select id="themeSelect" class="inp" aria-label="Color theme" style="padding:5px 8px;font-size:12px">
           <option value="auto">Theme: Auto (OS)</option>
           <option value="light">Theme: Light</option>
@@ -7400,7 +7395,6 @@ pre.json-view {
 <script id="adminInitialJson" type="application/json">__INITIAL_JSON__</script>
 <script>
 (() => {
-  const ADMIN_BRAND = __BRAND_JSON__;
   // 1. OS Light / Dark Theme Reactivity (AGENTS.md)
   const themeSelect = document.getElementById('themeSelect');
   const osDarkMq = window.matchMedia ? window.matchMedia('(prefers-color-scheme: dark)') : null;
@@ -7763,7 +7757,7 @@ openapi_operation:
     longitude: "{{ lon }}"
     riskCategory: "II"
     siteClass: "D"
-    title: ${JSON.stringify(ADMIN_BRAND)}
+    title: "Open Estate"
 
 response_mapping:
   root_path: "$.response.data"
@@ -7775,7 +7769,7 @@ response_mapping:
 
 attribution:
   source_name: USGS Seismic Design Web Service (ASCE 7-22)
-  source_url: "https://earthquake.usgs.gov/ws/designmaps/asce7-22.json?latitude={{ lat }}&longitude={{ lon }}&riskCategory=II&siteClass=D&title=${encodeURIComponent(ADMIN_BRAND)}"`,
+  source_url: "https://earthquake.usgs.gov/ws/designmaps/asce7-22.json?latitude={{ lat }}&longitude={{ lon }}&riskCategory=II&siteClass=D&title=Open Estate"`,
       openapi: `openapi: 3.0.3
 info:
   title: USGS ASCE 7-22 Seismic Design Web Service

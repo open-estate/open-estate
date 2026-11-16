@@ -6,10 +6,7 @@ use crate::guardrails::{
     is_automated_scraper_ua, validate_slug_param, validate_street_address_input, verify_same_origin,
     GuardrailError,
 };
-use crate::shared::{
-    compass_zh, effective_brand_domain, effective_brand_name, format_brand_wordmark_styled_html,
-    slugify, EnvConfig,
-};
+use crate::shared::{compass_zh, format_brand_wordmark_styled_html, slugify, EnvConfig};
 use crate::web::hooks::{authorize_cached_report, inject_script_before_body_end};
 use crate::web::i18n::{
     is_es, is_zh, resolve_lang, resolve_lang_str, t, t_args, t_brand, LANG_COOKIE_NAME, LANG_EN,
@@ -20,8 +17,8 @@ use crate::web::internal_auth::{
     prepare_oe_session_for_html, resolve_verified_oe_session,
 };
 use crate::web::render::{
-    localize_i18n_json_for_brand, safe_inline_js, safe_inline_json, safe_open_estate_core_js,
-    I18NEXT_JS, I18N_EN_JSON, I18N_ES_JSON, I18N_ZH_JSON,
+    safe_open_estate_core_js, safe_inline_js, safe_inline_json, I18NEXT_JS, I18N_EN_JSON,
+    I18N_ES_JSON, I18N_ZH_JSON,
 };
 use crate::web::server::{
     get_cached_or_disk_report, html_response, json_response, json_response_with_cache,
@@ -30,7 +27,7 @@ use crate::web::server::{
 };
 use axum::{
     body::Bytes,
-    extract::{rejection::BytesRejection, Query, State},
+    extract::{rejection::BytesRejection, Query, RawQuery, State},
     http::{header, Extensions, HeaderMap, HeaderValue, StatusCode},
     response::Response,
 };
@@ -2254,10 +2251,11 @@ fn build_comparison_payload(
 pub async fn handle_deal_room_list_or_compare_get(
     State(state): State<AppState>,
     headers: HeaderMap,
+    RawQuery(raw_query): RawQuery,
     Query(q): Query<DealRoomQuery>,
 ) -> std::result::Result<Response, Response> {
     if q.slugs.as_deref().map(str::trim).filter(|s| !s.is_empty()).is_some() {
-        return handle_deal_room_compare_get(State(state), headers, Query(q)).await;
+        return handle_deal_room_compare_get(State(state), headers, RawQuery(raw_query), Query(q)).await;
     }
     let actor = resolve_search_history_actor(&state, &headers, false).await;
     let history_entries = if let Some(ref actor_key) = actor.actor_key {
@@ -2318,10 +2316,7 @@ fn verify_history_mutation_origin(
         if is_automated_scraper_ua(headers) {
             return Err(map_guardrail(GuardrailError::new(
                 "AUTOMATED_SCRAPER_BLOCKED",
-                format!(
-                    "Automated scripts and scrapers are prohibited on {} endpoints.",
-                    env.brand_name()
-                ),
+                "Automated scripts and scrapers are prohibited on Open Estate endpoints.",
                 403,
             )));
         }
@@ -2425,17 +2420,25 @@ pub async fn handle_deal_room_history_remove(
 pub async fn handle_deal_room_compare_get(
     State(state): State<AppState>,
     headers: HeaderMap,
+    RawQuery(raw_query): RawQuery,
     Query(q): Query<DealRoomQuery>,
 ) -> std::result::Result<Response, Response> {
-    execute_deal_room_compare(&state, &headers, json!({}), q.slugs.as_deref())
-        .await
-        .map(|r| with_ext_cors(&headers, &state.env, r))
-        .map_err(|e| with_ext_cors(&headers, &state.env, e))
+    execute_deal_room_compare(
+        &state,
+        &headers,
+        raw_query.as_deref().unwrap_or(""),
+        json!({}),
+        q.slugs.as_deref(),
+    )
+    .await
+    .map(|r| with_ext_cors(&headers, &state.env, r))
+    .map_err(|e| with_ext_cors(&headers, &state.env, e))
 }
 
 pub async fn handle_deal_room_compare_post(
     State(state): State<AppState>,
     headers: HeaderMap,
+    RawQuery(raw_query): RawQuery,
     Query(q): Query<DealRoomQuery>,
     raw_body: std::result::Result<Bytes, BytesRejection>,
 ) -> std::result::Result<Response, Response> {
@@ -2443,15 +2446,22 @@ pub async fn handle_deal_room_compare_post(
         parse_json_body(raw_body, 8, 500).map_err(|e| with_ext_cors(&headers, &state.env, e))?;
     enforce_allowed_body_keys(&body, ALLOWED_DEAL_ROOM_POST_KEYS)
         .map_err(|ge| with_ext_cors(&headers, &state.env, map_guardrail(ge)))?;
-    execute_deal_room_compare(&state, &headers, body, q.slugs.as_deref())
-        .await
-        .map(|r| with_ext_cors(&headers, &state.env, r))
-        .map_err(|e| with_ext_cors(&headers, &state.env, e))
+    execute_deal_room_compare(
+        &state,
+        &headers,
+        raw_query.as_deref().unwrap_or(""),
+        body,
+        q.slugs.as_deref(),
+    )
+    .await
+    .map(|r| with_ext_cors(&headers, &state.env, r))
+    .map_err(|e| with_ext_cors(&headers, &state.env, e))
 }
 
 async fn execute_deal_room_compare(
     state: &AppState,
     headers: &HeaderMap,
+    raw_query: &str,
     body: Value,
     query_slugs: Option<&str>,
 ) -> std::result::Result<Response, Response> {
@@ -2477,10 +2487,18 @@ async fn execute_deal_room_compare(
     let base_origin = resolve_base_origin(state, headers);
     let mut items = Vec::with_capacity(slugs.len());
     let mut missing = Vec::new();
+    let mut force_private = internal_auth_required(&state.env);
     for s in &slugs {
-        match authorize_cached_report(state, s, headers, "", false).await {
+        match authorize_cached_report(state, s, headers, raw_query, false).await {
             Ok(auth) => {
-                let rec = auth.record;
+                let mut rec = auth.record;
+                let _ = crate::lazy::merge_ready_artifacts_into_report(&state.db, &mut rec.report)
+                    .await;
+                let redaction = state
+                    .hooks
+                    .redact_report_for_viewer(state, headers, raw_query, &rec.slug, &mut rec.report)
+                    .await;
+                force_private |= redaction.redacted || redaction.private_cache;
                 let ask = asking_map.get(s).copied();
                 items.push(extract_deal_room_item(&rec.slug, &rec.report, ask, &base_origin));
             }
@@ -2503,10 +2521,23 @@ async fn execute_deal_room_compare(
         ));
     }
 
-    Ok(json_response(
+    let mut resp = json_response(
         StatusCode::OK,
         build_comparison_payload(items, missing, &base_origin),
-    ))
+    );
+    if force_private {
+        resp.headers_mut().insert(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static("private, no-store"),
+        );
+        resp.headers_mut().insert(
+            header::VARY,
+            HeaderValue::from_static("Cookie, Authorization"),
+        );
+        resp.headers_mut().remove("cdn-cache-control");
+        resp.headers_mut().remove(header::ETAG);
+    }
+    Ok(resp)
 }
 
 // =================================================================================================
@@ -2516,8 +2547,10 @@ async fn execute_deal_room_compare(
 pub async fn handle_deal_room_html(
     State(state): State<AppState>,
     headers: HeaderMap,
+    RawQuery(raw_query): RawQuery,
     Query(q): Query<DealRoomQuery>,
 ) -> std::result::Result<Response, Response> {
+    let raw_q_str = raw_query.as_deref().unwrap_or("");
     let slugs = match q.slugs.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
         Some(qs) => parse_slug_list_raw(&Value::Null, Some(qs)).map_err(map_guardrail)?,
         None => Vec::new(),
@@ -2543,9 +2576,15 @@ pub async fn handle_deal_room_html(
     let mut items = Vec::new();
     let mut missing = Vec::new();
     for s in &slugs {
-        match authorize_cached_report(&state, s, &headers, "", true).await {
+        match authorize_cached_report(&state, s, &headers, raw_q_str, true).await {
             Ok(auth) => {
-                let rec = auth.record;
+                let mut rec = auth.record;
+                let _ = crate::lazy::merge_ready_artifacts_into_report(&state.db, &mut rec.report)
+                    .await;
+                let _ = state
+                    .hooks
+                    .redact_report_for_viewer(&state, &headers, raw_q_str, &rec.slug, &mut rec.report)
+                    .await;
                 items.push(extract_deal_room_item(&rec.slug, &rec.report, None, &base_origin));
             }
             Err(err_resp) if err_resp.status() == StatusCode::NOT_FOUND => {
@@ -2667,8 +2706,8 @@ pub fn render_deal_room_html_with_brand(
     brand_name: &str,
     brand_domain: &str,
 ) -> String {
-    let eff_brand = effective_brand_name(brand_name);
-    let eff_domain = effective_brand_domain(brand_domain);
+    let eff_brand = if brand_name.trim().is_empty() { "Open Estate" } else { brand_name.trim() };
+    let eff_domain = if brand_domain.trim().is_empty() { "open-estate.local" } else { brand_domain.trim() };
     let winners = if items.len() >= 2 {
         compute_deal_room_winners(items)
     } else {
@@ -3164,32 +3203,10 @@ pub fn render_deal_room_html_with_brand(
     let quick_en = t(&LANG_EN, "deal-room-quick-add");
     let quick_zh = t(&LANG_ZH, "deal-room-quick-add");
     let quick_es = t(&LANG_ES, "deal-room-quick-add");
-    let brand_slug = slugify(eff_brand);
-    let default_csv_name = if brand_slug.is_empty() {
-        "deal-room-comparison.csv".to_string()
-    } else {
-        format!("{brand_slug}-deal-room-comparison.csv")
-    };
-    let default_csv_name_js = safe_inline_json(
-        &serde_json::to_string(&default_csv_name)
-            .unwrap_or_else(|_| "\"deal-room-comparison.csv\"".into()),
-    );
     let safe_i18next = safe_inline_js(I18NEXT_JS);
-    let safe_i18n_en = safe_inline_json(&localize_i18n_json_for_brand(
-        I18N_EN_JSON,
-        eff_brand,
-        eff_domain,
-    ));
-    let safe_i18n_zh = safe_inline_json(&localize_i18n_json_for_brand(
-        I18N_ZH_JSON,
-        eff_brand,
-        eff_domain,
-    ));
-    let safe_i18n_es = safe_inline_json(&localize_i18n_json_for_brand(
-        I18N_ES_JSON,
-        eff_brand,
-        eff_domain,
-    ));
+    let safe_i18n_en = safe_inline_json(I18N_EN_JSON);
+    let safe_i18n_zh = safe_inline_json(I18N_ZH_JSON);
+    let safe_i18n_es = safe_inline_json(I18N_ES_JSON);
 
     let raw_json = serde_json::to_string(items).unwrap_or_else(|_| "[]".to_string());
     let safe_script_json = raw_json
@@ -3416,17 +3433,15 @@ pub fn render_deal_room_html_with_brand(
       'zh-CN': {{ translation: {safe_i18n_zh} }},
       es: {{ translation: {safe_i18n_es} }}
     }};
-    const resBrand = (resMap.en && resMap.en.translation && resMap.en.translation.brand && resMap.en.translation.brand.name) || '';
-    const resDom = (resMap.en && resMap.en.translation && resMap.en.translation.brand && resMap.en.translation.brand.domain) || '';
-    if ((resBrand && resBrand !== BRAND_NAME) || (resDom && resDom !== BRAND_DOMAIN)) {{
+    if (BRAND_NAME !== 'Open Estate' || BRAND_DOMAIN !== 'open-estate.local') {{
       const patch = (n) => {{
         if (!n || typeof n !== 'object') return;
         for (const k of Object.keys(n)) {{
           const v = n[k];
           if (typeof v === 'string') {{
             let out = v;
-            if (resBrand && resBrand !== BRAND_NAME) out = out.split(resBrand).join(BRAND_NAME);
-            if (resDom && resDom !== BRAND_DOMAIN) out = out.split(resDom).join(BRAND_DOMAIN);
+            if (BRAND_NAME !== 'Open Estate') out = out.split('Open Estate').join(BRAND_NAME);
+            if (BRAND_DOMAIN !== 'open-estate.local') out = out.split('open-estate.local').join(BRAND_DOMAIN);
             n[k] = out;
           }} else if (v && typeof v === 'object') patch(v);
         }}
@@ -3497,7 +3512,7 @@ pub fn render_deal_room_html_with_brand(
       const blob = new Blob([csv], {{ type: 'text/csv;charset=utf-8;' }});
       const a = document.createElement('a');
       a.href = URL.createObjectURL(blob);
-      a.download = (window.i18next && window.i18next.t('dealRoom.exportFilename')) || {default_csv_name_js};
+      a.download = (window.i18next && window.i18next.t('dealRoom.exportFilename')) || 'open-estate-deal-room-comparison.csv';
       a.click();
     }});
 

@@ -108,10 +108,8 @@ static RE_HOA_MENTION: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r"(?i)(?:\bhoa\b|homeowner(?:s)?\s+association|condo(?:minium)?\s+(?:fee|dues|association)|cc&r)")
         .expect("hoa mention regex")
 });
-static RE_NO_HOA: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"(?i)(?:\bno\s+hoa\b|hoa\s*:\s*none|0\s+hoa)")
-        .expect("no hoa regex")
-});
+static RE_NO_HOA: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"(?i)(?:\bno\s+hoa\b|hoa\s*:\s*none|0\s+hoa)").expect("no hoa regex"));
 static RE_MONEY: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r"\$\s*([0-9]{1,3}(?:,[0-9]{3})*(?:\.[0-9]{1,2})?|[0-9]+(?:\.[0-9]{1,2})?)")
         .expect("money regex")
@@ -163,7 +161,14 @@ fn clean_census_city_label(raw: &str) -> String {
         return String::new();
     }
     let lc = t.to_ascii_lowercase();
-    for suffix in [" city", " town", " village", " borough", " cdp", " municipality"] {
+    for suffix in [
+        " city",
+        " town",
+        " village",
+        " borough",
+        " cdp",
+        " municipality",
+    ] {
         if lc.ends_with(suffix) && t.len() > suffix.len() {
             return t[..t.len() - suffix.len()].trim().to_string();
         }
@@ -176,17 +181,24 @@ fn infer_state_from_fips(fips: &str) -> Option<&'static str> {
 }
 
 use crate::modules::broadband_live::{
-    check_live_broadband, FccLookupStatus, LiveBroadbandCheck, SonicAddressInput,
-    SonicAvailabilityStatus,
+    check_fcc_fixed_broadband, FccFixedBroadbandResult, FccLookupStatus,
 };
+
+#[derive(Debug, Clone)]
+struct LiveBroadbandCheck {
+    fcc_fixed: FccFixedBroadbandResult,
+    confirmed_options: Vec<crate::extensions::proto::BroadbandOptionProto>,
+    confirmed_sources: Vec<SourceItem>,
+}
 use crate::modules::live_tariffs::{
-    compute_water_bill_usd, normalize_city_slug, resolve_live_utility_and_climate_bundle,
+    compute_water_bill_usd, normalize_city_slug, resolve_live_utility_and_climate_bundle_with_db,
     LiveUtilityBundle, LiveUtilityQuery,
 };
 use crate::registry::rates_and_costs::{
-    estimate_transfer_tax_schedule, regional_electricity_kwh_rate as regional_kwh_rate,
+    estimate_transfer_tax_schedule, persist_rates_and_tax_datasets,
+    regional_electricity_kwh_rate as regional_kwh_rate,
     state_effective_insurance_pct_of_price as state_insurance_rate,
-    state_effective_property_tax_rate as baseline_state_tax_rate,
+    state_effective_property_tax_rate as baseline_state_tax_rate, RatesAndCostsPersistInput,
     TransferTaxEstimate as TransferTaxResult,
 };
 use crate::registry::utilities::{
@@ -302,9 +314,7 @@ fn extract_context<'a>(report: &'a Value) -> ReportContext<'a> {
         .map(unwrap_data)
         .filter(|v| v.is_object());
 
-    let county_fips = val_str(geo.get("countyFips"))
-        .unwrap_or("")
-        .to_string();
+    let county_fips = val_str(geo.get("countyFips")).unwrap_or("").to_string();
     let state = val_str(geo.get("state"))
         .map(|s| s.to_ascii_uppercase())
         .or_else(|| {
@@ -572,7 +582,11 @@ fn extract_hoa_monthly(ctx: &ReportContext) -> Option<f64> {
         return Some(m);
     }
     if let Some(hoa_obj) = ctx.facts.get("hoa").filter(|v| v.is_object()) {
-        if let Some(m) = val_f64(hoa_obj.get("monthlyFee").or_else(|| hoa_obj.get("monthlyDues"))) {
+        if let Some(m) = val_f64(
+            hoa_obj
+                .get("monthlyFee")
+                .or_else(|| hoa_obj.get("monthlyDues")),
+        ) {
             return Some(m);
         }
         if let Some(fee) = val_f64(hoa_obj.get("fee").or_else(|| hoa_obj.get("dues"))) {
@@ -619,7 +633,10 @@ fn regional_hoa_benchmark_fallback(state: &str, prop_type_lc: &str) -> (f64, &'s
         "CA" | "NY" | "MA" | "WA" | "DC" | "HI" | "NJ" | "CT" | "CO" | "FL"
     );
     if prop_type_lc.contains("co-op") || prop_type_lc.contains("coop") {
-        return (if high_cost { 980.0 } else { 580.0 }, "Co-op Modeled Fallback");
+        return (
+            if high_cost { 980.0 } else { 580.0 },
+            "Co-op Modeled Fallback",
+        );
     }
     if prop_type_lc.contains("condo") || prop_type_lc.contains("high-rise") {
         let b = if matches!(state, "NY" | "HI" | "DC" | "CA") {
@@ -632,9 +649,15 @@ fn regional_hoa_benchmark_fallback(state: &str, prop_type_lc: &str) -> (f64, &'s
         return (b, "Modeled Condo Benchmark Fallback");
     }
     if prop_type_lc.contains("town") || prop_type_lc.contains("pud") {
-        return (if high_cost { 320.0 } else { 225.0 }, "Modeled Townhome / PUD Fallback");
+        return (
+            if high_cost { 320.0 } else { 225.0 },
+            "Modeled Townhome / PUD Fallback",
+        );
     }
-    (if high_cost { 125.0 } else { 85.0 }, "Modeled HOA-Managed SFR Fallback")
+    (
+        if high_cost { 125.0 } else { 85.0 },
+        "Modeled HOA-Managed SFR Fallback",
+    )
 }
 
 fn compute_hoa_benchmark(ctx: &ReportContext, prop_type_lc: &str) -> HoaBenchmarkResult {
@@ -649,7 +672,9 @@ fn compute_hoa_benchmark(ctx: &ReportContext, prop_type_lc: &str) -> HoaBenchmar
     for arr_key in ["comps", "nearbyListings"] {
         if let Some(arr) = ctx.facts.get(arr_key).and_then(|v| v.as_array()) {
             for item in arr {
-                let Some(hoa) = val_f64(item.get("hoaMonthly")).filter(|&h| (20.0..=5000.0).contains(&h)) else {
+                let Some(hoa) =
+                    val_f64(item.get("hoaMonthly")).filter(|&h| (20.0..=5000.0).contains(&h))
+                else {
                     continue;
                 };
                 let addr_key = val_str(item.get("address"))
@@ -658,9 +683,12 @@ fn compute_hoa_benchmark(ctx: &ReportContext, prop_type_lc: &str) -> HoaBenchmar
                 if !addr_key.is_empty() && !seen_addrs.insert(addr_key) {
                     continue;
                 }
-                let pt = val_str(item.get("propertyType")).unwrap_or("").to_ascii_lowercase();
+                let pt = val_str(item.get("propertyType"))
+                    .unwrap_or("")
+                    .to_ascii_lowercase();
                 all_dues.push(hoa);
-                let comp_attached = pt.contains("condo") || pt.contains("town") || pt.contains("co-op");
+                let comp_attached =
+                    pt.contains("condo") || pt.contains("town") || pt.contains("co-op");
                 if pt.is_empty() || comp_attached == subj_is_attached {
                     matched_dues.push(hoa);
                 }
@@ -687,7 +715,11 @@ fn compute_hoa_benchmark(ctx: &ReportContext, prop_type_lc: &str) -> HoaBenchmar
             monthly: round_n(median, 2),
             label: format!(
                 "Local MLS Comps Median ({} · n={n})",
-                if ctx.city.is_empty() { "Neighborhood" } else { ctx.city.as_str() }
+                if ctx.city.is_empty() {
+                    "Neighborhood"
+                } else {
+                    ctx.city.as_str()
+                }
             ),
             source: "local_mls_comps",
             comp_count: n,
@@ -747,7 +779,10 @@ fn extract_hoa_text_blobs(ctx: &ReportContext) -> Vec<(String, String)> {
         }
     }
     if !ctx.combined_text.is_empty() {
-        items.push(("facts.listing_and_features".into(), ctx.combined_text.clone()));
+        items.push((
+            "facts.listing_and_features".into(),
+            ctx.combined_text.clone(),
+        ));
     }
     if let Some(tr) = ctx.title_review {
         if let Ok(s) = serde_json::to_string(tr) {
@@ -774,7 +809,8 @@ fn build_hoa_profile(ctx: &ReportContext, nonprofit_filings: &[Value]) -> Value 
         .filter(|&s| s > 0.0)
         .map(|s| round_n(hoa_monthly / s, 2));
 
-    let mentions_hoa = RE_HOA_MENTION.is_match(&ctx.combined_text) && !RE_NO_HOA.is_match(&ctx.combined_text);
+    let mentions_hoa =
+        RE_HOA_MENTION.is_match(&ctx.combined_text) && !RE_NO_HOA.is_match(&ctx.combined_text);
     let blobs = extract_hoa_text_blobs(ctx);
 
     // Inspect liens, NODA, special assessments & litigation early because an active HOA lien also means HOA exists!
@@ -801,7 +837,10 @@ fn build_hoa_profile(ctx: &ReportContext, nonprofit_filings: &[Value]) -> Value 
                 "summary": txt.chars().take(240).collect::<String>(),
             }));
         }
-        if src != "facts.hoa" && RE_SPECIAL_ASSESSMENT.is_match(txt) && !RE_NO_SPECIAL_ASSESSMENT.is_match(txt) {
+        if src != "facts.hoa"
+            && RE_SPECIAL_ASSESSMENT.is_match(txt)
+            && !RE_NO_SPECIAL_ASSESSMENT.is_match(txt)
+        {
             let amt = RE_MONEY
                 .captures(txt)
                 .and_then(|c| c.get(1))
@@ -819,11 +858,19 @@ fn build_hoa_profile(ctx: &ReportContext, nonprofit_filings: &[Value]) -> Value 
     // Also inspect structured `facts.hoa` fields
     if let Some(hoa_obj) = ctx.facts.get("hoa").filter(|v| v.is_object()) {
         if hoa_obj.get("hasLien").and_then(|v| v.as_bool()) == Some(true)
-            || val_f64(hoa_obj.get("lienAmountUsd").or_else(|| hoa_obj.get("arrearsUsd")))
-                .map(|x| x > 0.0)
-                .unwrap_or(false)
+            || val_f64(
+                hoa_obj
+                    .get("lienAmountUsd")
+                    .or_else(|| hoa_obj.get("arrearsUsd")),
+            )
+            .map(|x| x > 0.0)
+            .unwrap_or(false)
         {
-            let amt = val_i64(hoa_obj.get("lienAmountUsd").or_else(|| hoa_obj.get("arrearsUsd")));
+            let amt = val_i64(
+                hoa_obj
+                    .get("lienAmountUsd")
+                    .or_else(|| hoa_obj.get("arrearsUsd")),
+            );
             hoa_liens.push(json!({
                 "source": "facts.hoa",
                 "amountUsd": amt,
@@ -831,7 +878,10 @@ fn build_hoa_profile(ctx: &ReportContext, nonprofit_filings: &[Value]) -> Value 
             }));
         }
         if hoa_obj.get("noda").and_then(|v| v.as_bool()) == Some(true)
-            || hoa_obj.get("noticeOfDelinquentAssessment").and_then(|v| v.as_bool()) == Some(true)
+            || hoa_obj
+                .get("noticeOfDelinquentAssessment")
+                .and_then(|v| v.as_bool())
+                == Some(true)
         {
             noda_notices.push(json!({
                 "source": "facts.hoa",
@@ -842,7 +892,8 @@ fn build_hoa_profile(ctx: &ReportContext, nonprofit_filings: &[Value]) -> Value 
             for sa in sa_arr {
                 special_assessments.push(sa.clone());
             }
-        } else if let Some(sa_amt) = val_i64(hoa_obj.get("specialAssessmentUsd")).filter(|&a| a > 0) {
+        } else if let Some(sa_amt) = val_i64(hoa_obj.get("specialAssessmentUsd")).filter(|&a| a > 0)
+        {
             special_assessments.push(json!({
                 "source": "facts.hoa",
                 "amountUsd": sa_amt,
@@ -1009,18 +1060,37 @@ fn build_hoa_profile(ctx: &ReportContext, nonprofit_filings: &[Value]) -> Value 
                 "Interior appliances, HVAC, and roof/siding if HOA is exterior-exempt".into(),
             ]);
         } else {
-            included.push("Common-area upkeep, neighborhood entry/landscaping & shared amenities".into());
+            included.push(
+                "Common-area upkeep, neighborhood entry/landscaping & shared amenities".into(),
+            );
             excluded_or_verify.extend([
                 "All home structural maintenance, roof, lot landscaping & utilities".into(),
                 "Full HO-3 dwelling, earthquake & flood insurance".into(),
             ]);
         }
     } else if !has_hoa {
-        excluded_or_verify.push("Owner responsible for 100% of utilities, roof, exterior, landscaping, and insurance.".into());
+        excluded_or_verify.push(
+            "Owner responsible for 100% of utilities, roof, exterior, landscaping, and insurance."
+                .into(),
+        );
     }
-    for kw in ["water", "trash", "sewer", "pool", "roof", "cable", "internet", "earthquake"] {
-        if has_hoa && low_text.contains(kw) && !included.iter().any(|x| x.to_ascii_lowercase().contains(kw)) {
-            included.push(format!("Mentioned in listing/HOA notes: {kw} (verify exact scope)"));
+    for kw in [
+        "water",
+        "trash",
+        "sewer",
+        "pool",
+        "roof",
+        "cable",
+        "internet",
+        "earthquake",
+    ] {
+        if has_hoa
+            && low_text.contains(kw)
+            && !included.iter().any(|x| x.to_ascii_lowercase().contains(kw))
+        {
+            included.push(format!(
+                "Mentioned in listing/HOA notes: {kw} (verify exact scope)"
+            ));
         }
     }
 
@@ -1055,7 +1125,11 @@ fn build_hoa_profile(ctx: &ReportContext, nonprofit_filings: &[Value]) -> Value 
         })
         .unwrap_or_default();
     let has_litigation = !litigation_items.is_empty()
-        || ctx.facts.pointer("/hoa/inLitigation").and_then(|v| v.as_bool()) == Some(true)
+        || ctx
+            .facts
+            .pointer("/hoa/inLitigation")
+            .and_then(|v| v.as_bool())
+            == Some(true)
         || (has_hoa && low_text.contains("hoa litigation"));
 
     let reserves_risk = if !has_hoa {
@@ -1110,8 +1184,13 @@ fn build_hoa_profile(ctx: &ReportContext, nonprofit_filings: &[Value]) -> Value 
     };
 
     // Requirements & Rules extraction
-    let hr_rules = ctx.hoa_review.and_then(|hr| hr.get("governanceAndLifestyleRules"));
-    let rental_cap = if let Some(rc) = hr_rules.and_then(|r| r.get("rentalCap")).filter(|v| v.is_object()) {
+    let hr_rules = ctx
+        .hoa_review
+        .and_then(|hr| hr.get("governanceAndLifestyleRules"));
+    let rental_cap = if let Some(rc) = hr_rules
+        .and_then(|r| r.get("rentalCap"))
+        .filter(|v| v.is_object())
+    {
         json!({
             "restricted": rc.get("hasRentalCap").and_then(|v| v.as_bool()).unwrap_or(false),
             "capPercent": rc.get("capPercent").cloned().unwrap_or(Value::Null),
@@ -1139,7 +1218,10 @@ fn build_hoa_profile(ctx: &ReportContext, nonprofit_filings: &[Value]) -> Value 
         })
     };
 
-    let str_rule = if let Some(st_o) = hr_rules.and_then(|r| r.get("shortTermRental")).filter(|v| v.is_object()) {
+    let str_rule = if let Some(st_o) = hr_rules
+        .and_then(|r| r.get("shortTermRental"))
+        .filter(|v| v.is_object())
+    {
         json!({
             "restricted": st_o.get("strProhibited").and_then(|v| v.as_bool()).unwrap_or(false) || st_o.get("minimumLeaseDays").is_some(),
             "prohibited": st_o.get("strProhibited").and_then(|v| v.as_bool()).unwrap_or(false),
@@ -1147,7 +1229,10 @@ fn build_hoa_profile(ctx: &ReportContext, nonprofit_filings: &[Value]) -> Value 
             "summary": val_str(st_o.get("summary")).unwrap_or("Extracted from HOA review."),
         })
     } else if let Some(caps) = RE_STR_RULE.captures(&ctx.combined_text) {
-        let min_days = caps.get(1).or_else(|| caps.get(2)).and_then(|m| m.as_str().parse::<u32>().ok());
+        let min_days = caps
+            .get(1)
+            .or_else(|| caps.get(2))
+            .and_then(|m| m.as_str().parse::<u32>().ok());
         json!({
             "restricted": true,
             "prohibited": low_text.contains("prohibit") || low_text.contains("no airbnb") || low_text.contains("no short"),
@@ -1163,7 +1248,10 @@ fn build_hoa_profile(ctx: &ReportContext, nonprofit_filings: &[Value]) -> Value 
         })
     };
 
-    let pet_policy = if let Some(pr) = hr_rules.and_then(|r| r.get("petRestrictions")).filter(|v| v.is_object()) {
+    let pet_policy = if let Some(pr) = hr_rules
+        .and_then(|r| r.get("petRestrictions"))
+        .filter(|v| v.is_object())
+    {
         pr.clone()
     } else if let Some(caps) = RE_PET_RULE.captures(&ctx.combined_text) {
         let max_pets = caps.get(1).and_then(|m| m.as_str().parse::<u32>().ok());
@@ -1189,7 +1277,11 @@ fn build_hoa_profile(ctx: &ReportContext, nonprofit_filings: &[Value]) -> Value 
     let age_55_hit = RE_AGE_55.is_match(&ctx.combined_text)
         || pt_lc.contains("55+")
         || pt_lc.contains("senior")
-        || ctx.facts.pointer("/hoa/ageRestricted").and_then(|v| v.as_bool()) == Some(true);
+        || ctx
+            .facts
+            .pointer("/hoa/ageRestricted")
+            .and_then(|v| v.as_bool())
+            == Some(true);
     let age_min = if low_text.contains("62+") || low_text.contains("62 and older") {
         Some(62)
     } else if age_55_hit {
@@ -1230,7 +1322,9 @@ fn build_hoa_profile(ctx: &ReportContext, nonprofit_filings: &[Value]) -> Value 
     });
 
     let warrantability = ctx.hoa_review.and_then(|hr| hr.get("warrantability"));
-    let is_warrantable_opt = warrantability.and_then(|w| w.get("isWarrantable")).and_then(|v| v.as_bool());
+    let is_warrantable_opt = warrantability
+        .and_then(|w| w.get("isWarrantable"))
+        .and_then(|v| v.as_bool());
     let fha_va_alert = if is_attached || has_hoa {
         let risk_lvl = if is_warrantable_opt == Some(false)
             || has_litigation
@@ -1276,7 +1370,11 @@ fn build_hoa_profile(ctx: &ReportContext, nonprofit_filings: &[Value]) -> Value 
 
     let overall_lien_risk = if !hoa_liens.is_empty() || !noda_notices.is_empty() {
         "Critical — Active HOA Lien / Delinquency Notice Detected"
-    } else if !special_assessments.is_empty() || has_litigation || low_reserves_flag || high_delinq_flag {
+    } else if !special_assessments.is_empty()
+        || has_litigation
+        || low_reserves_flag
+        || high_delinq_flag
+    {
         "Elevated — Special Assessment / Reserve / Litigation Risk"
     } else if has_hoa && sp.is_super_priority {
         "Watch — Super-Priority HOA Lien State (Clear via Estoppel)"
@@ -1287,7 +1385,12 @@ fn build_hoa_profile(ctx: &ReportContext, nonprofit_filings: &[Value]) -> Value 
     };
 
     let mut contingency_items: Vec<Value> = Vec::new();
-    if has_hoa || is_attached || !hoa_liens.is_empty() || !noda_notices.is_empty() || !special_assessments.is_empty() {
+    if has_hoa
+        || is_attached
+        || !hoa_liens.is_empty()
+        || !noda_notices.is_empty()
+        || !special_assessments.is_empty()
+    {
         contingency_items.push(json!({
             "priority": "Mandatory",
             "title": "Require Seller-Paid HOA Resale Certificate / Demand Statement verifying $0.00 balance & no pending special assessments",
@@ -1332,7 +1435,8 @@ fn build_hoa_profile(ctx: &ReportContext, nonprofit_filings: &[Value]) -> Value 
         primary_assoc.as_deref(),
         nonprofit_filings,
     );
-    let alloc_master_pct = val_f64(funding_and_board.pointer("/estimatedDuesAllocation/masterInsurancePct"));
+    let alloc_master_pct =
+        val_f64(funding_and_board.pointer("/estimatedDuesAllocation/masterInsurancePct"));
     let master_insurance = build_hoa_master_insurance(
         ctx,
         has_hoa,
@@ -1566,7 +1670,9 @@ fn extract_hoa_association_candidates(ctx: &ReportContext) -> Vec<String> {
 }
 
 fn push_clean_assoc_name(out: &mut Vec<String>, raw: &str) {
-    let cleaned = raw.trim().trim_matches(|c: char| c == '"' || c == '\'' || c == ',');
+    let cleaned = raw
+        .trim()
+        .trim_matches(|c: char| c == '"' || c == '\'' || c == ',');
     if cleaned.len() < 4 || cleaned.len() > 90 {
         return;
     }
@@ -1587,7 +1693,10 @@ fn push_clean_assoc_name(out: &mut Vec<String>, raw: &str) {
     if skip_exact.contains(&lc.as_str()) {
         return;
     }
-    if cleaned.chars().all(|c| c.is_ascii_digit() || c == '-' || c == ' ') {
+    if cleaned
+        .chars()
+        .all(|c| c.is_ascii_digit() || c == '-' || c == ' ')
+    {
         return;
     }
     if !out.iter().any(|e| e.eq_ignore_ascii_case(cleaned)) {
@@ -1618,12 +1727,21 @@ fn build_hoa_funding_and_board(
         } else if pf >= 30.0 {
             ("Moderate (30–69% Funded)", "Moderate")
         } else {
-            ("Underfunded (<30% Funded — High Special-Assessment Risk)", "High")
+            (
+                "Underfunded (<30% Funded — High Special-Assessment Risk)",
+                "High",
+            )
         }
     } else if is_attached && ctx.year_built.map(|y| y < 1995).unwrap_or(false) {
-        ("Unverified Pre-Disclosure (Aging Attached Stock — Request Reserve Study)", "Verify Reserve Study")
+        (
+            "Unverified Pre-Disclosure (Aging Attached Stock — Request Reserve Study)",
+            "Verify Reserve Study",
+        )
     } else {
-        ("Unverified Pre-Disclosure — Request Current Reserve Study", "Verify Reserve Study")
+        (
+            "Unverified Pre-Disclosure — Request Current Reserve Study",
+            "Verify Reserve Study",
+        )
     };
 
     let meets_reserve_gate = reserve_alloc_pct.map(|r| r >= 10.0);
@@ -1648,16 +1766,17 @@ fn build_hoa_funding_and_board(
         None
     };
 
-    let budget_obj = ctx
-        .facts
-        .pointer("/hoa/budgetBreakdown")
-        .or_else(|| ctx.hoa_review.and_then(|hr| hr.pointer("/financialHealth/budgetBreakdown")));
+    let budget_obj = ctx.facts.pointer("/hoa/budgetBreakdown").or_else(|| {
+        ctx.hoa_review
+            .and_then(|hr| hr.pointer("/financialHealth/budgetBreakdown"))
+    });
     let disc_ins_pct = val_f64(budget_obj.and_then(|b| b.get("masterInsurancePct")));
     let disc_res_pct = reserve_alloc_pct
         .filter(|&p| p > 0.0 && p <= 90.0)
         .or_else(|| val_f64(budget_obj.and_then(|b| b.get("reservesPct"))));
     let disc_mgmt_pct = val_f64(budget_obj.and_then(|b| b.get("managementAndAdminPct")));
-    let disc_maint_pct = val_f64(budget_obj.and_then(|b| b.get("commonMaintenanceAndUtilitiesPct")));
+    let disc_maint_pct =
+        val_f64(budget_obj.and_then(|b| b.get("commonMaintenanceAndUtilitiesPct")));
     let full_budget_disclosed = disc_ins_pct.is_some() && disc_res_pct.is_some();
     let _ = (is_attached, pt_lc, bench_mo);
 
@@ -1925,14 +2044,18 @@ fn build_hoa_master_insurance(
         .unwrap_or(false)
         || matches!(ctx.state.as_str(), "FL" | "LA") && is_attached;
 
-    let is_condo_coop = pt_lc.contains("condo") || pt_lc.contains("co-op") || pt_lc.contains("coop");
+    let is_condo_coop =
+        pt_lc.contains("condo") || pt_lc.contains("co-op") || pt_lc.contains("coop");
     let is_townhome = !is_condo_coop && pt_lc.contains("town");
 
     let policy_form = if let Some(cov) = uploaded_cov {
         let cov_lc = cov.to_ascii_lowercase();
         if cov_lc.contains("bare") || cov_lc.contains("walls-out") || cov_lc.contains("studs") {
             "Bare Walls / Walls-Out (Confirmed in HOA Disclosure)".to_string()
-        } else if cov_lc.contains("all-in") || cov_lc.contains("walls-in") || cov_lc.contains("inclusive") {
+        } else if cov_lc.contains("all-in")
+            || cov_lc.contains("walls-in")
+            || cov_lc.contains("inclusive")
+        {
             "All-In / Walls-In (Confirmed in HOA Disclosure)".to_string()
         } else if cov_lc.contains("single") || cov_lc.contains("original") {
             "Single Entity / Original Specifications (Confirmed in HOA Disclosure)".to_string()
@@ -1981,7 +2104,9 @@ fn build_hoa_master_insurance(
     };
     let sqft_opt = ctx.sqft.filter(|&s| s > 0.0);
     let disclosed_master_ann = hr_mi
-        .and_then(|m| val_f64(m.get("annualPerUnitUSD")).or_else(|| val_f64(m.get("annualPremiumPerUnit"))))
+        .and_then(|m| {
+            val_f64(m.get("annualPerUnitUSD")).or_else(|| val_f64(m.get("annualPremiumPerUnit")))
+        })
         .or_else(|| val_f64(ctx.facts.pointer("/hoa/masterInsuranceAnnualPerUnit")));
 
     let (master_ann_usd, master_share_pct): (Option<i64>, Option<f64>) = if !has_hoa {
@@ -2010,7 +2135,8 @@ fn build_hoa_master_insurance(
             }
         )
     } else if !has_hoa {
-        "Not applicable (owner selects individual HO-3 deductible, typically $1,000–$5,000)".to_string()
+        "Not applicable (owner selects individual HO-3 deductible, typically $1,000–$5,000)"
+            .to_string()
     } else if matches!(ctx.state.as_str(), "FL" | "LA" | "TX" | "HI") && is_attached {
         "$25,000–$100,000 standard water/all-peril deductible; 2%–5% named-storm/hurricane percentage deductible on total building value".to_string()
     } else if ctx.state == "CA" && is_attached {
@@ -2022,31 +2148,41 @@ fn build_hoa_master_insurance(
     };
 
     // Owner individual policy (HO-6 vs HO-3) + Loss Assessment Coverage
-    let (owner_policy_type, owner_ann_usd, loss_assess_usd): (&str, Option<i64>, i64) = if is_condo_coop {
-        let ho6 = sqft_opt.map(|sqft| (sqft * 0.72 * cat_mult).clamp(620.0, 2400.0).round() as i64);
-        let la = if deductible_shock || cat_mult > 1.2 { 75_000 } else { 50_000 };
-        ("HO-6 Condo / Walls-In Policy", ho6, la)
-    } else if is_townhome && has_hoa {
-        let ho6_or_3 = (ctx.annual_ins * 0.68).clamp(850.0, 3400.0).round() as i64;
-        let la = if deductible_shock || cat_mult > 1.2 { 50_000 } else { 35_000 };
-        (
-            "HO-6 Walls-In (if HOA insures roof/shell) or HO-3 Dwelling Policy (verify CC&Rs)",
-            Some(ho6_or_3),
-            la,
-        )
-    } else if has_hoa {
-        (
-            "HO-3 / HO-5 Full Dwelling Replacement-Cost Policy",
-            Some(ctx.annual_ins.round() as i64),
-            25_000,
-        )
-    } else {
-        (
-            "HO-3 / HO-5 Full Dwelling Replacement-Cost Policy",
-            Some(ctx.annual_ins.round() as i64),
-            0,
-        )
-    };
+    let (owner_policy_type, owner_ann_usd, loss_assess_usd): (&str, Option<i64>, i64) =
+        if is_condo_coop {
+            let ho6 =
+                sqft_opt.map(|sqft| (sqft * 0.72 * cat_mult).clamp(620.0, 2400.0).round() as i64);
+            let la = if deductible_shock || cat_mult > 1.2 {
+                75_000
+            } else {
+                50_000
+            };
+            ("HO-6 Condo / Walls-In Policy", ho6, la)
+        } else if is_townhome && has_hoa {
+            let ho6_or_3 = (ctx.annual_ins * 0.68).clamp(850.0, 3400.0).round() as i64;
+            let la = if deductible_shock || cat_mult > 1.2 {
+                50_000
+            } else {
+                35_000
+            };
+            (
+                "HO-6 Walls-In (if HOA insures roof/shell) or HO-3 Dwelling Policy (verify CC&Rs)",
+                Some(ho6_or_3),
+                la,
+            )
+        } else if has_hoa {
+            (
+                "HO-3 / HO-5 Full Dwelling Replacement-Cost Policy",
+                Some(ctx.annual_ins.round() as i64),
+                25_000,
+            )
+        } else {
+            (
+                "HO-3 / HO-5 Full Dwelling Replacement-Cost Policy",
+                Some(ctx.annual_ins.round() as i64),
+                0,
+            )
+        };
 
     // 8-row coverage matrix
     let coverage_matrix = if !has_hoa {
@@ -2561,11 +2697,12 @@ fn build_cash_to_close(ctx: &ReportContext, hoa_monthly: f64) -> Value {
         ("fha35", "3.5% Down (FHA)", 3.5, -0.25, 0.55, 1.75),
     ];
 
-    let appraisal_usd: i64 = if matches!(ctx.state.as_str(), "CA" | "NY" | "MA" | "WA" | "HI" | "DC") {
-        925
-    } else {
-        775
-    };
+    let appraisal_usd: i64 =
+        if matches!(ctx.state.as_str(), "CA" | "NY" | "MA" | "WA" | "HI" | "DC") {
+            925
+        } else {
+            775
+        };
     let title_escrow_usd = (price * 0.0045).clamp(1_650.0, 9_500.0).round() as i64;
     let recording_usd: i64 = 275;
     let ins_12mo_usd = ctx.annual_ins.round() as i64;
@@ -2750,7 +2887,8 @@ fn is_wholesaler_water_system(name: &str, pwsid: Option<&str>) -> bool {
         return true;
     }
     let lc = name.to_ascii_lowercase();
-    lc.contains("wholesaler") || (lc.contains("santa clara valley") && lc.contains("water district"))
+    lc.contains("wholesaler")
+        || (lc.contains("santa clara valley") && lc.contains("water district"))
 }
 
 fn state_solar_yield_kwh_per_kw_mo(state: &str) -> f64 {
@@ -2780,7 +2918,9 @@ fn extract_solar_kw(ctx: &ReportContext) -> Option<f64> {
     for arr_opt in [
         ctx.facts.get("buildingPermits").and_then(|v| v.as_array()),
         ctx.facts.get("permits").and_then(|v| v.as_array()),
-        ctx.condition.pointer("/solar/permits").and_then(|v| v.as_array()),
+        ctx.condition
+            .pointer("/solar/permits")
+            .and_then(|v| v.as_array()),
     ] {
         let Some(arr) = arr_opt else {
             continue;
@@ -2822,17 +2962,16 @@ fn build_ongoing_costs(
     let mut est_annual_special_usd = 0.0_f64;
     let mut verified_on_roll = false;
 
-    let explicit_direct_charges = val_f64(ctx.facts.get("directChargesAnnual"))
-        .or_else(|| {
-            ctx.facts
-                .get("taxHistory")
-                .and_then(|v| v.as_array())
-                .and_then(|arr| {
-                    arr.iter()
-                        .max_by_key(|t| val_i64(t.get("year")).unwrap_or(0))
-                        .and_then(|t| val_f64(t.get("directCharges")))
-                })
-        });
+    let explicit_direct_charges = val_f64(ctx.facts.get("directChargesAnnual")).or_else(|| {
+        ctx.facts
+            .get("taxHistory")
+            .and_then(|v| v.as_array())
+            .and_then(|arr| {
+                arr.iter()
+                    .max_by_key(|t| val_i64(t.get("year")).unwrap_or(0))
+                    .and_then(|t| val_f64(t.get("directCharges")))
+            })
+    });
     if let Some(dc) = explicit_direct_charges.filter(|&d| d > 0.0) {
         est_annual_special_usd += dc;
         verified_on_roll = true;
@@ -2840,10 +2979,14 @@ fn build_ongoing_costs(
 
     // CA Mello-Roos CFD check (never fabricates dollar levies when parcel direct charges are unrecorded)
     let confirmed_ca_mello = val_f64(ctx.facts.get("melloRoosAnnual")).filter(|&x| x > 0.0);
-    let ca_mello_explicit = RE_MELLO_ROOS.is_match(&ctx.combined_text) || confirmed_ca_mello.is_some();
+    let ca_mello_explicit =
+        RE_MELLO_ROOS.is_match(&ctx.combined_text) || confirmed_ca_mello.is_some();
     let ca_high_rate = ctx.state == "CA" && ctx.tax_rate > 0.0130;
-    let ca_post_1998_subdiv = ctx.state == "CA" && ctx.year_built.map(|y| y >= 1998).unwrap_or(false);
-    let mello_roos = if ctx.state == "CA" && (ca_mello_explicit || ca_high_rate || ca_post_1998_subdiv) {
+    let ca_post_1998_subdiv =
+        ctx.state == "CA" && ctx.year_built.map(|y| y >= 1998).unwrap_or(false);
+    let mello_roos = if ctx.state == "CA"
+        && (ca_mello_explicit || ca_high_rate || ca_post_1998_subdiv)
+    {
         if let Some(amt) = confirmed_ca_mello {
             if explicit_direct_charges.is_none() {
                 est_annual_special_usd += amt;
@@ -2878,8 +3021,10 @@ fn build_ongoing_costs(
     let confirmed_tx_mud = val_f64(ctx.facts.get("mudTaxAnnual")).filter(|&x| x > 0.0);
     let tx_mud_explicit = RE_MUD_TX.is_match(&ctx.combined_text) || confirmed_tx_mud.is_some();
     let tx_high_rate = ctx.state == "TX" && ctx.tax_rate >= 0.0235;
-    let tx_suburban_post_2000 = ctx.state == "TX" && ctx.year_built.map(|y| y >= 2000).unwrap_or(false);
-    let mud_tx = if ctx.state == "TX" && (tx_mud_explicit || tx_high_rate || tx_suburban_post_2000) {
+    let tx_suburban_post_2000 =
+        ctx.state == "TX" && ctx.year_built.map(|y| y >= 2000).unwrap_or(false);
+    let mud_tx = if ctx.state == "TX" && (tx_mud_explicit || tx_high_rate || tx_suburban_post_2000)
+    {
         if let Some(amt) = confirmed_tx_mud {
             if explicit_direct_charges.is_none() {
                 est_annual_special_usd += amt;
@@ -2913,7 +3058,9 @@ fn build_ongoing_costs(
     // FL CDD check (never fabricates dollar levies when `cddAnnual` is unrecorded)
     let confirmed_fl_cdd = val_f64(ctx.facts.get("cddAnnual")).filter(|&x| x > 0.0);
     let fl_cdd_explicit = RE_CDD_FL.is_match(&ctx.combined_text) || confirmed_fl_cdd.is_some();
-    let fl_post_2000_hoa = ctx.state == "FL" && ctx.year_built.map(|y| y >= 2000).unwrap_or(false) && (hoa_monthly > 0.0 || ctx.combined_text.to_ascii_lowercase().contains("master"));
+    let fl_post_2000_hoa = ctx.state == "FL"
+        && ctx.year_built.map(|y| y >= 2000).unwrap_or(false)
+        && (hoa_monthly > 0.0 || ctx.combined_text.to_ascii_lowercase().contains("master"));
     let cdd_fl = if ctx.state == "FL" && (fl_cdd_explicit || fl_post_2000_hoa) {
         if let Some(amt) = confirmed_fl_cdd {
             if explicit_direct_charges.is_none() {
@@ -2977,8 +3124,16 @@ fn build_ongoing_costs(
         || ptype_lc.contains("attached");
     let solar_kw_opt = extract_solar_kw(ctx);
     let has_solar_signal = solar_kw_opt.is_some()
-        || ctx.condition.pointer("/solar/hasSolar").and_then(|v| v.as_bool()) == Some(true)
-        || ctx.facts.pointer("/solarPv/hasSolar").and_then(|v| v.as_bool()) == Some(true)
+        || ctx
+            .condition
+            .pointer("/solar/hasSolar")
+            .and_then(|v| v.as_bool())
+            == Some(true)
+        || ctx
+            .facts
+            .pointer("/solarPv/hasSolar")
+            .and_then(|v| v.as_bool())
+            == Some(true)
         || {
             let low = ctx.combined_text.to_ascii_lowercase();
             low.contains("solar") || low.contains("photovoltaic")
@@ -3123,7 +3278,10 @@ fn build_ongoing_costs(
     if !has_hoa_water_trash
         && !trash_verified
         && city_slug_cur != "san jose"
-        && wst_quote.trash_carrier_name.to_ascii_lowercase().contains("recycle plus")
+        && wst_quote
+            .trash_carrier_name
+            .to_ascii_lowercase()
+            .contains("recycle plus")
     {
         wst_quote.trash_carrier_name = if city_slug_cur == "campbell" {
             "West Valley Collection & Recycling (WVC&R)".to_string()
@@ -3132,7 +3290,12 @@ fn build_ongoing_costs(
         };
         trash_monthly_opt = None;
     }
-    if !sewer_verified && wst_quote.sewer_type != "septic" && wst_quote.sewer_carrier_name.contains("City / County Sanitary Sewer Service") {
+    if !sewer_verified
+        && wst_quote.sewer_type != "septic"
+        && wst_quote
+            .sewer_carrier_name
+            .contains("City / County Sanitary Sewer Service")
+    {
         sewer_monthly_opt = None;
     }
 
@@ -3192,8 +3355,7 @@ fn build_ongoing_costs(
             let solar_off_i = (solar_off_f > 1.0).then(|| solar_off_f.round() as i64);
             let net_kwh_mo = (gross_kwh_mo - solar_off_f).max(0.0);
             let kwh_i = net_kwh_mo.round() as i64;
-            let elec_i = (net_kwh_mo * kwh_rate + elec_quote.monthly_base_fee_usd)
-                .round() as i64;
+            let elec_i = (net_kwh_mo * kwh_rate + elec_quote.monthly_base_fee_usd).round() as i64;
 
             // Physical therms modeled FIRST from climate HDD + sqft + vintage, THEN billed by live gas tariff
             let (gas_mo_opt, therms_opt) = if gas_quote.heating_fuel_norm == "electric_heat_pump" {
@@ -3201,9 +3363,9 @@ fn build_ongoing_costs(
             } else {
                 let therms_mo = (12.0 + (sqft * 0.0085) + (hdd as f64 * 0.0062)) * age_factor;
                 let th_i = therms_mo.round() as i64;
-                let g_bill = gas_quote.rate_per_therm_usd.map(|tr| {
-                    (therms_mo * tr + gas_quote.monthly_base_fee_usd).round() as i64
-                });
+                let g_bill = gas_quote
+                    .rate_per_therm_usd
+                    .map(|tr| (therms_mo * tr + gas_quote.monthly_base_fee_usd).round() as i64);
                 (g_bill, Some(th_i))
             };
 
@@ -3229,24 +3391,30 @@ fn build_ongoing_costs(
             } else if is_private_septic {
                 Some(30)
             } else {
-                sewer_monthly_opt.or_else(|| (sewer_verified && wst_quote.sewer_monthly_usd > 0).then_some(wst_quote.sewer_monthly_usd))
+                sewer_monthly_opt.or_else(|| {
+                    (sewer_verified && wst_quote.sewer_monthly_usd > 0)
+                        .then_some(wst_quote.sewer_monthly_usd)
+                })
             };
             let t_known = if has_hoa_water_trash {
                 Some(0)
             } else {
-                trash_monthly_opt.or_else(|| (trash_verified && wst_quote.trash_monthly_usd > 0).then_some(wst_quote.trash_monthly_usd))
+                trash_monthly_opt.or_else(|| {
+                    (trash_verified && wst_quote.trash_monthly_usd > 0)
+                        .then_some(wst_quote.trash_monthly_usd)
+                })
             };
 
             let wst_i_opt: Option<i64> = if has_hoa_water_trash {
                 Some(0)
             } else {
-                let known_parts: i64 = water_est_opt.unwrap_or(0)
-                    + s_known.unwrap_or(0)
-                    + t_known.unwrap_or(0);
+                let known_parts: i64 =
+                    water_est_opt.unwrap_or(0) + s_known.unwrap_or(0) + t_known.unwrap_or(0);
                 (water_est_opt.is_some() || s_known.is_some() || t_known.is_some())
                     .then_some(known_parts)
             };
-            let total_i = elec_i + gas_mo_opt.unwrap_or(0) + wst_i_opt.unwrap_or(0) + pool_and_lot_mo;
+            let total_i =
+                elec_i + gas_mo_opt.unwrap_or(0) + wst_i_opt.unwrap_or(0) + pool_and_lot_mo;
             (
                 Some(gross_kwh_i),
                 solar_off_i,
@@ -3266,7 +3434,10 @@ fn build_ongoing_costs(
     };
 
     let gas_rate_str = match gas_quote.rate_per_therm_usd {
-        Some(tr) => format!("${tr:.2}/therm (+ ${:.2}/mo base)", gas_quote.monthly_base_fee_usd),
+        Some(tr) => format!(
+            "${tr:.2}/therm (+ ${:.2}/mo base)",
+            gas_quote.monthly_base_fee_usd
+        ),
         None if gas_quote.heating_fuel_norm == "unverified" => gas_quote.rate_schedule.clone(),
         None => "All-Electric HVAC / Heat Pump (no separate gas meter typical)".to_string(),
     };
@@ -3387,16 +3558,21 @@ fn build_ongoing_costs(
     ];
 
     // PITI baseline (from valuation 20% down ownership or computed directly)
-    let piti_mo = val_f64(ctx.valuation.pointer("/ownership/monthly/principalInterest"))
-        .and_then(|pi| {
-            let tx = val_f64(ctx.valuation.pointer("/ownership/monthly/propertyTax")).unwrap_or(ctx.annual_tax / 12.0);
-            let ins = val_f64(ctx.valuation.pointer("/ownership/monthly/insurance")).unwrap_or(ctx.annual_ins / 12.0);
-            Some((pi + tx + ins).round() as i64)
-        })
-        .unwrap_or_else(|| {
-            let pi = monthly_pi(ctx.price * 0.80, ctx.rate30, 30);
-            (pi + ctx.annual_tax / 12.0 + ctx.annual_ins / 12.0).round() as i64
-        });
+    let piti_mo = val_f64(
+        ctx.valuation
+            .pointer("/ownership/monthly/principalInterest"),
+    )
+    .and_then(|pi| {
+        let tx = val_f64(ctx.valuation.pointer("/ownership/monthly/propertyTax"))
+            .unwrap_or(ctx.annual_tax / 12.0);
+        let ins = val_f64(ctx.valuation.pointer("/ownership/monthly/insurance"))
+            .unwrap_or(ctx.annual_ins / 12.0);
+        Some((pi + tx + ins).round() as i64)
+    })
+    .unwrap_or_else(|| {
+        let pi = monthly_pi(ctx.price * 0.80, ctx.rate30, 30);
+        (pi + ctx.annual_tax / 12.0 + ctx.annual_ins / 12.0).round() as i64
+    });
     let hoa_mo_i = hoa_monthly.round() as i64;
     let maint_mo_i = val_i64(ctx.valuation.pointer("/ownership/monthly/maintenance"))
         .unwrap_or_else(|| ((ctx.price * 0.0075) / 12.0).round() as i64);
@@ -3545,39 +3721,48 @@ fn build_ongoing_costs(
 // ------------------------- 2(c). Broadband / Fiber & Remote-Work Connectivity -------------------------
 
 fn build_connectivity(ctx: &ReportContext, live_bb_opt: Option<&LiveBroadbandCheck>) -> Value {
-    let tract_acs = ctx
-        .market
-        .pointer("/acs/tract")
-        .or_else(|| {
-            ctx.market
-                .pointer("/acs/geos")
-                .and_then(|v| v.as_array())
-                .and_then(|arr| arr.iter().find(|g| g.get("level").and_then(|l| l.as_str()) == Some("tract")))
-                .and_then(|g| g.get("metrics"))
-        });
+    let tract_acs = ctx.market.pointer("/acs/tract").or_else(|| {
+        ctx.market
+            .pointer("/acs/geos")
+            .and_then(|v| v.as_array())
+            .and_then(|arr| {
+                arr.iter()
+                    .find(|g| g.get("level").and_then(|l| l.as_str()) == Some("tract"))
+            })
+            .and_then(|g| g.get("metrics"))
+    });
     let tract_bb_pct = tract_acs.and_then(|t| val_f64(t.get("broadbandPct")));
     let zip_bb_pct = val_f64(ctx.market.pointer("/acs/zip/broadbandPct"));
     let wfh_pct = tract_acs.and_then(|t| val_f64(t.get("workFromHomePct")));
     let commute_min = tract_acs.and_then(|t| val_f64(t.get("meanCommuteMin")));
 
     let fcc_lookup_url = match (ctx.lat, ctx.lon) {
-        (Some(la), Some(lo)) => format!(
-            "https://broadbandmap.fcc.gov/location-summary/fixed?latlon={la:.6}%2C{lo:.6}"
-        ),
+        (Some(la), Some(lo)) => {
+            format!("https://broadbandmap.fcc.gov/location-summary/fixed?latlon={la:.6}%2C{lo:.6}")
+        }
         _ => "https://broadbandmap.fcc.gov/".to_string(),
     };
 
     let walk_idx = val_f64(ctx.civic.pointer("/walkability/index"));
-    let dense_amenities = val_i64(ctx.amenities.pointer("/counts/restaurant/oneMile"))
-        .unwrap_or(0)
-        >= 5;
+    let dense_amenities =
+        val_i64(ctx.amenities.pointer("/counts/restaurant/oneMile")).unwrap_or(0) >= 5;
     let is_rural_profile = ctx.lot_acres.map(|a| a >= 1.5).unwrap_or(false)
-        || (walk_idx.map(|w| w < 5.0).unwrap_or(false) && !dense_amenities && ctx.geo.pointer("/msa/cbsa").is_none())
+        || (walk_idx.map(|w| w < 5.0).unwrap_or(false)
+            && !dense_amenities
+            && ctx.geo.pointer("/msa/cbsa").is_none())
         || tract_bb_pct.map(|b| b < 78.0).unwrap_or(false);
 
-    let sonic_opt = live_bb_opt.map(|b| &b.sonic);
+    let confirmed_opts: &[crate::extensions::proto::BroadbandOptionProto] = live_bb_opt
+        .map(|b| b.confirmed_options.as_slice())
+        .unwrap_or(&[]);
     let fcc_res_opt = live_bb_opt.map(|b| &b.fcc_fixed);
-    let sonic_verified_avail = sonic_opt.map(|s| s.is_available()).unwrap_or(false);
+    let addr_verified_avail = !confirmed_opts.is_empty();
+    let addr_verified_fiber = confirmed_opts
+        .iter()
+        .any(|o| o.tier_category.eq_ignore_ascii_case("fiber"));
+    let addr_verified_cable = confirmed_opts
+        .iter()
+        .any(|o| o.tier_category.eq_ignore_ascii_case("cable"));
     let fcc_live_verified = fcc_res_opt
         .map(|f| f.status == FccLookupStatus::LiveVerified)
         .unwrap_or(false);
@@ -3588,105 +3773,118 @@ fn build_connectivity(ctx: &ReportContext, live_bb_opt: Option<&LiveBroadbandChe
         .map(|f| f.status == FccLookupStatus::LiveVerified && f.cable_available)
         .unwrap_or(false);
 
-    let (fiber_likely, rural_warning, readiness_tier, fcc_json) = if let Some(fcc) = fcc_res_opt.filter(|f| f.status == FccLookupStatus::LiveVerified) {
-        let fib = fcc.fiber_available || sonic_verified_avail;
-        let cab = fcc.cable_available;
-        let sat_only = !fib && !cab;
-        let tier = if fib || fcc.max_download_mbps.unwrap_or(0) >= 900 || sonic_verified_avail {
-            "Gigabit / Fiber Confirmed (Live Address Check)"
-        } else if cab || fcc.max_download_mbps.unwrap_or(0) >= 100 {
-            "High-Speed Cable / Broadband Confirmed (FCC BDC)"
+    let (fiber_likely, rural_warning, readiness_tier, fcc_json) =
+        if let Some(fcc) = fcc_res_opt.filter(|f| f.status == FccLookupStatus::LiveVerified) {
+            let fib = fcc.fiber_available || addr_verified_fiber;
+            let cab = fcc.cable_available || addr_verified_cable;
+            let sat_only = !fib && !cab;
+            let tier = if fib || fcc.max_download_mbps.unwrap_or(0) >= 900 {
+                "Gigabit / Fiber Confirmed (Live Address Check)"
+            } else if cab || fcc.max_download_mbps.unwrap_or(0) >= 100 {
+                "High-Speed Cable / Broadband Confirmed (FCC BDC)"
+            } else {
+                "Limited / Satellite-or-DSL Risk (Verify Speeds)"
+            };
+            (
+                Some(fib),
+                sat_only || fcc.max_download_mbps.map(|d| d < 100).unwrap_or(false),
+                tier,
+                json!({
+                    "queried": fcc.queried,
+                    "status": fcc.status.as_str(),
+                    "hasCredentials": fcc.has_credentials,
+                    "httpStatus": fcc.http_status,
+                    "carriersCount": fcc.providers.len(),
+                    "fiberAvailable": fcc.fiber_available,
+                    "cableAvailable": fcc.cable_available,
+                    "maxDownloadMbps": fcc.max_download_mbps,
+                    "maxUploadMbps": fcc.max_upload_mbps,
+                    "carriers": fcc.providers,
+                    "reason": fcc.reason,
+                }),
+            )
+        } else if addr_verified_avail {
+            let max_dl = confirmed_opts
+                .iter()
+                .map(|o| o.max_download_mbps)
+                .max()
+                .filter(|&v| v > 0);
+            let max_ul = confirmed_opts
+                .iter()
+                .map(|o| o.max_upload_mbps)
+                .max()
+                .filter(|&v| v > 0);
+            let tier = if addr_verified_fiber || max_dl.unwrap_or(0) >= 900 {
+                "Gigabit / Fiber Confirmed (Live Address Check)"
+            } else if addr_verified_cable || max_dl.unwrap_or(0) >= 100 {
+                "High-Speed Cable / Broadband Confirmed (Address Check)"
+            } else {
+                "Broadband Verified at Address"
+            };
+            (
+                Some(addr_verified_fiber),
+                false,
+                tier,
+                json!({
+                    "queried": fcc_res_opt.map(|f| f.queried).unwrap_or(false),
+                    "status": fcc_res_opt.map(|f| f.status.as_str()).unwrap_or("unverified"),
+                    "hasCredentials": fcc_res_opt.map(|f| f.has_credentials).unwrap_or(false),
+                    "httpStatus": fcc_res_opt.and_then(|f| f.http_status),
+                    "carriersCount": confirmed_opts.len(),
+                    "fiberAvailable": addr_verified_fiber,
+                    "cableAvailable": addr_verified_cable,
+                    "maxDownloadMbps": max_dl,
+                    "maxUploadMbps": max_ul,
+                    "carriers": [],
+                    "reason": fcc_res_opt.and_then(|f| f.reason.clone()),
+                }),
+            )
         } else {
-            "Limited / Satellite-or-DSL Risk (Verify Speeds)"
+            let fib_verified_false = if is_rural_profile { Some(false) } else { None };
+            let tier = if is_rural_profile {
+                "Rural Satellite / DSL Risk — Verify ISP Line-of-Sight & Trenching"
+            } else {
+                "Broadband Unverified — Confirm Address-Level Fiber / Cable Drop"
+            };
+            let fcc_status_str = fcc_res_opt
+                .map(|f| f.status.as_str())
+                .unwrap_or("offline_deterministic_fallback");
+            (
+                fib_verified_false,
+                is_rural_profile,
+                tier,
+                json!({
+                    "queried": fcc_res_opt.map(|f| f.queried).unwrap_or(false),
+                    "status": fcc_status_str,
+                    "hasCredentials": fcc_res_opt.map(|f| f.has_credentials).unwrap_or(false),
+                    "httpStatus": fcc_res_opt.and_then(|f| f.http_status),
+                    "carriersCount": 0,
+                    "fiberAvailable": Value::Null,
+                    "cableAvailable": Value::Null,
+                    "maxDownloadMbps": Value::Null,
+                    "maxUploadMbps": Value::Null,
+                    "carriers": [],
+                    "reason": fcc_res_opt.and_then(|f| f.reason.clone()),
+                }),
+            )
         };
-        (
-            Some(fib),
-            sat_only || fcc.max_download_mbps.map(|d| d < 100).unwrap_or(false),
-            tier,
-            json!({
-                "queried": fcc.queried,
-                "status": fcc.status.as_str(),
-                "hasCredentials": fcc.has_credentials,
-                "httpStatus": fcc.http_status,
-                "carriersCount": fcc.providers.len(),
-                "fiberAvailable": fcc.fiber_available,
-                "cableAvailable": fcc.cable_available,
-                "maxDownloadMbps": fcc.max_download_mbps,
-                "maxUploadMbps": fcc.max_upload_mbps,
-                "carriers": fcc.providers,
-                "reason": fcc.reason,
-            }),
-        )
-    } else if sonic_verified_avail {
-        let s = sonic_opt.unwrap();
-        (
-            Some(true),
-            false,
-            "Gigabit Fiber Confirmed (Sonic Live Address Pre-Qualification)",
-            json!({
-                "queried": fcc_res_opt.map(|f| f.queried).unwrap_or(false),
-                "status": fcc_res_opt.map(|f| f.status.as_str()).unwrap_or("unverified"),
-                "hasCredentials": fcc_res_opt.map(|f| f.has_credentials).unwrap_or(false),
-                "httpStatus": fcc_res_opt.and_then(|f| f.http_status),
-                "carriersCount": 1,
-                "fiberAvailable": true,
-                "cableAvailable": Value::Null,
-                "maxDownloadMbps": s.max_download_mbps,
-                "maxUploadMbps": s.max_upload_mbps,
-                "carriers": [],
-                "reason": fcc_res_opt.and_then(|f| f.reason.clone()),
-            }),
-        )
-    } else {
-        let fib_verified_false = if is_rural_profile {
-            Some(false)
-        } else if sonic_opt.map(|s| s.status == SonicAvailabilityStatus::NotAvailable).unwrap_or(false)
-            && fcc_res_opt.map(|f| f.status == FccLookupStatus::EmptyResult).unwrap_or(false)
-        {
-            Some(false)
-        } else {
-            None
-        };
-        let tier = if is_rural_profile {
-            "Rural Satellite / DSL Risk — Verify ISP Line-of-Sight & Trenching"
-        } else {
-            "Broadband Unverified — Confirm Address-Level Fiber / Cable Drop"
-        };
-        let fcc_status_str = fcc_res_opt
-            .map(|f| f.status.as_str())
-            .unwrap_or("offline_deterministic_fallback");
-        (
-            fib_verified_false,
-            is_rural_profile,
-            tier,
-            json!({
-                "queried": fcc_res_opt.map(|f| f.queried).unwrap_or(false),
-                "status": fcc_status_str,
-                "hasCredentials": fcc_res_opt.map(|f| f.has_credentials).unwrap_or(false),
-                "httpStatus": fcc_res_opt.and_then(|f| f.http_status),
-                "carriersCount": 0,
-                "fiberAvailable": Value::Null,
-                "cableAvailable": Value::Null,
-                "maxDownloadMbps": Value::Null,
-                "maxUploadMbps": Value::Null,
-                "carriers": [],
-                "reason": fcc_res_opt.and_then(|f| f.reason.clone()),
-            }),
-        )
-    };
 
-    let sonic_json = match sonic_opt {
-        Some(s) => serde_json::to_value(s).unwrap_or_else(|_| json!({ "available": false, "status": "unverified" })),
-        None => json!({
-            "status": "unverified",
-            "available": false,
-            "preorder": false,
-            "carrierName": "Sonic Fiber",
-            "statusLabel": "Sonic availability unverified (offline/deterministic mode)",
-            "checkUrl": "https://www.sonic.com/availability",
-            "provenance": "sonic_live_unverified",
-        }),
-    };
+    let confirmed_opts_json: Vec<Value> = confirmed_opts
+        .iter()
+        .map(|o| {
+            json!({
+                "carrierName": o.carrier_name,
+                "technology": o.technology,
+                "tierCategory": o.tier_category,
+                "maxDownloadMbps": o.max_download_mbps,
+                "maxUploadMbps": o.max_upload_mbps,
+                "symmetrical": o.symmetrical,
+                "typicalMonthlyUsd": o.typical_monthly_usd,
+                "availabilityStatus": o.availability_status,
+                "checkUrl": o.check_url,
+            })
+        })
+        .collect();
 
     let warning_msg = if rural_warning {
         Some("Rural/low-density parcel or low tract broadband adoption (<78% ACS B28002) indicates elevated DSL, fixed-wireless, or satellite-only (Starlink) risk — verify wired gigabit fiber/cable availability directly on the FCC National Broadband Map before removing contingencies.".to_string())
@@ -3713,40 +3911,66 @@ fn build_connectivity(ctx: &ReportContext, live_bb_opt: Option<&LiveBroadbandChe
         acs_broadband_pct: tract_bb_pct.or(zip_bb_pct),
         is_rural_area: is_rural_profile,
     };
-    let mut broadband_catalog =
-        resolve_broadband_catalog(&bb_inp, &fcc_lookup_url, fcc_live_verified.then_some(&fcc_json));
-    if let Some(sonic_opt_rec) = sonic_opt.and_then(|s| s.into_broadband_option()) {
+    let mut broadband_catalog = resolve_broadband_catalog(
+        &bb_inp,
+        &fcc_lookup_url,
+        fcc_live_verified.then_some(&fcc_json),
+    );
+    if addr_verified_avail {
         broadband_catalog.high_speed_available = true;
-        broadband_catalog.fiber_available = true;
-        broadband_catalog.fiber_confirmed_fcc = true;
-        broadband_catalog.internet_tier = "fiber_confirmed".to_string();
-        broadband_catalog.verification_status = "address_verified".to_string();
-        broadband_catalog.headline_verdict = format!(
-            "{} confirmed available at parcel ({} Mbps)",
-            sonic_opt_rec.carrier_name, sonic_opt_rec.max_download_mbps
-        );
-        broadband_catalog.max_download_mbps = broadband_catalog
-            .max_download_mbps
-            .max(sonic_opt_rec.max_download_mbps);
-        broadband_catalog.max_upload_mbps = broadband_catalog
-            .max_upload_mbps
-            .max(sonic_opt_rec.max_upload_mbps);
-        broadband_catalog.fiber_carriers.retain(|c| !c.carrier_name.eq_ignore_ascii_case(&sonic_opt_rec.carrier_name));
-        broadband_catalog.fiber_carriers.insert(
-            0,
-            crate::registry::utilities::BroadbandCarrierOption {
-                carrier_name: sonic_opt_rec.carrier_name,
-                technology: sonic_opt_rec.technology,
-                tier_category: sonic_opt_rec.tier_category,
-                max_download_mbps: sonic_opt_rec.max_download_mbps,
-                max_upload_mbps: sonic_opt_rec.max_upload_mbps,
-                symmetrical: sonic_opt_rec.symmetrical,
-                typical_monthly_usd: sonic_opt_rec.typical_monthly_usd,
-                availability_status: "confirmed_address".to_string(),
-                check_url: sonic_opt_rec.check_url,
-            },
-        );
-    } else if !fcc_live_verified && !sonic_verified_avail {
+        if addr_verified_fiber {
+            broadband_catalog.fiber_available = true;
+            broadband_catalog.fiber_confirmed_fcc = true;
+            broadband_catalog.internet_tier = "fiber_confirmed".to_string();
+        }
+        if !fcc_live_verified {
+            broadband_catalog.verification_status = "address_verified".to_string();
+        }
+        for opt in confirmed_opts {
+            broadband_catalog.max_download_mbps = broadband_catalog
+                .max_download_mbps
+                .max(opt.max_download_mbps);
+            broadband_catalog.max_upload_mbps =
+                broadband_catalog.max_upload_mbps.max(opt.max_upload_mbps);
+            let mapped = crate::registry::utilities::BroadbandCarrierOption {
+                carrier_name: opt.carrier_name.clone(),
+                technology: opt.technology.clone(),
+                tier_category: opt.tier_category.clone(),
+                max_download_mbps: opt.max_download_mbps,
+                max_upload_mbps: opt.max_upload_mbps,
+                symmetrical: opt.symmetrical,
+                typical_monthly_usd: opt.typical_monthly_usd.clone(),
+                availability_status: opt.availability_status.clone(),
+                check_url: opt.check_url.clone(),
+            };
+            match opt.tier_category.trim().to_ascii_lowercase().as_str() {
+                "fiber" => {
+                    broadband_catalog
+                        .fiber_carriers
+                        .retain(|c| !c.carrier_name.eq_ignore_ascii_case(&opt.carrier_name));
+                    broadband_catalog.fiber_carriers.insert(0, mapped);
+                }
+                "cable" => {
+                    broadband_catalog
+                        .cable_carriers
+                        .retain(|c| !c.carrier_name.eq_ignore_ascii_case(&opt.carrier_name));
+                    broadband_catalog.cable_carriers.insert(0, mapped);
+                }
+                _ => {
+                    broadband_catalog
+                        .wireless_carriers
+                        .retain(|c| !c.carrier_name.eq_ignore_ascii_case(&opt.carrier_name));
+                    broadband_catalog.wireless_carriers.insert(0, mapped);
+                }
+            }
+        }
+        if let Some(top_fiber) = broadband_catalog.fiber_carriers.first() {
+            broadband_catalog.headline_verdict = format!(
+                "{} confirmed available at parcel ({} Mbps)",
+                top_fiber.carrier_name, top_fiber.max_download_mbps
+            );
+        }
+    } else if !fcc_live_verified {
         // Strictly refuse unverified fiber headlines or fabricated speeds when address checks didn't confirm service
         broadband_catalog.fiber_available = false;
         broadband_catalog.fiber_confirmed_fcc = false;
@@ -3772,11 +3996,11 @@ fn build_connectivity(ctx: &ReportContext, live_bb_opt: Option<&LiveBroadbandChe
         "meanCommuteMin": commute_min,
         "remoteWorkReadinessTier": readiness_tier,
         "fiberLikely": fiber_likely,
-        "fiberConfirmedAddress": sonic_verified_avail || fcc_fiber,
+        "fiberConfirmedAddress": addr_verified_fiber || fcc_fiber,
         "verificationStatus": broadband_catalog.verification_status,
         "ruralSatelliteDslRiskWarning": rural_warning,
         "warningMessage": warning_msg,
-        "sonic": sonic_json,
+        "addressVerifiedOptions": confirmed_opts_json,
         "fcc": fcc_json,
         "fccLookupUrl": fcc_lookup_url,
         "broadbandCatalog": broadband_catalog,
@@ -3835,7 +4059,8 @@ fn build_utilities_and_mandates(
     let live_water = live_util_opt.and_then(|b| b.wst.as_ref());
     let live_water_name = live_water.and_then(|w| w.water_carrier_name.as_deref());
     let live_water_pwsid = live_water.and_then(|w| w.water_pwsid.as_deref());
-    let has_public_water = water_prim.map(|p| p.is_object()).unwrap_or(false) || live_water_name.is_some();
+    let has_public_water =
+        water_prim.map(|p| p.is_object()).unwrap_or(false) || live_water_name.is_some();
     let well_explicit = RE_WELL.is_match(&ctx.combined_text)
         || val_str(ctx.facts.get("waterSource"))
             .map(|s| s.to_ascii_lowercase().contains("well"))
@@ -3870,7 +4095,10 @@ fn build_utilities_and_mandates(
             .map(|s| s.to_ascii_lowercase().contains("septic"))
             .unwrap_or(false);
     let muni_sewer_explicit = val_str(ctx.facts.get("sewer"))
-        .map(|s| s.to_ascii_lowercase().contains("municipal") || s.to_ascii_lowercase().contains("public"))
+        .map(|s| {
+            s.to_ascii_lowercase().contains("municipal")
+                || s.to_ascii_lowercase().contains("public")
+        })
         .unwrap_or(false);
     let live_sewer_name = live_water.and_then(|w| w.sewer_carrier_name.as_deref());
     let live_sewer_verified = live_water.map(|w| w.sewer_verified).unwrap_or(false);
@@ -4009,9 +4237,17 @@ fn build_neighborhood_pipeline(ctx: &ReportContext) -> Value {
 
     let mut historic_signals: Vec<String> = Vec::new();
     if RE_HISTORIC.is_match(&ctx.combined_text)
-        || ctx.facts.pointer("/buildingRegister/historic").and_then(|v| v.as_bool()) == Some(true)
+        || ctx
+            .facts
+            .pointer("/buildingRegister/historic")
+            .and_then(|v| v.as_bool())
+            == Some(true)
         || val_str(ctx.facts.pointer("/buildingRegister/historicDistrict")).is_some()
-        || ctx.facts.pointer("/buildingRegister/landmark").and_then(|v| v.as_bool()) == Some(true)
+        || ctx
+            .facts
+            .pointer("/buildingRegister/landmark")
+            .and_then(|v| v.as_bool())
+            == Some(true)
     {
         historic_signals.push("Listing/building register references historic district, landmark, or preservation rules.".into());
     }
@@ -4020,13 +4256,21 @@ fn build_neighborhood_pipeline(ctx: &ReportContext) -> Value {
         || zoning_lc.contains("(hd)")
         || zoning_lc.starts_with("hp")
     {
-        historic_signals.push(format!("Zoning code `{zoning}` indicates a historic preservation overlay."));
+        historic_signals.push(format!(
+            "Zoning code `{zoning}` indicates a historic preservation overlay."
+        ));
     }
     if let Some(pois) = ctx.amenities.get("pois").and_then(|v| v.as_array()) {
         for p in pois {
-            let p_str = serde_json::to_string(p).unwrap_or_default().to_ascii_lowercase();
+            let p_str = serde_json::to_string(p)
+                .unwrap_or_default()
+                .to_ascii_lowercase();
             let dm = val_i64(p.get("distM")).unwrap_or(9999);
-            if dm <= 400 && (p_str.contains("historic") || p_str.contains("heritage") || p_str.contains("monument")) {
+            if dm <= 400
+                && (p_str.contains("historic")
+                    || p_str.contains("heritage")
+                    || p_str.contains("monument"))
+            {
                 historic_signals.push(format!(
                     "Nearby OSM historic/heritage feature ({}) within {}m.",
                     val_str(p.get("name")).unwrap_or("landmark"),
@@ -4090,7 +4334,11 @@ fn build_neighborhood_pipeline(ctx: &ReportContext) -> Value {
 
     let infill_pressure = if non_res_border && transit_infill {
         "High — Commercial/Arterial Corridor & Transit-Oriented Infill Pressure"
-    } else if transit_infill || zoning_lc.contains("r-3") || zoning_lc.contains("r-4") || zoning_lc.contains("rm") {
+    } else if transit_infill
+        || zoning_lc.contains("r-3")
+        || zoning_lc.contains("r-4")
+        || zoning_lc.contains("rm")
+    {
         "Elevated — Multi-Family / Transit-Adjacent Infill Zone"
     } else if ca_sb9_note {
         "Moderate — CA Statewide SB 9 / ADU Infill Eligible"
@@ -4181,7 +4429,12 @@ fn build_exit_and_breakeven(
         .or(rent_zori_opt)
         .unwrap_or_else(|| (price * 0.0048).clamp(1_200.0, 12_000.0));
 
-    let maint_annual = price * if ctx.year_built.map(|y| y < 1980).unwrap_or(false) { 0.010 } else { 0.0075 };
+    let maint_annual = price
+        * if ctx.year_built.map(|y| y < 1980).unwrap_or(false) {
+            0.010
+        } else {
+            0.0075
+        };
     let cagr10_opt = val_f64(ctx.market.pointer("/zhvi/cagr10"));
     let cagr10_reported = cagr10_opt.is_some();
     let cagr10 = cagr10_opt.unwrap_or(4.2);
@@ -4202,7 +4455,9 @@ fn build_exit_and_breakeven(
         2,
     );
 
-    let tax_deduct_note = if (initial_loan * (ctx.rate30 / 100.0) + ctx.annual_tax.min(10_000.0)) > 29_200.0 {
+    let tax_deduct_note = if (initial_loan * (ctx.rate30 / 100.0) + ctx.annual_tax.min(10_000.0))
+        > 29_200.0
+    {
         format!(
             "Year-1 mortgage interest (~${}/yr on ${}k debt up to $750k cap) + SALT (capped at $10,000 under current rules) exceeds the $29,200 MFJ standard deduction — partial marginal federal itemization savings likely.",
             (initial_loan.min(750_000.0) * (ctx.rate30 / 100.0)).round() as i64,
@@ -4227,7 +4482,12 @@ fn build_exit_and_breakeven(
     let mut schedule = Vec::new();
 
     for yr in 1..=30usize {
-        let buy_outflow_yr = pi_mo * 12.0 + cur_tax_yr + cur_ins_yr + cur_hoa_yr + special_district_annual + cur_maint_yr;
+        let buy_outflow_yr = pi_mo * 12.0
+            + cur_tax_yr
+            + cur_ins_yr
+            + cur_hoa_yr
+            + special_district_annual
+            + cur_maint_yr;
         let rent_outflow_yr = cur_rent_mo * 12.0 + 300.0; // renters insurance
         let savings_delta = buy_outflow_yr - rent_outflow_yr;
         renter_port = renter_port * (1.0 + opp_rate) + savings_delta;
@@ -4415,7 +4675,10 @@ fn build_exit_and_breakeven(
             score -= 6.0;
         } else if d <= 21.0 {
             score += 4.0;
-            pos_drivers.push(format!("Fast metro absorption (~{:.0} median days to pending).", d));
+            pos_drivers.push(format!(
+                "Fast metro absorption (~{:.0} median days to pending).",
+                d
+            ));
         }
     }
 
@@ -4482,7 +4745,8 @@ fn build_post_closing_and_climate(ctx: &ReportContext, has_hoa: bool) -> Value {
 
     let homestead = match st {
         "TX" => {
-            let est_sav = (100_000.0 * (ctx.tax_rate * 0.62).max(0.008) + price * 0.001).round() as i64;
+            let est_sav =
+                (100_000.0 * (ctx.tax_rate * 0.62).max(0.008) + price * 0.001).round() as i64;
             json!({
                 "state": "TX",
                 "programName": "Texas Residence Homestead Exemption ($100,000 School District + 10% Appraisal Cap)",
@@ -4632,24 +4896,77 @@ fn build_post_closing_and_climate(ctx: &ReportContext, has_hoa: bool) -> Value {
     }));
 
     // Seasonal Climate Maintenance Readiness Flags
-    let extreme_heat = matches!(st, "AZ" | "TX" | "FL" | "NV" | "LA" | "GA" | "SC" | "AL" | "MS" | "NM" | "OK")
-        || (st == "CA" && ctx.lat.map(|la| la < 38.8).unwrap_or(false));
+    let extreme_heat = matches!(
+        st,
+        "AZ" | "TX" | "FL" | "NV" | "LA" | "GA" | "SC" | "AL" | "MS" | "NM" | "OK"
+    ) || (st == "CA" && ctx.lat.map(|la| la < 38.8).unwrap_or(false));
     let hard_freeze = matches!(
         st,
-        "MN" | "WI" | "MI" | "IL" | "NY" | "NJ" | "PA" | "MA" | "CT" | "RI" | "NH" | "VT" | "ME" | "OH" | "IN" | "IA" | "MO" | "KS" | "NE" | "ND" | "SD" | "CO" | "UT" | "WY" | "MT" | "ID" | "WA" | "OR" | "TX" | "VA" | "MD" | "DC"
+        "MN" | "WI"
+            | "MI"
+            | "IL"
+            | "NY"
+            | "NJ"
+            | "PA"
+            | "MA"
+            | "CT"
+            | "RI"
+            | "NH"
+            | "VT"
+            | "ME"
+            | "OH"
+            | "IN"
+            | "IA"
+            | "MO"
+            | "KS"
+            | "NE"
+            | "ND"
+            | "SD"
+            | "CO"
+            | "UT"
+            | "WY"
+            | "MT"
+            | "ID"
+            | "WA"
+            | "OR"
+            | "TX"
+            | "VA"
+            | "MD"
+            | "DC"
     );
     let coastal_salt = matches!(st, "FL" | "HI" | "LA" | "SC" | "NC" | "DE" | "RI" | "MA")
-        || ctx.hazards.pointer("/other/seaLevelRise/exposed").and_then(|v| v.as_bool()) == Some(true)
+        || ctx
+            .hazards
+            .pointer("/other/seaLevelRise/exposed")
+            .and_then(|v| v.as_bool())
+            == Some(true)
         || ctx
             .hazards
             .pointer("/flood/zone")
             .and_then(|v| v.as_str())
             .map(|z| z.starts_with('V'))
             .unwrap_or(false)
-        || (st == "CA" && ctx.lon.map(|lo| lo < -122.35 || (ctx.lat.map(|la| la < 34.4).unwrap_or(false) && lo < -118.2)).unwrap_or(false));
-    let wildfire_ember = matches!(st, "CA" | "OR" | "WA" | "CO" | "MT" | "ID" | "NV" | "AZ" | "NM" | "UT")
-        || ctx.hazards.pointer("/wildfire/california/inFhsz").and_then(|v| v.as_bool()) == Some(true)
-        || ctx.hazards.pointer("/wildfire/whp/class").and_then(|v| v.as_i64()).unwrap_or(0) >= 3;
+        || (st == "CA"
+            && ctx
+                .lon
+                .map(|lo| {
+                    lo < -122.35 || (ctx.lat.map(|la| la < 34.4).unwrap_or(false) && lo < -118.2)
+                })
+                .unwrap_or(false));
+    let wildfire_ember = matches!(
+        st,
+        "CA" | "OR" | "WA" | "CO" | "MT" | "ID" | "NV" | "AZ" | "NM" | "UT"
+    ) || ctx
+        .hazards
+        .pointer("/wildfire/california/inFhsz")
+        .and_then(|v| v.as_bool())
+        == Some(true)
+        || ctx
+            .hazards
+            .pointer("/wildfire/whp/class")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0)
+            >= 3;
 
     let mut climate_flags: Vec<String> = Vec::new();
     let mut seasonal_tasks: Vec<Value> = Vec::new();
@@ -4712,7 +5029,10 @@ fn build_bundle_with_live(
     let ctx = extract_context(report);
     let hoa_profile = build_hoa_profile(&ctx, nonprofit_filings);
     let hoa_monthly = val_f64(hoa_profile.get("hoaMonthly")).unwrap_or(0.0);
-    let has_hoa = hoa_profile.get("hasHoa").and_then(|v| v.as_bool()).unwrap_or(false);
+    let has_hoa = hoa_profile
+        .get("hasHoa")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     let has_hoa_water_trash = hoa_profile
         .pointer("/coverageBreakdown/utilitiesAndMaintenanceIncluded/included")
         .and_then(|v| v.as_array())
@@ -4738,10 +5058,11 @@ fn build_bundle_with_live(
     let connectivity = build_connectivity(&ctx, live_bb_opt);
     let neighborhood_pipeline = build_neighborhood_pipeline(&ctx);
 
-    let special_dist_ann = val_f64(ongoing_costs.pointer("/specialTaxDistricts/estimatedAnnualSpecialTaxUsd"))
-        .unwrap_or(0.0);
-    let seller_tt = val_f64(cash_to_close.pointer("/transferTax/sellerEstimatedShareUsd"))
-        .unwrap_or(0.0);
+    let special_dist_ann =
+        val_f64(ongoing_costs.pointer("/specialTaxDistricts/estimatedAnnualSpecialTaxUsd"))
+            .unwrap_or(0.0);
+    let seller_tt =
+        val_f64(cash_to_close.pointer("/transferTax/sellerEstimatedShareUsd")).unwrap_or(0.0);
     let buyer_closing_20 = cash_to_close
         .get("scenarios")
         .and_then(|v| v.as_array())
@@ -4814,18 +5135,10 @@ fn build_bundle_with_live(
                 bb.fcc_fixed.source_url.clone(),
             ));
         }
-        if matches!(
-            bb.sonic.status,
-            SonicAvailabilityStatus::Available
-                | SonicAvailabilityStatus::Preorder
-                | SonicAvailabilityStatus::NotAvailable
-        ) {
-            let surl = bb
-                .sonic
-                .final_url
-                .clone()
-                .unwrap_or_else(|| bb.sonic.check_url.clone());
-            sources.push(SourceItem::new(bb.sonic.source_name.clone(), surl));
+        for s in &bb.confirmed_sources {
+            if !sources.iter().any(|e| e.url == s.url) {
+                sources.push(s.clone());
+            }
         }
     }
     if !nonprofit_filings.is_empty() {
@@ -4870,15 +5183,74 @@ pub fn build_buyer_diligence_and_hoa_deterministic(report: &Value) -> BuyerDilig
 fn boxed_check_broadband<'a>(
     http: &'a HttpClient,
     env: &'a EnvConfig,
-    sonic_inp: &'a SonicAddressInput,
+    bb_query: &'a crate::extensions::proto::ExtensionQueryProto,
+    lat: Option<f64>,
+    lon: Option<f64>,
     enabled: bool,
 ) -> futures::future::BoxFuture<'a, Option<LiveBroadbandCheck>> {
     async move {
-        if enabled {
-            Some(check_live_broadband(http, env, sonic_inp).await)
-        } else {
-            None
+        if !enabled {
+            return None;
         }
+        let fcc_fixed = check_fcc_fixed_broadband(http, env, lat, lon).await;
+        let envs = crate::extensions::ExtensionHub::global()
+            .execute_domain(
+                crate::extensions::proto::CapabilityDomain::DomainBroadband,
+                bb_query,
+                http,
+                env,
+            )
+            .await;
+        let mut confirmed_options = Vec::new();
+        let mut confirmed_sources: Vec<SourceItem> = Vec::new();
+        let mut collect_opt =
+            |opt: &crate::extensions::proto::BroadbandOptionProto,
+             attr: Option<&crate::extensions::proto::SourceAttributionProto>| {
+                if matches!(
+                    opt.availability_status.as_str(),
+                    "confirmed_address" | "address_verified"
+                ) {
+                    if let Some(a) = attr {
+                        if !a.source_url.trim().is_empty()
+                            && !confirmed_sources.iter().any(|s| s.url == a.source_url)
+                        {
+                            confirmed_sources
+                                .push(SourceItem::new(a.source_name.clone(), a.source_url.clone()));
+                        }
+                    }
+                    confirmed_options.push(opt.clone());
+                }
+            };
+        for env_msg in &envs {
+            let attr = env_msg.attribution.as_ref();
+            match &env_msg.payload {
+                Some(
+                    crate::extensions::proto::extension_envelope_proto::Payload::BroadbandOption(
+                        opt,
+                    ),
+                ) => collect_opt(opt, attr),
+                Some(
+                    crate::extensions::proto::extension_envelope_proto::Payload::BroadbandCatalog(
+                        cat,
+                    ),
+                ) => {
+                    for opt in cat
+                        .fiber_carriers
+                        .iter()
+                        .chain(&cat.cable_carriers)
+                        .chain(&cat.wireless_carriers)
+                    {
+                        collect_opt(opt, attr);
+                    }
+                }
+                _ => {}
+            }
+        }
+        Some(LiveBroadbandCheck {
+            fcc_fixed,
+            confirmed_options,
+            confirmed_sources,
+        })
     }
     .boxed()
 }
@@ -4886,12 +5258,16 @@ fn boxed_check_broadband<'a>(
 fn boxed_resolve_live_utilities<'a>(
     http: &'a HttpClient,
     env: &'a EnvConfig,
+    db: Option<&'a crate::db::DbStore>,
     live_util_query: &'a LiveUtilityQuery,
     enabled: bool,
 ) -> futures::future::BoxFuture<'a, Option<LiveUtilityBundle>> {
     async move {
         if enabled {
-            Some(resolve_live_utility_and_climate_bundle(http, env, live_util_query).await)
+            Some(
+                resolve_live_utility_and_climate_bundle_with_db(http, env, db, live_util_query)
+                    .await,
+            )
         } else {
             None
         }
@@ -4899,9 +5275,67 @@ fn boxed_resolve_live_utilities<'a>(
     .boxed()
 }
 
+fn boxed_persist_rates_and_tax<'a, 'r: 'a>(
+    db: &'a crate::db::DbStore,
+    ctx: &'a ReportContext<'r>,
+    bundle: &'a BuyerDiligenceBundle,
+) -> futures::future::BoxFuture<'a, ()> {
+    async move {
+        let special = bundle
+            .buyer_diligence
+            .pointer("/ongoingCosts/specialTaxDistricts");
+        let has_special = special
+            .and_then(|s| s.get("hasConfirmedOrSuspectedDistrict"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let special_label = special
+            .and_then(|s| s.get("flags"))
+            .and_then(|v| v.as_array())
+            .and_then(|arr| {
+                let items: Vec<String> = arr
+                    .iter()
+                    .filter_map(|x| x.as_str().map(String::from))
+                    .collect();
+                (!items.is_empty()).then(|| items.join("; "))
+            });
+        let mandates = bundle
+            .buyer_diligence
+            .pointer("/utilitiesAndMandates/pointOfSaleMandates/mandates")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|m| m.get("title").and_then(|v| v.as_str()).map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let eff_tax_rate = if ctx.price > 0.0 && ctx.annual_tax > 0.0 {
+            Some(ctx.annual_tax / ctx.price)
+        } else {
+            None
+        };
+        let input = RatesAndCostsPersistInput {
+            state: ctx.state.clone(),
+            county: ctx.county.clone(),
+            county_fips: ctx.county_fips.clone(),
+            city: ctx.city.clone(),
+            zip: ctx.zip.clone(),
+            purchase_price: ctx.price,
+            effective_property_tax_rate: eff_tax_rate,
+            tra_code: val_str(ctx.facts.pointer("/taxRateArea")).map(String::from),
+            has_special_tax_district: has_special,
+            special_tax_district_label: special_label,
+            point_of_sale_mandates: mandates,
+            annual_insurance_usd: (ctx.annual_ins > 0.0).then_some(ctx.annual_ins),
+            ..Default::default()
+        };
+        let _ = persist_rates_and_tax_datasets(db, &input).await;
+    }
+    .boxed()
+}
+
 /// Async orchestrator entry point: concurrently queries live utility territory/tariff/climate
-/// endpoints (`live_tariffs`), live Sonic & FCC BDC broadband (`broadband_live`), and city-matched
-/// ProPublica Nonprofit Explorer IRS Form 990 HOA filings with strict timeouts and zero fake fallbacks.
+/// endpoints (`live_tariffs`), live FCC BDC + address-verified `ExtensionHub` broadband, and
+/// city-matched ProPublica Nonprofit Explorer IRS Form 990 HOA filings with strict timeouts.
 pub async fn run_buyer_diligence_and_hoa(
     http: &HttpClient,
     env: &EnvConfig,
@@ -4915,14 +5349,24 @@ pub async fn run_buyer_diligence_and_hoa(
         let state = ctx.state.clone();
         let city = ctx.city.clone();
 
-        let sonic_inp = SonicAddressInput {
+        let full_address = report
+            .get("address")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(String::from)
+            .unwrap_or_else(|| format!("{}, {}, {} {}", ctx.street, ctx.city, ctx.state, ctx.zip));
+        let bb_query = crate::extensions::proto::ExtensionQueryProto {
+            address: full_address,
             street: ctx.street.clone(),
             city: ctx.city.clone(),
             state: ctx.state.clone(),
             zip: ctx.zip.clone(),
-            unit: None,
+            county_fips: ctx.county_fips.clone(),
+            county_name: (!ctx.county.is_empty()).then(|| ctx.county.clone()),
             lat,
             lon,
+            ..Default::default()
         };
 
         let water_prim = ctx
@@ -4956,8 +5400,12 @@ pub async fn run_buyer_diligence_and_hoa(
             zip: ctx.zip.clone(),
             lat,
             lon,
-            sdwis_water_name: water_prim.and_then(|p| val_str(p.get("name"))).map(String::from),
-            sdwis_pwsid: water_prim.and_then(|p| val_str(p.get("pwsid"))).map(String::from),
+            sdwis_water_name: water_prim
+                .and_then(|p| val_str(p.get("name")))
+                .map(String::from),
+            sdwis_pwsid: water_prim
+                .and_then(|p| val_str(p.get("pwsid")))
+                .map(String::from),
             gov_kwh_benchmark: gov_kwh_bench,
             is_private_well: well_explicit,
             is_private_septic: septic_explicit,
@@ -4966,21 +5414,32 @@ pub async fn run_buyer_diligence_and_hoa(
         };
 
         let hub = crate::extensions::ExtensionHub::global();
+        let active_db = hub.active_db();
         let util_bb_on = hub.is_module_enabled("utilities_broadband");
 
-        let bb_fut = boxed_check_broadband(http, env, &sonic_inp, util_bb_on);
-        let live_util_fut = boxed_resolve_live_utilities(http, env, &live_util_query, util_bb_on);
+        let bb_fut = boxed_check_broadband(http, env, &bb_query, lat, lon, util_bb_on);
+        let live_util_fut = boxed_resolve_live_utilities(
+            http,
+            env,
+            active_db.as_ref(),
+            &live_util_query,
+            util_bb_on,
+        );
         let hoa_990_fut = fetch_hoa_nonprofit_filings(http, env, &assoc_candidates, &state, &city);
 
         let (live_bb_opt, live_util_opt, nonprofit_filings) =
             tokio::join!(bb_fut, live_util_fut, hoa_990_fut);
 
-        build_bundle_with_live(
+        let bundle = build_bundle_with_live(
             report,
             live_bb_opt.as_ref(),
             live_util_opt.as_ref(),
             &nonprofit_filings,
-        )
+        );
+        if let Some(db) = active_db.as_ref() {
+            boxed_persist_rates_and_tax(db, &ctx, &bundle).await;
+        }
+        bundle
     }
     .boxed()
     .await
@@ -5054,17 +5513,44 @@ mod tests {
         let hp = &out.hoa_profile;
         assert_eq!(hp["hasHoa"], json!(true));
         // Real median of [334, 400, 425, 474, 525, 650] = (425 + 474) / 2 = 449.5 -> 450
-        assert_eq!(hp.pointer("/feeVsRegionalBenchmark/benchmarkSource"), Some(&json!("local_mls_comps")));
-        assert_eq!(hp.pointer("/feeVsRegionalBenchmark/compSampleCount"), Some(&json!(6)));
-        assert_eq!(hp.pointer("/feeVsRegionalBenchmark/regionalBenchmarkMonthly"), Some(&json!(450)));
+        assert_eq!(
+            hp.pointer("/feeVsRegionalBenchmark/benchmarkSource"),
+            Some(&json!("local_mls_comps"))
+        );
+        assert_eq!(
+            hp.pointer("/feeVsRegionalBenchmark/compSampleCount"),
+            Some(&json!(6))
+        );
+        assert_eq!(
+            hp.pointer("/feeVsRegionalBenchmark/regionalBenchmarkMonthly"),
+            Some(&json!(450))
+        );
 
         // Undisclosed HOA budgets must NOT invent 20/24/42/14% dollar shares or conflicting master insurance
-        assert_eq!(hp.pointer("/fundingAndBoard/estimatedDuesAllocation/disclosed"), Some(&json!(false)));
-        assert_eq!(hp.pointer("/fundingAndBoard/estimatedDuesAllocation/reservesPct"), Some(&Value::Null));
-        assert_eq!(hp.pointer("/fundingAndBoard/estimatedDuesAllocation/masterInsuranceMonthlyUsd"), Some(&Value::Null));
-        assert_eq!(hp.pointer("/fundingAndBoard/reserveStatus/reserveAllocationPct"), Some(&Value::Null));
-        assert_eq!(hp.pointer("/masterInsurance/estimatedMasterInsuranceCost/disclosed"), Some(&json!(false)));
-        assert_eq!(hp.pointer("/masterInsurance/estimatedMasterInsuranceCost/annualPerUnitUSD"), Some(&Value::Null));
+        assert_eq!(
+            hp.pointer("/fundingAndBoard/estimatedDuesAllocation/disclosed"),
+            Some(&json!(false))
+        );
+        assert_eq!(
+            hp.pointer("/fundingAndBoard/estimatedDuesAllocation/reservesPct"),
+            Some(&Value::Null)
+        );
+        assert_eq!(
+            hp.pointer("/fundingAndBoard/estimatedDuesAllocation/masterInsuranceMonthlyUsd"),
+            Some(&Value::Null)
+        );
+        assert_eq!(
+            hp.pointer("/fundingAndBoard/reserveStatus/reserveAllocationPct"),
+            Some(&Value::Null)
+        );
+        assert_eq!(
+            hp.pointer("/masterInsurance/estimatedMasterInsuranceCost/disclosed"),
+            Some(&json!(false))
+        );
+        assert_eq!(
+            hp.pointer("/masterInsurance/estimatedMasterInsuranceCost/annualPerUnitUSD"),
+            Some(&Value::Null)
+        );
     }
 
     #[test]
@@ -5076,23 +5562,60 @@ mod tests {
 
     #[test]
     fn test_solar_pv_offset_physical_gas_and_honest_connectivity() {
-        let no_solar = build_buyer_diligence_and_hoa_deterministic(&sample_campbell_townhome(450, false));
-        let with_solar = build_buyer_diligence_and_hoa_deterministic(&sample_campbell_townhome(450, true));
+        let no_solar =
+            build_buyer_diligence_and_hoa_deterministic(&sample_campbell_townhome(450, false));
+        let with_solar =
+            build_buyer_diligence_and_hoa_deterministic(&sample_campbell_townhome(450, true));
 
-        let kwh_no = no_solar.buyer_diligence.pointer("/ongoingCosts/monthlyUtilities/estimatedMonthlyKwh").and_then(Value::as_i64).unwrap_or(0);
-        let kwh_yes = with_solar.buyer_diligence.pointer("/ongoingCosts/monthlyUtilities/estimatedMonthlyKwh").and_then(Value::as_i64).unwrap_or(0);
-        let offset = with_solar.buyer_diligence.pointer("/ongoingCosts/monthlyUtilities/estimatedSolarOffsetKwh").and_then(Value::as_i64).unwrap_or(0);
-        assert!(offset > 200, "2.870 kW PV must yield meaningful offset, got {offset}");
-        assert!(kwh_yes < kwh_no, "solar must reduce net grid kWh: with={kwh_yes} without={kwh_no}");
+        let kwh_no = no_solar
+            .buyer_diligence
+            .pointer("/ongoingCosts/monthlyUtilities/estimatedMonthlyKwh")
+            .and_then(Value::as_i64)
+            .unwrap_or(0);
+        let kwh_yes = with_solar
+            .buyer_diligence
+            .pointer("/ongoingCosts/monthlyUtilities/estimatedMonthlyKwh")
+            .and_then(Value::as_i64)
+            .unwrap_or(0);
+        let offset = with_solar
+            .buyer_diligence
+            .pointer("/ongoingCosts/monthlyUtilities/estimatedSolarOffsetKwh")
+            .and_then(Value::as_i64)
+            .unwrap_or(0);
+        assert!(
+            offset > 200,
+            "2.870 kW PV must yield meaningful offset, got {offset}"
+        );
+        assert!(
+            kwh_yes < kwh_no,
+            "solar must reduce net grid kWh: with={kwh_yes} without={kwh_no}"
+        );
 
         // Sub-0.75ac parcel with empty retail water (wholesaler filtered out) must NOT cry Private Well
         assert_eq!(
-            with_solar.buyer_diligence.pointer("/utilitiesAndMandates/waterSource/isLikelyPrivateWell"),
+            with_solar
+                .buyer_diligence
+                .pointer("/utilitiesAndMandates/waterSource/isLikelyPrivateWell"),
             Some(&json!(false))
         );
-        // Unverified offline connectivity must NEVER claim fiberLikely=true or Sonic 10G
-        assert_eq!(with_solar.buyer_diligence.pointer("/connectivity/fiberLikely"), Some(&Value::Null));
-        assert_eq!(with_solar.buyer_diligence.pointer("/connectivity/sonic/available"), Some(&json!(false)));
-        assert_eq!(with_solar.buyer_diligence.pointer("/connectivity/broadbandCatalog/fiberAvailable"), Some(&json!(false)));
+        // Unverified offline connectivity must NEVER claim fiberLikely=true or confirmed address fiber
+        assert_eq!(
+            with_solar
+                .buyer_diligence
+                .pointer("/connectivity/fiberLikely"),
+            Some(&Value::Null)
+        );
+        assert_eq!(
+            with_solar
+                .buyer_diligence
+                .pointer("/connectivity/fiberConfirmedAddress"),
+            Some(&json!(false))
+        );
+        assert_eq!(
+            with_solar
+                .buyer_diligence
+                .pointer("/connectivity/broadbandCatalog/fiberAvailable"),
+            Some(&json!(false))
+        );
     }
 }

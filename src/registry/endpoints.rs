@@ -1,7 +1,6 @@
 //! Canonical upstream API endpoints and public-data service base URLs.
 
 // Commercial / MLS / Property APIs
-pub const RENTCAST_BASE_URL: &str = "https://api.rentcast.io/v1";
 pub const ATTOM_BASE_URL: &str = "https://api.gateway.attomdata.com/propertyapi/v1.0.0";
 pub const SIMPLYRETS_BASE_URL: &str = "https://api.simplyrets.com";
 

@@ -70,13 +70,20 @@ pub fn init_deterministic_ai_meta(parsed: &mut Value, files: Option<Vec<Value>>)
     }
 }
 
-/// Stamps LLM enhancement metadata (`aiEnhanced`, `model`, `cached`) onto a review result object.
+/// Stamps LLM enhancement metadata (`aiEnhanced`, `model`, `effort`, `cached`) onto a review result object.
 pub fn stamp_ai_enhancement_meta(parsed: &mut Value, res: &LlmCallResult, set_ai_enhanced: bool) {
     if let Some(obj) = parsed.as_object_mut() {
         if set_ai_enhanced {
             obj.insert("aiEnhanced".to_string(), Value::Bool(true));
         }
         obj.insert("model".to_string(), Value::String(res.model.clone()));
+        obj.insert(
+            "effort".to_string(),
+            res.effort
+                .clone()
+                .map(Value::String)
+                .unwrap_or(Value::Null),
+        );
         obj.insert("cached".to_string(), Value::Bool(res.cached));
     }
 }

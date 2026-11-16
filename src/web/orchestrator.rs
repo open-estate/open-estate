@@ -2,7 +2,7 @@
 // Zero Cloudflare subrequest or 30s wall-clock limits: all 50+ data connectors run concurrently
 // in-process, deterministic HTML renders immediately, and AI synthesis completes in the background.
 
-use crate::ai::{run_ai_analyst, run_ai_analyst_with_refresh};
+use crate::ai::run_ai_analyst_with_store;
 use crate::cre::attach_cre_section_with_live_hydration; // [feat/cre-mode]
 use crate::db::{report_has_osrm_router_down, BuildQueueJobInput, CachedReportRecord, DbStore};
 use crate::modules::{
@@ -925,8 +925,8 @@ where
 
     // Fetch municipal open-data permits BEFORE Wave 3 so `run_permits_and_condition`, `insurance`,
     // `buyer_diligence`, and `ai` all see Stage-1 open-data + MGO + Shovels permits.
-    let pre_open_data = crate::property::deep_research::fetch_municipal_open_data_stage1(
-        http, env, &geo, &facts,
+    let pre_open_data = Box::pin(
+        crate::property::deep_research::fetch_municipal_open_data_stage1(http, env, &geo, &facts),
     )
     .await;
     if !pre_open_data.0.is_empty() || !pre_open_data.1.is_empty() {
@@ -1270,16 +1270,18 @@ where
         .pointer("/modules/mls/data")
         .cloned()
         .unwrap_or(Value::Null);
-    let deep_out = crate::property::deep_research::run_deep_property_research_with_prefetched(
-        http,
-        env,
-        db,
-        &report["geo"],
-        &report["facts"],
-        &mls_data,
-        report.get("hoaProfile"),
-        &canon_slug,
-        Some(pre_open_data),
+    let deep_out = Box::pin(
+        crate::property::deep_research::run_deep_property_research_with_prefetched(
+            http,
+            env,
+            db,
+            &report["geo"],
+            &report["facts"],
+            &mls_data,
+            report.get("hoaProfile"),
+            &canon_slug,
+            Some(pre_open_data),
+        ),
     )
     .await;
     crate::property::deep_research::merge_open_data_permits_into_report(
@@ -1385,14 +1387,13 @@ where
         crate::modules::agent_recommend::build_agent_recommendations(db, &report).await;
 
     let zip_opt = report.pointer("/geo/zip").and_then(|v| v.as_str());
-    let engagement = crate::modules::engagement::build_engagement_for_report_with_brand(
+    let engagement = crate::modules::engagement::build_engagement_for_report(
         db,
         &canon_slug,
         &display_address,
         zip_opt,
         &report["facts"],
         report.pointer("/modules/market/data"),
-        &env.brand_name(),
     )
     .await;
     report["engagement"] = engagement;
@@ -1432,9 +1433,10 @@ where
         on_progress("Synthesizing AI analyst insights…");
         let tai = Instant::now();
         let llm_cache = DbLlmCache(db.clone());
-        match run_ai_analyst_with_refresh(
+        match run_ai_analyst_with_store(
             http,
             env,
+            Some(db),
             &report,
             Some(&llm_cache),
             http.is_cache_bypassed(),
@@ -1505,7 +1507,7 @@ pub async fn complete_report_ai_only(
         return Ok(report);
     }
     let llm_cache = DbLlmCache(db.clone());
-    let ai_out = run_ai_analyst(http, env, &report, Some(&llm_cache)).await?;
+    let ai_out = run_ai_analyst_with_store(http, env, Some(db), &report, Some(&llm_cache), false).await?;
     if !ai_out.data.is_null() {
         merge_ai_into_report(&mut report, ai_out.data);
     }

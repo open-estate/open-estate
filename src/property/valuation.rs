@@ -344,45 +344,6 @@ fn detect_existing_adu(f: &Value) -> bool {
     false
 }
 
-fn is_rentcast_rent_source(f: &Value) -> bool {
-    if f.get("rentNote")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_ascii_lowercase().contains("rentcast"))
-        .unwrap_or(false)
-    {
-        return true;
-    }
-    if f.get("rentNote").is_none() {
-        let has_rc_connector = f
-            .get("connectorsUsed")
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter().any(|c| {
-                    c.as_str()
-                        .map(|s| s.eq_ignore_ascii_case("rentcast"))
-                        .unwrap_or(false)
-                })
-            })
-            .unwrap_or(false);
-        let has_rc_rental_comp = f
-            .get("rentalComps")
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter().any(|rc| {
-                    rc.get("source")
-                        .and_then(|s| s.as_str())
-                        .map(|s| s.to_ascii_lowercase().contains("rentcast"))
-                        .unwrap_or(false)
-                })
-            })
-            .unwrap_or(false);
-        if has_rc_connector || has_rc_rental_comp {
-            return true;
-        }
-    }
-    false
-}
-
 #[cfg(test)]
 fn compute_rental_benchmarks(
     f: &Value,
@@ -503,14 +464,10 @@ fn compute_rental_benchmarks_with_research(
 
     let bedroom_benchmarks = if any_data { rows } else { Vec::new() };
 
-    let rent_from_rentcast = is_rentcast_rent_source(f);
-    let explicit_facts_rent = if rent_from_rentcast {
-        None
-    } else {
-        f.get("rentEstimate")
-            .and_then(|v| v.as_f64())
-            .filter(|&r| r > 0.0)
-    };
+    let explicit_facts_rent = f
+        .get("rentEstimate")
+        .and_then(|v| v.as_f64())
+        .filter(|&r| r > 0.0);
 
     let (open_est_rent, open_rent_basis) = if let Some(explicit) = explicit_facts_rent {
         let basis = f

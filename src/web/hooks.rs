@@ -3,6 +3,11 @@
 //! embedding downstream code into the core Open Estate crate.
 
 use crate::db::{CachedReportRecord, DbStore};
+use crate::extensions::adapter::DataExtensionAdapter;
+use crate::extensions::proto::{manifest_license_class, manifest_tier, ExtensionManifestProto};
+use crate::metering::{
+    default_oss_authorize, ExtensionUsageEvent, InvocationContext, InvocationDecision,
+};
 pub use crate::shared::scrub_rental_source_brands;
 use crate::shared::EnvConfig;
 use crate::web::http_util::{html_response, json_response};
@@ -17,9 +22,36 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 
 /// Boxed `Send` future alias used across `ServerExtensionHooks` methods.
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+
+/// Result returned by `ServerExtensionHooks::redact_report_for_viewer`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RedactionOutcome {
+    pub redacted: bool,
+    pub private_cache: bool,
+}
+
+/// Payload passed to `ServerExtensionHooks::notify_section_ready` when a lazy report section completes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SectionReadyNotification {
+    pub subscription_id: String,
+    pub slug: String,
+    pub section_id: String,
+    pub section_label: String,
+    pub display_address: String,
+    pub email: String,
+    pub user_id: Option<String>,
+    pub unsubscribe_token: String,
+    pub unsubscribe_url: String,
+    pub deep_link_url: String,
+    pub event_key: String,
+    pub base_origin: String,
+}
 
 /// Result returned by `ServerExtensionHooks::authorize_report`.
 #[derive(Debug, Clone)]
@@ -258,6 +290,77 @@ pub trait ServerExtensionHooks: Send + Sync + 'static {
         _headers: &'a HeaderMap,
         _email: &'a str,
     ) -> BoxFuture<'a, std::result::Result<(), Response>> {
+        Box::pin(async { Ok(()) })
+    }
+
+    /// Optional extra native `DataExtensionAdapter` implementations injected by host binaries.
+    fn extra_extension_adapters(&self) -> Vec<Arc<dyn DataExtensionAdapter>> {
+        Vec::new()
+    }
+
+    /// Persists or bills an [`ExtensionUsageEvent`] emitted by `MeterScope`.
+    /// Default OSS implementation stores local daily rollups in `extension_usage_rollups_local`.
+    fn record_extension_usage<'a>(
+        &'a self,
+        state: &'a AppState,
+        event: &'a ExtensionUsageEvent,
+    ) -> BoxFuture<'a, anyhow::Result<()>> {
+        Box::pin(async move {
+            crate::db::metering_store::record_local_usage_rollup(&state.db, event).await
+        })
+    }
+
+    /// Authorizes an extension invocation before execution (`Allow` basic, `Deny` premium/non-open in OSS).
+    fn authorize_extension_invocation<'a>(
+        &'a self,
+        _state: &'a AppState,
+        ctx: &'a InvocationContext,
+        manifest: &'a ExtensionManifestProto,
+    ) -> BoxFuture<'a, InvocationDecision> {
+        Box::pin(async move {
+            default_oss_authorize(
+                ctx,
+                Some(manifest_tier(manifest)),
+                Some(manifest_license_class(manifest)),
+                Some(manifest.min_plan_tier.as_str()),
+                manifest.requires_manual_approval,
+            )
+        })
+    }
+
+    /// Redacts viewer-restricted report subtrees server-side before HTML/JSON serialization.
+    fn redact_report_for_viewer<'a>(
+        &'a self,
+        _state: &'a AppState,
+        _headers: &'a HeaderMap,
+        _raw_query: &'a str,
+        _slug: &'a str,
+        _report: &'a mut Value,
+    ) -> BoxFuture<'a, RedactionOutcome> {
+        Box::pin(async {
+            RedactionOutcome {
+                redacted: false,
+                private_cache: false,
+            }
+        })
+    }
+
+    /// Optional notification hook invoked when a subscribed lazy section finishes (`Ok(true)` = handled).
+    fn notify_section_ready<'a>(
+        &'a self,
+        _db: &'a DbStore,
+        _http: &'a crate::shared::HttpClient,
+        _env: &'a EnvConfig,
+        _notification: &'a SectionReadyNotification,
+    ) -> BoxFuture<'a, anyhow::Result<bool>> {
+        Box::pin(async { Ok(false) })
+    }
+
+    /// Optional startup hook allowing host applications to register & seed DB-backed scheduled jobs.
+    fn register_scheduled_jobs<'a>(
+        &'a self,
+        _state: &'a AppState,
+    ) -> BoxFuture<'a, anyhow::Result<()>> {
         Box::pin(async { Ok(()) })
     }
 }

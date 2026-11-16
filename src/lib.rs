@@ -15,6 +15,9 @@ pub use modules::routing_providers;
 pub mod scanner;
 pub mod scoring;
 pub mod web;
+pub mod lazy;
+pub mod metering;
+pub mod scheduler;
 
 #[cfg(test)]
 extern crate self as open_estate;

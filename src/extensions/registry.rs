@@ -12,7 +12,9 @@ use crate::extensions::aggregator::aggregate_envelopes;
 use crate::extensions::manifest::{parse_and_validate_package, ParsedExtensionPackage};
 use crate::extensions::proto::{
     capability_domain_slug, driver_kind_label, driver_kind_slug, encode_proto_base64,
-    encode_proto_bytes, envelope_to_display_json, provenance_tier_slug,
+    encode_proto_bytes, envelope_to_display_json, manifest_execution_mode, manifest_is_lazy,
+    manifest_license_class, manifest_metering_dimensions, manifest_min_plan_tier,
+    manifest_section_id, manifest_tier, manifest_to_active_llm_spec, provenance_tier_slug,
     AggregatedPropertyBundleProto, CapabilityDomain, DriverKind, ExtensionEnvelopeProto,
     ExtensionManifestProto, ExtensionQueryProto, ProvenanceTier,
 };
@@ -21,6 +23,13 @@ use crate::extensions::yaml_runner::{
     execute_upstream_yaml_mapper, is_optional_auth_missing, preview_http_resolution,
     CachedEnvelopeEntry,
 };
+use crate::lazy::{enqueue as enqueue_lazy_job, EnqueueLazyJobRequest, LazySectionStatusKind};
+use crate::metering::{
+    default_oss_authorize, mark_cached, mark_denied, mark_failed, with_active_llm_spec,
+    ExtensionTier, ExtensionUsageEvent, InvocationContext, InvocationDecision, InvocationTrigger,
+    MeterScope,
+};
+use crate::scanner::lazy_hook::PeriodicLazyEnqueueSummary;
 use crate::shared::{now_iso, EnvConfig, HttpClient};
 use anyhow::{anyhow, Context, Result};
 use futures::future::join_all;
@@ -32,8 +41,15 @@ use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, RwLock, Weak};
 use std::time::{Duration, Instant};
+
+tokio::task_local! {
+    static ACTIVE_HOOK_STATE: crate::web::server::AppState;
+}
+
+/// Callback reconstructing an `AppState` bound to `&Arc<ExtensionHub>` without creating an `Arc` cycle.
+pub type HookStateBuilder = Arc<dyn Fn(&Arc<ExtensionHub>) -> crate::web::server::AppState + Send + Sync>;
 
 struct EmbeddedBuiltinSpec {
     #[allow(dead_code)]
@@ -72,11 +88,6 @@ const EMBEDDED_BUILTINS: &[EmbeddedBuiltinSpec] = &[
         id: "epa_sdwis_water",
         manifest_yaml: include_str!("../../extensions/epa_sdwis_water/manifest.yaml"),
         openapi_yaml: Some(include_str!("../../extensions/epa_sdwis_water/openapi.yaml")),
-    },
-    EmbeddedBuiltinSpec {
-        id: "rentcast_property",
-        manifest_yaml: include_str!("../../extensions/rentcast_property/manifest.yaml"),
-        openapi_yaml: Some(include_str!("../../extensions/rentcast_property/openapi.yaml")),
     },
     EmbeddedBuiltinSpec {
         id: "us_municipal_electric",
@@ -210,11 +221,6 @@ const EMBEDDED_BUILTINS: &[EmbeddedBuiltinSpec] = &[
         manifest_yaml: include_str!(
             "../../extensions/permit_code_enforcement_extractor/manifest.yaml"
         ),
-        openapi_yaml: None,
-    },
-    EmbeddedBuiltinSpec {
-        id: "sonic_fiber_availability",
-        manifest_yaml: include_str!("../../extensions/sonic_fiber_availability/manifest.yaml"),
         openapi_yaml: None,
     },
     EmbeddedBuiltinSpec {
@@ -360,7 +366,10 @@ pub struct ExtensionHub {
     state: RwLock<HubInnerState>,
     generation: AtomicU64,
     http_cache: Cache<String, CachedEnvelopeEntry>,
+    shared_cache: crate::extensions::shared_cache::SharedExtensionCache,
     limiters: RwLock<HashMap<String, (u32, u32, Arc<DefaultDirectRateLimiter>)>>,
+    self_weak: RwLock<Weak<ExtensionHub>>,
+    hook_state_builder: RwLock<Option<HookStateBuilder>>,
 }
 
 static GLOBAL_EXTENSION_HUB: Lazy<Arc<ExtensionHub>> = Lazy::new(ExtensionHub::new_default);
@@ -385,8 +394,15 @@ impl ExtensionHub {
                 .max_capacity(4_096)
                 .time_to_live(Duration::from_secs(30 * 86_400))
                 .build(),
+            shared_cache: crate::extensions::shared_cache::SharedExtensionCache::new(),
             limiters: RwLock::new(HashMap::new()),
+            self_weak: RwLock::new(Weak::new()),
+            hook_state_builder: RwLock::new(None),
         });
+        *hub
+            .self_weak
+            .write()
+            .expect("ExtensionHub self_weak write") = Arc::downgrade(&hub);
         hub.load_builtin_packages();
         let default_dir = Path::new("extensions");
         if default_dir.is_dir() {
@@ -395,6 +411,166 @@ impl ExtensionHub {
         hub.install_builtin_native_adapters();
         hub.refresh_snapshot();
         hub
+    }
+
+    /// Binds an `AppState` factory onto this hub (cycle-free via `Weak<ExtensionHub>`) so
+    /// wave execution & `test_fetch` invoke `ServerExtensionHooks` authorization/metering.
+    pub fn attach_hook_state_builder(&self, builder: HookStateBuilder) {
+        let mut guard = self
+            .hook_state_builder
+            .write()
+            .expect("ExtensionHub hook_state_builder write");
+        *guard = Some(builder);
+    }
+
+    /// Runs `fut` with a task-local `AppState` override for hook authorization & metering.
+    pub fn with_hook_state<F, T>(
+        state: crate::web::server::AppState,
+        fut: F,
+    ) -> impl std::future::Future<Output = T>
+    where
+        F: std::future::Future<Output = T>,
+    {
+        ACTIVE_HOOK_STATE.scope(state, fut)
+    }
+
+    fn resolve_hook_state(&self) -> Option<crate::web::server::AppState> {
+        if let Ok(st) = ACTIVE_HOOK_STATE.try_with(Clone::clone) {
+            return Some(st);
+        }
+        let hub_arc = self
+            .self_weak
+            .read()
+            .expect("ExtensionHub self_weak read")
+            .upgrade()?;
+        let builder = self
+            .hook_state_builder
+            .read()
+            .expect("ExtensionHub hook_state_builder read")
+            .as_ref()
+            .cloned()?;
+        Some(builder(&hub_arc))
+    }
+
+    /// Returns the persistent + LRU shared cross-home data cache coordinator.
+    pub fn shared_cache(&self) -> &crate::extensions::shared_cache::SharedExtensionCache {
+        &self.shared_cache
+    }
+
+    /// Returns the active [`DbStore`] bound via `AppState` or task-local `ExtensionHub::with_hook_state`.
+    pub fn active_db(&self) -> Option<DbStore> {
+        self.resolve_hook_state().map(|s| s.db)
+    }
+
+    /// Registers native adapters provided by `ServerExtensionHooks::extra_extension_adapters`.
+    pub fn register_hook_adapters(&self, adapters: Vec<Arc<dyn DataExtensionAdapter>>) {
+        for adapter in adapters {
+            self.register_native_adapter(adapter);
+        }
+    }
+
+    /// Returns all registered manifests whose `execution_mode` is `"lazy"`.
+    pub fn list_lazy_manifests(&self) -> Vec<ExtensionManifestProto> {
+        self.list_manifests()
+            .into_iter()
+            .filter(manifest_is_lazy)
+            .collect()
+    }
+
+    /// Idempotently enqueues all `execution_mode == "lazy"` extensions for `slug`/`report`
+    /// using singleflight deduplication (`crate::lazy::enqueue`).
+    pub async fn enqueue_lazy_for_report(
+        &self,
+        db: &DbStore,
+        slug: &str,
+        report: &Value,
+        trigger: &str,
+        requested_by_user_id: Option<&str>,
+    ) -> PeriodicLazyEnqueueSummary {
+        let mut summary = PeriodicLazyEnqueueSummary::default();
+        let clean_slug = slug.trim();
+        if clean_slug.is_empty() {
+            return summary;
+        }
+        let specs = self.list_lazy_manifests();
+        if specs.is_empty() {
+            return summary;
+        }
+
+        let mut query = serde_json::Map::new();
+        let addr = report
+            .pointer("/property/address")
+            .or_else(|| report.pointer("/meta/displayAddress"))
+            .or_else(|| report.pointer("/geo/displayAddress"))
+            .or_else(|| report.pointer("/input/address"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .unwrap_or("");
+        if !addr.is_empty() {
+            query.insert("address".to_string(), json!(addr));
+        }
+        for (ptr, key) in [
+            ("/geo/city", "city"),
+            ("/geo/state", "state"),
+            ("/geo/zip", "zip"),
+            ("/geo/countyFips", "county_fips"),
+            ("/geo/countyName", "countyName"),
+            ("/facts/apn", "apn"),
+        ] {
+            if let Some(val) = report.pointer(ptr).and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()) {
+                query.insert(key.to_string(), json!(val));
+            }
+        }
+        if let Some(lat) = report.pointer("/geo/lat").and_then(Value::as_f64).filter(|v| v.is_finite()) {
+            query.insert("lat".to_string(), json!(lat));
+        }
+        if let Some(lon) = report.pointer("/geo/lon").and_then(Value::as_f64).filter(|v| v.is_finite()) {
+            query.insert("lon".to_string(), json!(lon));
+        }
+        let query_val = Value::Object(query);
+        let clean_trigger = if trigger.trim().is_empty() {
+            "first_visit"
+        } else {
+            trigger.trim()
+        };
+
+        summary.targets_examined = 1;
+        for m in specs {
+            summary.jobs_evaluated += 1;
+            let raw_sec = manifest_section_id(&m);
+            let section_id = if raw_sec.is_empty() {
+                "publicResearch"
+            } else {
+                raw_sec
+            };
+            let req = EnqueueLazyJobRequest::new(clean_slug, &m.extension_id, section_id)
+                .with_trigger(clean_trigger)
+                .with_query(query_val.clone())
+                .with_user_id(requested_by_user_id.map(ToOwned::to_owned));
+            match enqueue_lazy_job(db, Some(self), req).await {
+                Ok(out) => {
+                    if out.queued {
+                        summary.queued += 1;
+                    } else if out.deduplicated {
+                        summary.deduplicated += 1;
+                    } else if out.section_status == LazySectionStatusKind::AwaitingApproval {
+                        summary.awaiting_approval += 1;
+                    } else if out.section_status == LazySectionStatusKind::NotEnabled {
+                        summary.not_enabled += 1;
+                    }
+                }
+                Err(err) => {
+                    summary.errors += 1;
+                    tracing::warn!(
+                        slug = clean_slug,
+                        extension_id = %m.extension_id,
+                        error = %err,
+                        "Lazy extension enqueue failed"
+                    );
+                }
+            }
+        }
+        summary
     }
 
     /// Creates an `ExtensionHub` loading packages from an explicit directory path.
@@ -409,7 +585,7 @@ impl ExtensionHub {
     }
 
     fn install_builtin_native_adapters(&self) {
-        use crate::modules::broadband_live::{FccBroadbandBdcAdapter, SonicAvailabilityAdapter};
+        use crate::modules::broadband_live::FccBroadbandBdcAdapter;
         use crate::modules::live_tariffs::all_live_tariff_adapters;
         use crate::modules::title_legal_radar::TitleUnderwriterRatesAdapter;
         use crate::property::permit_pipeline::{
@@ -429,11 +605,10 @@ impl ExtensionHub {
         self.register_native_adapter(Arc::new(PermitRemodelExtractorAdapter));
         self.register_native_adapter(Arc::new(PermitCodeEnforcementExtractorAdapter));
 
-        // Real Live Utility & Broadband Adapters
+        // Real Live Utility & Open Broadband Adapters
         for adapter in all_live_tariff_adapters() {
             self.register_native_adapter(adapter);
         }
-        self.register_native_adapter(Arc::new(SonicAvailabilityAdapter));
         self.register_native_adapter(Arc::new(FccBroadbandBdcAdapter));
         self.register_native_adapter(Arc::new(TitleUnderwriterRatesAdapter));
     }
@@ -821,6 +996,40 @@ impl ExtensionHub {
                         manifest.upstream_require_mode =
                             prev.manifest.upstream_require_mode.clone();
                     }
+                    if manifest.tier == 0 && prev.manifest.tier != 0 {
+                        manifest.tier = prev.manifest.tier;
+                    }
+                    if manifest.license_class == 0 && prev.manifest.license_class != 0 {
+                        manifest.license_class = prev.manifest.license_class;
+                    }
+                    if manifest.execution_mode == 0 && prev.manifest.execution_mode != 0 {
+                        manifest.execution_mode = prev.manifest.execution_mode;
+                    }
+                    if prev.manifest.requires_manual_approval {
+                        manifest.requires_manual_approval = true;
+                    }
+                    if manifest.min_plan_tier.trim().is_empty()
+                        && !prev.manifest.min_plan_tier.trim().is_empty()
+                    {
+                        manifest.min_plan_tier = prev.manifest.min_plan_tier.clone();
+                    }
+                    if manifest.metering.is_none() && prev.manifest.metering.is_some() {
+                        manifest.metering = prev.manifest.metering.clone();
+                    }
+                    if manifest.section_id.trim().is_empty()
+                        && !prev.manifest.section_id.trim().is_empty()
+                    {
+                        manifest.section_id = prev.manifest.section_id.clone();
+                    }
+                    if manifest.enabled_by_default.is_none() {
+                        manifest.enabled_by_default = prev.manifest.enabled_by_default;
+                    }
+                    if manifest.llm.is_none() {
+                        manifest.llm = prev.manifest.llm.clone();
+                    }
+                    if manifest.sharing.is_none() {
+                        manifest.sharing = prev.manifest.sharing.clone();
+                    }
                     (
                         prev.manifest_yaml.clone(),
                         prev.openapi_yaml.clone(),
@@ -947,6 +1156,88 @@ impl ExtensionHub {
         bundle
     }
 
+    fn invocation_ctx_for(
+        manifest: &ExtensionManifestProto,
+        trigger: InvocationTrigger,
+        parent_invocation_id: Option<String>,
+        query: Option<&ExtensionQueryProto>,
+    ) -> InvocationContext {
+        let mut ctx = InvocationContext::new(&manifest.extension_id)
+            .with_version(&manifest.version)
+            .with_tier(ExtensionTier::from_str_lossy(manifest_tier(manifest)))
+            .with_trigger(trigger);
+        if let Some(pid) = parent_invocation_id {
+            ctx = ctx.with_parent_invocation_id(pid);
+        }
+        if let Some(llm_spec) = manifest_to_active_llm_spec(manifest) {
+            ctx = ctx.with_llm_spec(llm_spec);
+        }
+        if let Some(q) = query {
+            if let Some(slug) = q
+                .extra_params
+                .get("slug")
+                .map(String::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                ctx = ctx.with_slug(slug);
+            }
+            if let Some(uid) = q
+                .extra_params
+                .get("requested_by_user_id")
+                .map(String::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                ctx = ctx.with_actor_user_id(uid);
+            }
+        }
+        ctx
+    }
+
+    fn default_authorize_manifest(
+        ctx: &InvocationContext,
+        manifest: &ExtensionManifestProto,
+    ) -> InvocationDecision {
+        default_oss_authorize(
+            ctx,
+            (manifest.tier != 0).then(|| manifest_tier(manifest)),
+            (manifest.license_class != 0).then(|| manifest_license_class(manifest)),
+            manifest_min_plan_tier(manifest),
+            manifest.requires_manual_approval,
+        )
+    }
+
+    async fn authorize_invocation(
+        &self,
+        ctx: &InvocationContext,
+        manifest: &ExtensionManifestProto,
+    ) -> InvocationDecision {
+        if let Some(hook_state) = self.resolve_hook_state() {
+            return hook_state
+                .hooks
+                .authorize_extension_invocation(&hook_state, ctx, manifest)
+                .await;
+        }
+        Self::default_authorize_manifest(ctx, manifest)
+    }
+
+    async fn record_usage_event(&self, event: &ExtensionUsageEvent) {
+        if let Some(hook_state) = self.resolve_hook_state() {
+            if let Err(err) = hook_state
+                .hooks
+                .record_extension_usage(&hook_state, event)
+                .await
+            {
+                tracing::warn!(
+                    extension_id = %event.extension_id,
+                    error = %err,
+                    "Failed to record extension usage event via ServerExtensionHooks"
+                );
+            }
+        }
+    }
+
     fn execute_waves_sync(
         &self,
         domains: Option<&[CapabilityDomain]>,
@@ -958,6 +1249,7 @@ impl ExtensionHub {
     ) {
         let plan = self.plan_execution_waves(domains);
         let mut envelopes_by_id: HashMap<String, Vec<ExtensionEnvelopeProto>> = HashMap::new();
+        let mut invocation_ids_by_ext: HashMap<String, String> = HashMap::new();
         let mut succeeded_ids: HashSet<String> = HashSet::new();
         let mut max_wave_by_domain: HashMap<i32, u32> = HashMap::new();
         let mut skipped_by_domain: HashMap<i32, Vec<String>> = HashMap::new();
@@ -977,22 +1269,52 @@ impl ExtensionHub {
                     if sub_query.upstream_envelopes.is_empty() && !upstream_envs.is_empty() {
                         sub_query.upstream_envelopes = upstream_envs.clone();
                     }
-                    let res = match entry.driver_slot.as_ref() {
-                        ExtensionDriverSlot::DeclarativeOrOpenApi(pkg) => {
-                            if pkg.has_catalog_rules() {
-                                Ok(execute_catalog_rules(pkg, &entry.manifest, &sub_query))
-                            } else if has_declared_upstream(&entry.manifest) && !pkg.has_live_http()
-                            {
-                                execute_upstream_yaml_mapper(pkg, &entry.manifest, &sub_query)
-                            } else {
-                                Ok(Vec::new())
-                            }
-                        }
-                        ExtensionDriverSlot::Native(adapter) => {
-                            adapter.execute_with_upstream_sync(&sub_query, &upstream_envs)
-                        }
+                    let trigger = if wave_idx > 0 && !planned.upstream_ids.is_empty() {
+                        InvocationTrigger::Dependency
+                    } else {
+                        InvocationTrigger::UserRequest
                     };
-                    if let Ok(envs) = res {
+                    let parent_inv_id = planned
+                        .upstream_ids
+                        .iter()
+                        .find_map(|up_id| invocation_ids_by_ext.get(up_id).cloned());
+                    let ctx = Self::invocation_ctx_for(
+                        &entry.manifest,
+                        trigger,
+                        parent_inv_id,
+                        Some(&sub_query),
+                    );
+                    let (exec_res, event) = MeterScope::run_sync(ctx.clone(), || {
+                        let dec = Self::default_authorize_manifest(&ctx, &entry.manifest);
+                        if !matches!(dec, InvocationDecision::Allow) {
+                            mark_denied();
+                            return Err(anyhow!("extension invocation denied"));
+                        }
+                        let res = match entry.driver_slot.as_ref() {
+                            ExtensionDriverSlot::DeclarativeOrOpenApi(pkg) => {
+                                if pkg.has_catalog_rules() {
+                                    Ok(execute_catalog_rules(pkg, &entry.manifest, &sub_query))
+                                } else if has_declared_upstream(&entry.manifest)
+                                    && !pkg.has_live_http()
+                                {
+                                    execute_upstream_yaml_mapper(pkg, &entry.manifest, &sub_query)
+                                } else {
+                                    Ok(Vec::new())
+                                }
+                            }
+                            ExtensionDriverSlot::Native(adapter) => {
+                                adapter.execute_with_upstream_sync(&sub_query, &upstream_envs)
+                            }
+                        };
+                        if res.is_err() {
+                            mark_failed();
+                        }
+                        res
+                    });
+                    invocation_ids_by_ext
+                        .insert(entry.extension_id.clone(), event.invocation_id.clone());
+
+                    if let Ok(envs) = exec_res {
                         succeeded_ids.insert(entry.extension_id.clone());
                         if !envs.is_empty() {
                             let w = max_wave_by_domain.entry(dom).or_insert(0);
@@ -1032,6 +1354,7 @@ impl ExtensionHub {
     ) {
         let plan = self.plan_execution_waves(domains);
         let mut envelopes_by_id: HashMap<String, Vec<ExtensionEnvelopeProto>> = HashMap::new();
+        let mut invocation_ids_by_ext: HashMap<String, String> = HashMap::new();
         let mut succeeded_ids: HashSet<String> = HashSet::new();
         let mut max_wave_by_domain: HashMap<i32, u32> = HashMap::new();
         let mut skipped_by_domain: HashMap<i32, Vec<String>> = HashMap::new();
@@ -1047,7 +1370,7 @@ impl ExtensionHub {
                     &envelopes_by_id,
                     &query.upstream_envelopes,
                 ) {
-                    runnable.push((planned.entry, upstream_envs));
+                    runnable.push((planned.entry, planned.upstream_ids, upstream_envs));
                 } else {
                     skipped_by_domain
                         .entry(dom)
@@ -1056,20 +1379,68 @@ impl ExtensionHub {
                 }
             }
 
-            let futs = runnable.into_iter().map(|(entry, upstream_envs)| async move {
-                let id = entry.extension_id.clone();
-                let dom = entry.manifest.domain;
-                let mut sub_query = query.clone();
-                if sub_query.upstream_envelopes.is_empty() && !upstream_envs.is_empty() {
-                    sub_query.upstream_envelopes = upstream_envs.clone();
-                }
-                let res = self
-                    .execute_single_entry_internal(&entry, &sub_query, &upstream_envs, http, env, false)
+            let inv_map_snapshot = &invocation_ids_by_ext;
+            let futs = runnable
+                .into_iter()
+                .map(|(entry, upstream_ids, upstream_envs)| async move {
+                    let id = entry.extension_id.clone();
+                    let dom = entry.manifest.domain;
+                    let mut sub_query = query.clone();
+                    if sub_query.upstream_envelopes.is_empty() && !upstream_envs.is_empty() {
+                        sub_query.upstream_envelopes = upstream_envs.clone();
+                    }
+                    let trigger = if wave_idx > 0 && !upstream_ids.is_empty() {
+                        InvocationTrigger::Dependency
+                    } else {
+                        InvocationTrigger::UserRequest
+                    };
+                    let parent_inv_id = upstream_ids
+                        .iter()
+                        .find_map(|up_id| inv_map_snapshot.get(up_id).cloned());
+                    let ctx = Self::invocation_ctx_for(
+                        &entry.manifest,
+                        trigger,
+                        parent_inv_id,
+                        Some(&sub_query),
+                    );
+                    let (res, event) = MeterScope::run(ctx.clone(), async {
+                        let dec = self.authorize_invocation(&ctx, &entry.manifest).await;
+                        if !matches!(dec, InvocationDecision::Allow) {
+                            mark_denied();
+                            return Ok(None);
+                        }
+                        let exec_res = self
+                            .execute_single_entry_internal(
+                                &entry,
+                                &sub_query,
+                                &upstream_envs,
+                                http,
+                                env,
+                                false,
+                            )
+                            .await;
+                        match &exec_res {
+                            Err(_) => mark_failed(),
+                            Ok(Some(envs))
+                                if !envs.is_empty()
+                                    && envs.iter().all(|e| e.cached)
+                                    && crate::metering::current_dims()
+                                        .map(|d| d.external_api_calls == 0)
+                                        .unwrap_or(false) =>
+                            {
+                                mark_cached();
+                            }
+                            _ => {}
+                        }
+                        exec_res
+                    })
                     .await;
-                (id, dom, res)
-            });
+                    self.record_usage_event(&event).await;
+                    (id, dom, res, event.invocation_id)
+                });
 
-            for (id, dom, res) in join_all(futs).await {
+            for (id, dom, res, inv_id) in join_all(futs).await {
+                invocation_ids_by_ext.insert(id.clone(), inv_id);
                 match res {
                     Ok(Some(envs)) => {
                         succeeded_ids.insert(id.clone());
@@ -1097,7 +1468,7 @@ impl ExtensionHub {
             .extensions
             .iter()
             .filter(|(_, e)| {
-                if !e.manifest.enabled {
+                if !e.manifest.enabled || manifest_is_lazy(&e.manifest) {
                     return false;
                 }
                 let prim = CapabilityDomain::try_from(e.manifest.domain)
@@ -1222,6 +1593,87 @@ impl ExtensionHub {
                 .ok_or_else(|| anyhow!("Extension '{}' not found", extension_id.trim()))?
         };
 
+        let has_active_scope = MeterScope::current().is_some();
+        let trigger = if has_active_scope && query.extra_params.contains_key("lazy_job_id") {
+            InvocationTrigger::LazyJob
+        } else {
+            InvocationTrigger::AdminTest
+        };
+        let parent_inv_id = crate::metering::current_invocation_id();
+        let ctx = Self::invocation_ctx_for(&entry.manifest, trigger, parent_inv_id, Some(query));
+
+        if has_active_scope {
+            return if let Some(llm_spec) = manifest_to_active_llm_spec(&entry.manifest) {
+                with_active_llm_spec(
+                    llm_spec,
+                    self.execute_test_fetch_inner(entry, query, http, env, &ctx, true),
+                )
+                .await
+            } else {
+                self.execute_test_fetch_inner(entry, query, http, env, &ctx, true)
+                    .await
+            };
+        }
+
+        let (res, event) = MeterScope::run(ctx.clone(), async {
+            self.execute_test_fetch_inner(entry, query, http, env, &ctx, false)
+                .await
+        })
+        .await;
+        self.record_usage_event(&event).await;
+        res
+    }
+
+    async fn execute_test_fetch_inner(
+        &self,
+        entry: RegisteredExtensionEntry,
+        query: &ExtensionQueryProto,
+        http: &HttpClient,
+        env: &EnvConfig,
+        ctx: &InvocationContext,
+        caller_opened_scope: bool,
+    ) -> Result<ExtensionTestFetchResult> {
+        let mut auth_manifest = entry.manifest.clone();
+        if caller_opened_scope && query.extra_params.contains_key("lazy_job_id") {
+            // `LazyExecutor` already gated `requires_manual_approval && trigger != "approved"` before
+            // dispatching `test_fetch`; prevent double-gating explicitly approved lazy jobs.
+            auth_manifest.requires_manual_approval = false;
+        }
+        let decision = self.authorize_invocation(ctx, &auth_manifest).await;
+        if !matches!(decision, InvocationDecision::Allow) {
+            mark_denied();
+            let (status, reason) = match decision {
+                InvocationDecision::Deny { reason, .. } => ("denied", reason),
+                InvocationDecision::RequireApproval { reason } => ("awaiting_approval", reason),
+                InvocationDecision::Allow => ("allowed", String::new()),
+            };
+            let checked_at = now_iso();
+            {
+                let mut guard = self.state.write().expect("ExtensionHub write lock");
+                if let Some(reg) = guard.extensions.get_mut(&entry.extension_id) {
+                    reg.health_status = status.to_string();
+                    reg.last_checked_at = Some(checked_at);
+                }
+            }
+            return Ok(ExtensionTestFetchResult {
+                extension_id: entry.extension_id.clone(),
+                ok: false,
+                health_status: status.to_string(),
+                latency_ms: 0,
+                envelope_count: 0,
+                protobuf_byte_len: 0,
+                protobuf_base64: String::new(),
+                protobuf_wire_bytes: Vec::new(),
+                canonical_json: json!({}),
+                http_preview: json!({
+                    "resolved": false,
+                    "mode": "authorization_gate",
+                    "reason": reason,
+                }),
+                error: Some(reason),
+            });
+        }
+
         let mut test_query = query.clone();
         let mut upstream_envs: Vec<ExtensionEnvelopeProto> = test_query.upstream_envelopes.clone();
         if has_declared_upstream(&entry.manifest) && upstream_envs.is_empty() {
@@ -1247,6 +1699,17 @@ impl ExtensionHub {
             };
             let up_futs = upstream_entries.into_iter().map(|up| async move {
                 let id = up.extension_id.clone();
+                let up_ctx = Self::invocation_ctx_for(
+                    &up.manifest,
+                    InvocationTrigger::Dependency,
+                    Some(ctx.invocation_id.clone().unwrap_or_default())
+                        .filter(|s| !s.is_empty()),
+                    Some(query),
+                );
+                let up_dec = self.authorize_invocation(&up_ctx, &up.manifest).await;
+                if !matches!(up_dec, InvocationDecision::Allow) {
+                    return (id, Ok(None));
+                }
                 let res = self
                     .execute_single_entry_internal(&up, query, &[], http, env, false)
                     .await;
@@ -1358,6 +1821,7 @@ impl ExtensionHub {
                 let status = if raw_msg.contains("AUTH_MISSING") {
                     "auth_missing"
                 } else {
+                    mark_failed();
                     "error"
                 };
                 let msg =
@@ -1398,17 +1862,34 @@ impl ExtensionHub {
         env: &EnvConfig,
         is_test_fetch: bool,
     ) -> Result<Option<Vec<ExtensionEnvelopeProto>>> {
+        let db_opt = self.resolve_hook_state().map(|s| s.db);
+        let hub_arc = self
+            .self_weak
+            .read()
+            .expect("ExtensionHub self_weak read")
+            .upgrade();
+
         if entry.manifest.builtin
             && crate::modules::routing_providers::RoutingProviderKind::from_id_or_alias(
                 &entry.extension_id,
             )
             .is_some()
         {
-            return crate::modules::routing_providers::probe_routing_extension(
+            return crate::extensions::shared_cache::get_or_fetch(
+                &self.shared_cache,
+                db_opt.as_ref(),
+                hub_arc.as_deref(),
                 &entry.manifest,
                 query,
-                http,
-                env,
+                || async {
+                    crate::modules::routing_providers::probe_routing_extension(
+                        &entry.manifest,
+                        query,
+                        http,
+                        env,
+                    )
+                    .await
+                },
             )
             .await
             .map(Some);
@@ -1427,14 +1908,24 @@ impl ExtensionHub {
                         return Ok(Some(out));
                     }
                     let lim = self.limiter_for(&entry.manifest);
-                    match execute_live_http(
-                        pkg,
+                    match crate::extensions::shared_cache::get_or_fetch(
+                        &self.shared_cache,
+                        db_opt.as_ref(),
+                        hub_arc.as_deref(),
                         &entry.manifest,
                         query,
-                        http,
-                        env,
-                        &self.http_cache,
-                        &lim,
+                        || async {
+                            execute_live_http(
+                                pkg,
+                                &entry.manifest,
+                                query,
+                                http,
+                                env,
+                                &self.http_cache,
+                                &lim,
+                            )
+                            .await
+                        },
                     )
                     .await
                     {
@@ -1454,10 +1945,20 @@ impl ExtensionHub {
                 }
                 Ok(Some(out))
             }
-            ExtensionDriverSlot::Native(adapter) => adapter
-                .execute_with_upstream(query, upstream, http, env)
-                .await
-                .map(Some),
+            ExtensionDriverSlot::Native(adapter) => crate::extensions::shared_cache::get_or_fetch(
+                &self.shared_cache,
+                db_opt.as_ref(),
+                hub_arc.as_deref(),
+                &entry.manifest,
+                query,
+                || async {
+                    adapter
+                        .execute_with_upstream(query, upstream, http, env)
+                        .await
+                },
+            )
+            .await
+            .map(Some),
         }
     }
 
@@ -1967,6 +2468,14 @@ fn entry_to_admin_json(
         }
     };
 
+    let tier = manifest_tier(m);
+    let license_class = manifest_license_class(m);
+    let execution_mode = manifest_execution_mode(m);
+    let requires_manual_approval = m.requires_manual_approval;
+    let min_plan_tier = m.min_plan_tier.trim();
+    let metering_dims = manifest_metering_dimensions(m);
+    let section_id = manifest_section_id(m);
+
     let mut obj = json!({
         "extensionId": m.extension_id,
         "name": m.name,
@@ -1977,6 +2486,13 @@ fn entry_to_admin_json(
         "additionalDomains": m.additional_domains.iter().filter_map(|&d| CapabilityDomain::try_from(d).ok()).map(capability_domain_slug).collect::<Vec<_>>(),
         "driverKind": driver_kind_slug(driver),
         "driverLabel": driver_kind_label(driver),
+        "tier": tier,
+        "licenseClass": license_class,
+        "executionMode": execution_mode,
+        "requiresManualApproval": requires_manual_approval,
+        "minPlanTier": min_plan_tier,
+        "meteringDimensions": metering_dims,
+        "sectionId": section_id,
         "enabled": m.enabled,
         "builtin": m.builtin,
         "priority": m.priority,

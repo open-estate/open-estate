@@ -5,8 +5,7 @@
 //   3. Native OpenAI Responses API structured real-estate localization (zero external Google Translate calls)
 
 use crate::ai::llm::{
-    global_llm_cache, parse_model_spec, resolve_model_specs_with_effort, responses_json_with_cache,
-    LlmCache, LlmCallOptions, DEFAULT_LLM_MODEL,
+    global_llm_cache, responses_json_with_cache, LlmCache, LlmCallOptions,
 };
 use crate::guardrails::GuardrailError;
 use crate::shared::{localize_compass_in_cjk_value, now_iso, EnvConfig, HttpClient};
@@ -375,10 +374,7 @@ async fn translate_report_inner(
     if !report.is_object() || !has_address {
         return Err(GuardrailError::new(
             "INVALID_REPORT_OBJECT",
-            format!(
-                "Translation is restricted to verified {} property reports.",
-                env.brand_name()
-            ),
+            "Translation is restricted to verified Open Estate property reports.",
             400,
         )
         .into());
@@ -476,15 +472,14 @@ async fn translate_report_inner(
     // 3. OpenAI Responses API structured real-estate localization (ONLY when not already embedded / cached)
     if env.llm_configured() {
         let instructions = format!(
-            "You are a professional multilingual US real-estate analyst localizing a {brand} property due-diligence report into {label}.\n\
+            "You are a professional multilingual US real-estate analyst localizing a Open Estate property due-diligence report into {label}.\n\
              Rules:\n\
              1. Keep ALL dollar figures, percentages, distances, proper US street names, school names, and official acronyms (Prop 13, ADU, JADU, FEMA, SFHA, CAASPP, Superfund/NPL, AVM) accurate and clear — keep proper street/school names in English (or English + target-language note where helpful).\n\
              2. Use natural, idiomatic {label} suitable for homebuyers.\n\
              3. Keep riskMatrix[].likelihood and riskMatrix[].impact strictly as 'low' | 'medium' | 'high'. Preserve exact array lengths. Empty strings must remain \"\".\n\
              4. Localize compass directions and abbreviations into the target language (in Chinese: N/S/E/W/NE/NW/SE/SW become 北/南/东/西/东北/西北/东南/西南; a house sitting N and facing S is 坐北朝南 — never 坐N朝S. In Spanish: norte/sur/este/oeste/noreste/noroeste/sureste/suroeste).\n\
              5. NEVER mention other real-estate portals, brokerages, or their trademarks (Zillow, Zestimate, ZHVI, ZORI, Redfin, Walk Score, Realtor.com, Homes.com, Trulia, Movoto, Compass, Opendoor). Translate or replace any source references using ONLY: \"Third-party estimate\" / \"第三方估值\" / \"Estimación de terceros\" (never call a third-party figure \"True Estimate\" / \"真实估值\" / \"Estimación Real\"), \"ZIP home-value index\" / \"邮编房价指数\" / \"Índice de valor del código postal\", \"ZIP rent index\" / \"邮编租金指数\" / \"Índice de renta del código postal\", and \"Walkability score\" / \"步行便利指数\" / \"Índice de caminabilidad\".",
-            label = lang_cfg.label,
-            brand = env.brand_name()
+            label = lang_cfg.label
         );
 
         let user_prompt = format!(
@@ -498,14 +493,9 @@ async fn translate_report_inner(
             instructions,
             user_prompt,
             translation_schema(),
-        );
-        let mut models = resolve_model_specs_with_effort(env, Some("low"));
-        let base_model =
-            parse_model_spec(env.get("LLM_MODEL").unwrap_or(DEFAULT_LLM_MODEL), None).model;
-        if !base_model.is_empty() && !models.contains(&base_model) {
-            models.push(base_model);
-        }
-        opts.models = models;
+        )
+        .with_task("report_translation")
+        .with_profile("writing_light");
         opts.timeout_ms = Some(90_000);
         opts.refresh = refresh;
 

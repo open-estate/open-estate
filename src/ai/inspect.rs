@@ -180,18 +180,15 @@ pub async fn analyze_inspection(
         wrap_untrusted_block("untrusted_document_text", &batch.sanitized_text)
     );
 
-    let instructions = crate::shared::apply_brand_to_str(
-        INSPECTION_INSTRUCTIONS,
-        &env.brand_name(),
-        &env.brand_domain(),
-    );
     let mut opts = LlmCallOptions::new(
         "inspection_review",
         "inspection_review",
-        instructions,
+        INSPECTION_INSTRUCTIONS,
         prompt,
         inspection_schema(),
-    );
+    )
+    .with_task("inspection_analysis")
+    .with_profile("deep_analysis");
     opts.timeout_ms = Some(240_000);
 
     let res = responses_json_with_cache(http, env, opts, cache).await?;
@@ -243,15 +240,14 @@ pub async fn analyze_inspection(
         warnings.push(format!("Primary LLM unavailable; fell back to {}.", res.model));
     }
 
-    let brand_name = env.brand_name();
     let src_label = match res.effort.as_deref() {
         Some(eff) => format!(
-            "{brand_name} AI Inspection Reviewer ({} · {eff}) over {}",
+            "Open Estate AI Inspection Reviewer ({} · {eff}) over {}",
             res.model,
             file_names.join(", ")
         ),
         None => format!(
-            "{brand_name} AI Inspection Reviewer ({}) over {}",
+            "Open Estate AI Inspection Reviewer ({}) over {}",
             res.model,
             file_names.join(", ")
         ),

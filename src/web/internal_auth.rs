@@ -390,6 +390,16 @@ fn is_exempt_from_internal_auth(method: &Method, path: &str, headers: &HeaderMap
     if *method == Method::POST && path == "/api/billing/webhook" {
         return true;
     }
+    if *method == Method::POST
+        && (path == "/api/webhooks/inbound-email" || path == "/api/webhooks/gmail-push")
+    {
+        return true;
+    }
+    if (*method == Method::GET || *method == Method::HEAD || *method == Method::POST)
+        && path.starts_with("/u/section/")
+    {
+        return true;
+    }
     if (*method == Method::GET || *method == Method::HEAD)
         && (path == "/auth/verify" || path == "/api/auth/verify")
     {
@@ -578,10 +588,7 @@ pub async fn internal_auth_middleware(
     {
         return guardrail_error_to_response(GuardrailError::new(
             "AUTOMATED_SCRAPER_BLOCKED",
-            format!(
-                "Automated scripts and scrapers are prohibited on {} AI endpoints.",
-                state.env.brand_name()
-            ),
+            "Automated scripts and scrapers are prohibited on Open Estate AI endpoints.",
             403,
         ));
     }
@@ -679,10 +686,7 @@ pub async fn internal_auth_middleware(
             if sec_fetch_site.eq_ignore_ascii_case("cross-site") {
                 return guardrail_error_to_response(GuardrailError::new(
                     "CROSS_ORIGIN_BLOCKED",
-                    format!(
-                        "Cross-site requests to {} endpoints are prohibited.",
-                        state.env.brand_name()
-                    ),
+                    "Cross-site requests to Open Estate endpoints are prohibited.",
                     403,
                 ));
             }

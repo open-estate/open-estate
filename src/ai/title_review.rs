@@ -9,9 +9,7 @@ use crate::ai::doc_pipeline::{
     append_scrubbed_lines_warning, clip_sanitized_text, redact_pii_string_array,
     resolve_report_display_address, stamp_ai_enhancement_meta,
 };
-use crate::ai::llm::{
-    resolve_model_specs_with_effort, responses_json_with_cache, LlmCache, LlmCallOptions,
-};
+use crate::ai::llm::{responses_json_with_cache, LlmCache, LlmCallOptions};
 use crate::ai::pdf::{extract_and_ocr_uploads_async, UploadedDocInput};
 use crate::guardrails::{
     inspect_output_guardrail, scrub_sensitive_text, wrap_untrusted_block, DocumentKind,
@@ -845,8 +843,9 @@ pub async fn analyze_title_report(
             instructions,
             prompt,
             ai_title_schema(),
-        );
-        opts.models = resolve_model_specs_with_effort(env, Some("medium"));
+        )
+        .with_task("title_review")
+        .with_profile("deep_analysis");
         opts.max_output_tokens = Some(4_096);
         opts.timeout_ms = Some(75_000);
 
@@ -890,8 +889,7 @@ pub async fn analyze_title_report(
         data: parsed,
         sources: vec![SourceItem::new(
             format!(
-                "{} Title & Lien Reviewer (PII-Redacted) over {}",
-                env.brand_name(),
+                "Open Estate Title & Lien Reviewer (PII-Redacted) over {}",
                 file_names.join(", ")
             ),
             "https://www.alta.org/",

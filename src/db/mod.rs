@@ -1,9 +1,16 @@
 // Dual SQLite WAL + OCI MySQL HeatWave connection pool, schema bootstrapper, L1 Moka caches,
 // typed dialect-neutral query helpers, and live database migration engine.
 
+pub mod lazy_store;
+pub mod metering_store;
 pub mod migrate;
 pub mod schema;
+pub mod shared_cache_store;
 
+pub use lazy_store::{
+    compute_exponential_backoff_secs, deterministic_section_sub_event_key, LazyExtensionJobRow,
+    PropertyLazyArtifactRow, ReportSectionSubscriptionRow,
+};
 pub use migrate::{
     ensure_cached_reports_upgrades_mysql, ensure_cached_reports_upgrades_sqlite, migrate_database,
     migrate_database_urls, migrate_database_with_batch, MigrationSummary,
@@ -12,14 +19,14 @@ pub use schema::{
     assert_safe_ident, build_insert_ignore, build_listing_factors_upsert,
     build_match_feedback_upsert, build_mysql_upsert, build_school_metrics_upsert,
     build_sqlite_upsert, build_user_profile_upsert, classify_asset_class, format_listing_row,
-    grade_to_score, listing_slug, mysql_ddl, normalize_listing_status, normalize_property_category,
-    school_grade_to_min_score, score_to_school_grade, sqlite_ddl, AdminAuditLogRow,
-    AdminListingPatch, AdminReportSummaryRow, AgentMatchRequestRow, AppUserRow, BuildQueueJobInput,
-    BuildQueueJobView, InstalledExtensionRow, ListingFactorsRow, ListingRow, MatchFeedbackRow,
-    RecommendedAgentRow, SchoolMetricRow, SystemModuleRow, UserProfileRow,
-    CACHED_REPORTS_UPGRADE_COLS, LISTINGS_SHOPPING_UPGRADE_COLS, LISTING_FACTORS_COLS,
-    MATCH_FEEDBACK_COLS, SUBSCRIPTIONS_UPGRADE_COLS, TABLE_NAMES, USER_PROFILES_COLS,
-    WATCHED_ZIPS_UPGRADE_COLS,
+    grade_to_score, lazy_mysql_ddl, lazy_sqlite_ddl, listing_slug, mysql_ddl,
+    normalize_listing_status, normalize_property_category, school_grade_to_min_score,
+    score_to_school_grade, sqlite_ddl, AdminAuditLogRow, AdminListingPatch, AdminReportSummaryRow,
+    AgentMatchRequestRow, AppUserRow, BuildQueueJobInput, BuildQueueJobView, InstalledExtensionRow,
+    ListingFactorsRow, ListingRow, MatchFeedbackRow, RecommendedAgentRow, SchoolMetricRow,
+    SystemModuleRow, UserProfileRow, CACHED_REPORTS_UPGRADE_COLS, LAZY_TABLE_NAMES,
+    LISTINGS_SHOPPING_UPGRADE_COLS, LISTING_FACTORS_COLS, MATCH_FEEDBACK_COLS,
+    SUBSCRIPTIONS_UPGRADE_COLS, TABLE_NAMES, USER_PROFILES_COLS, WATCHED_ZIPS_UPGRADE_COLS,
 };
 
 use crate::shared::{
@@ -870,9 +877,13 @@ impl DbStore {
                         // Upgrade pre-existing `cached_reports` columns BEFORE `sqlite_ddl()` creates
                         // indexes referencing `osrm_degraded`.
                         ensure_cached_reports_upgrades_sqlite(&mut *conn).await?;
-                        for stmt in sqlite_ddl() {
+                        for stmt in sqlite_ddl().iter().chain(lazy_sqlite_ddl().iter()) {
                             sqlx::query(stmt).execute(&mut *conn).await?;
                         }
+                        metering_store::ensure_metering_schema_sqlite_conn(&mut *conn).await?;
+                        shared_cache_store::ensure_shared_cache_schema_sqlite_conn(&mut *conn).await?;
+                        crate::scheduler::store::ensure_scheduler_schema_sqlite_conn(&mut *conn)
+                            .await?;
                         for (tbl, upgrade_cols) in [
                             ("watched_zips", WATCHED_ZIPS_UPGRADE_COLS),
                             ("subscriptions", SUBSCRIPTIONS_UPGRADE_COLS),
@@ -896,9 +907,12 @@ impl DbStore {
                         }
                     }
                     DbBackend::MySql { pool, is_heatwave } => {
-                        for stmt in mysql_ddl() {
+                        for stmt in mysql_ddl().iter().chain(lazy_mysql_ddl().iter()) {
                             sqlx::query(stmt).execute(pool).await?;
                         }
+                        metering_store::ensure_metering_schema_mysql_pool(pool).await?;
+                        shared_cache_store::ensure_shared_cache_schema_mysql_pool(pool).await?;
+                        crate::scheduler::store::ensure_scheduler_schema_mysql_pool(pool).await?;
                         // Safe upgrade check if `listings` existed prior to shopping-facet columns
                         let existing_mysql_cols = sqlx::query(
                             "SELECT COLUMN_NAME AS col_name FROM INFORMATION_SCHEMA.COLUMNS
@@ -1876,9 +1890,9 @@ impl DbStore {
             return Ok(false);
         }
         let now = now_iso();
-        let until =
-            (chrono::Utc::now() + chrono::Duration::seconds(std::cmp::Ord::max(lease_secs, 30)))
-                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let until = (chrono::Utc::now()
+            + chrono::Duration::seconds(std::cmp::Ord::max(lease_secs, 30)))
+        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
 
         let update_sql = "UPDATE watched_zips
                           SET sync_lease_owner = ?, sync_lease_until = ?
@@ -2069,7 +2083,10 @@ impl DbStore {
         };
         if expires_at <= now || email.is_empty() {
             let _ = self
-                .execute_params("DELETE FROM alert_manage_tokens WHERE token = ?", &[clean.into()])
+                .execute_params(
+                    "DELETE FROM alert_manage_tokens WHERE token = ?",
+                    &[clean.into()],
+                )
                 .await;
             return Ok(None);
         }
@@ -4864,14 +4881,13 @@ impl DbStore {
             if let Some(z) = zip.map(str::trim).filter(|s| !s.is_empty()) {
                 let digits: String = z.chars().filter(|c| c.is_ascii_digit()).take(5).collect();
                 if !digits.is_empty() {
-                    cond = cond.add(
-                        Expr::col(Alias::new("zips_json")).like(format!("%{digits}%")),
-                    );
+                    cond = cond.add(Expr::col(Alias::new("zips_json")).like(format!("%{digits}%")));
                     has_cond = true;
                 }
             }
             if let Some(act) = active {
-                cond = cond.add(Expr::col(Alias::new("active")).eq(if act { 1_i64 } else { 0_i64 }));
+                cond =
+                    cond.add(Expr::col(Alias::new("active")).eq(if act { 1_i64 } else { 0_i64 }));
                 has_cond = true;
             }
             if let Some(freq) = frequency.map(str::trim).filter(|s| !s.is_empty()) {

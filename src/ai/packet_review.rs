@@ -22,9 +22,7 @@ use crate::ai::doc_pipeline::{
     init_deterministic_ai_meta, redact_pii_string_array, stamp_ai_enhancement_meta,
 };
 use crate::ai::hoa_review::{parse_hoa_documents, DocPageCitation};
-use crate::ai::llm::{
-    resolve_model_specs_with_effort, responses_json_with_cache, LlmCache, LlmCallOptions,
-};
+use crate::ai::llm::{responses_json_with_cache, LlmCache, LlmCallOptions};
 use crate::ai::pdf::{
     extract_and_ocr_uploads_async, ExtractedDocument, UploadedDocInput, MAX_PACKET_DOCUMENTS,
 };
@@ -1836,8 +1834,9 @@ pub async fn analyze_disclosure_packet(
             PACKET_REVIEW_INSTRUCTIONS,
             prompt,
             packet_review_schema(),
-        );
-        opts.models = resolve_model_specs_with_effort(env, Some("medium"));
+        )
+        .with_task("packet_review")
+        .with_profile("deep_analysis");
         opts.max_output_tokens = Some(4_096);
         opts.timeout_ms = Some(120_000);
 
@@ -1889,24 +1888,15 @@ pub async fn analyze_disclosure_packet(
     }
 
     let file_names: Vec<String> = batch.documents.iter().map(|d| d.name.clone()).collect();
-    let packet_src_url = {
-        let dom = env.brand_domain();
-        if dom == "open-estate.local" {
-            "https://openestate.org/packet-review".to_string()
-        } else {
-            format!("https://{dom}/packet-review")
-        }
-    };
     Ok(ModuleOutput {
         data: parsed,
         sources: vec![SourceItem::new(
             format!(
-                "{} Multi-Document Disclosure Packet & Contradiction Engine over {} file(s) ({})",
-                env.brand_name(),
+                "Open Estate Multi-Document Disclosure Packet & Contradiction Engine over {} file(s) ({})",
                 file_names.len(),
                 file_names.iter().take(6).cloned().collect::<Vec<_>>().join(", ")
             ),
-            packet_src_url,
+            "https://openestate.org/packet-review",
         )],
         warnings,
     })

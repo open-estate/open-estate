@@ -3,9 +3,15 @@
 // seller questions, fit/tradeoffs, 1-yr/5-yr outlook, and bilingual EN + 简体中文 feng shui synthesis.
 
 use crate::ai::brief::build_brief;
-use crate::ai::llm::{
-    responses_json_with_cache, LlmCache, LlmCallOptions,
+use crate::ai::llm::{responses_json_with_cache, LlmCache, LlmCallOptions};
+use crate::db::shared_cache_store::{GeoIndexColumns, SharedDataRecordRow};
+use crate::db::DbStore;
+use crate::extensions::proto::shared_v1::NeighborhoodNarrativeProto;
+use crate::extensions::shared_cache::{
+    dataset_ids, encode_geohash, get_shared_dataset_proto, put_shared_dataset_proto, ShareScope,
+    ShareScopeExt, SharedExtensionCache,
 };
+use crate::extensions::ExtensionHub;
 use crate::shared::{
     compass_word, localize_compass_in_cjk, localize_compass_in_cjk_value, now_iso,
     sitting_facing_zh, EnvConfig, HttpClient, ModuleOutput, SourceItem,
@@ -438,7 +444,6 @@ fn fmt_usd(n: Option<f64>) -> String {
 /// Deterministic, schema-valid analyst synthesis grounded strictly in `report` facts, valuation, hazards,
 /// environment, civic, and feng-shui sections (used when `OPENAI_API_KEY` is unconfigured or in offline mode).
 pub fn build_deterministic_analyst_fallback(report: &Value) -> Value {
-    let (brand_name, _) = crate::shared::report_brand(report);
     let address = report
         .pointer("/meta/displayAddress")
         .or_else(|| report.pointer("/geo/displayAddress"))
@@ -624,7 +629,7 @@ pub fn build_deterministic_analyst_fallback(report: &Value) -> Value {
                 fmt_usd(est_low),
                 fmt_usd(est_high)
             ),
-            format!("Overall {brand_name} due-diligence composite score is {overall_score}/100."),
+            format!("Overall Open Estate due-diligence composite score is {overall_score}/100."),
             format!("Physical footprint offers {beds}, {baths}, {sqft} on a {lot_sqft}."),
             "Public water utility and neighborhood amenity access metrics are documented in public datasets."
                 .to_string(),
@@ -806,7 +811,7 @@ pub fn build_deterministic_analyst_fallback(report: &Value) -> Value {
                 ],
                 "upside": [
                     format!("混合统计估值中枢为 {}（区间 {}–{}）。", fmt_usd(est_val), fmt_usd(est_low), fmt_usd(est_high)),
-                    format!("{brand_name} 综合尽调评分为 {overall_score}/100。"),
+                    format!("Open Estate 综合尽调评分为 {overall_score}/100。"),
                     format!("实体规模提供 {beds_zh}、{baths_zh}、{sqft_zh}，对应 {lot_zh}。"),
                     "公共供水系统合规模态与周边生活配套可达性均已由公开数据集完整记录。".to_string()
                 ],
@@ -921,7 +926,7 @@ pub fn build_deterministic_analyst_fallback(report: &Value) -> Value {
                 ],
                 "upside": [
                     format!("Valoración estadística combinada centrada en {} (rango {}–{}).", fmt_usd(est_val), fmt_usd(est_low), fmt_usd(est_high)),
-                    format!("Puntuación compuesta de diligencia debida {brand_name} de {overall_score}/100."),
+                    format!("Puntuación compuesta de diligencia debida Open Estate de {overall_score}/100."),
                     format!("Huella física con {beds_es}, {baths_es}, {sqft_es} en un {lot_es}."),
                     "Registros públicos documentan el sistema de agua potable y la accesibilidad a servicios del vecindario.".to_string()
                 ],
@@ -1010,6 +1015,358 @@ pub fn build_deterministic_analyst_fallback(report: &Value) -> Value {
     }))
 }
 
+pub const NEIGHBORHOOD_NARRATIVE_TTL_SECS: u64 = 30 * 86_400;
+const NEIGHBORHOOD_NARRATIVE_PARAMS_HASH: &str = "default";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NeighborhoodNarrativeScope {
+    pub scope: ShareScope,
+    pub scope_key: String,
+    pub tract: Option<String>,
+    pub geohash5: Option<String>,
+    pub geohash6: Option<String>,
+    pub geohash7: Option<String>,
+    pub city: Option<String>,
+    pub state: Option<String>,
+    pub county: Option<String>,
+    pub zip: Option<String>,
+    pub neighborhood_name: Option<String>,
+}
+
+fn non_empty_str_at(root: Option<&Value>, pointers: &[&str]) -> Option<String> {
+    let base = root?;
+    for ptr in pointers {
+        if let Some(s) = base
+            .pointer(ptr)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            return Some(s.to_string());
+        }
+    }
+    None
+}
+
+fn normalize_tract_key(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let stripped = trimmed
+        .strip_prefix("14000US")
+        .or_else(|| trimmed.strip_prefix("14000us"))
+        .unwrap_or(trimmed);
+    let digits: String = stripped.chars().filter(|c| c.is_ascii_digit()).collect();
+    if digits.len() >= 11 {
+        Some(digits[..11].to_string())
+    } else if !digits.is_empty() {
+        Some(digits)
+    } else {
+        Some(stripped.to_ascii_lowercase())
+    }
+}
+
+/// Derives the shared `NEIGHBORHOOD_NARRATIVE` lookup scope (`CensusTract` preferred, `Geohash6` fallback)
+/// and typed geo index columns from a property `report` JSON.
+pub fn derive_neighborhood_scope(report: &Value) -> Option<NeighborhoodNarrativeScope> {
+    let geo = report.get("geo").or_else(|| report.get("geocode"));
+    let lat = geo
+        .and_then(|g| g.pointer("/refined/lat").or_else(|| g.get("lat")))
+        .and_then(Value::as_f64)
+        .filter(|v| v.is_finite());
+    let lon = geo
+        .and_then(|g| g.pointer("/refined/lon").or_else(|| g.get("lon")))
+        .and_then(Value::as_f64)
+        .filter(|v| v.is_finite());
+
+    let geohash5 = match (lat, lon) {
+        (Some(la), Some(lo)) => encode_geohash(la, lo, 5),
+        _ => None,
+    };
+    let geohash6 = match (lat, lon) {
+        (Some(la), Some(lo)) => encode_geohash(la, lo, 6),
+        _ => None,
+    };
+    let geohash7 = match (lat, lon) {
+        (Some(la), Some(lo)) => encode_geohash(la, lo, 7),
+        _ => None,
+    };
+
+    let raw_tract = non_empty_str_at(
+        Some(report),
+        &[
+            "/geo/tract",
+            "/geo/censusTract",
+            "/geo/censusFips/tract",
+            "/geocode/tract",
+            "/geocode/censusTract",
+            "/facts/censusTract",
+            "/location/censusTract",
+            "/location/tract",
+        ],
+    );
+    let tract = raw_tract.as_deref().and_then(normalize_tract_key);
+
+    let (scope, scope_key) = if let Some(ref tr) = tract {
+        (ShareScope::CensusTract, tr.clone())
+    } else if let Some(ref gh6) = geohash6 {
+        (ShareScope::Geohash6, gh6.clone())
+    } else {
+        return None;
+    };
+
+    Some(NeighborhoodNarrativeScope {
+        scope,
+        scope_key,
+        tract,
+        geohash5,
+        geohash6,
+        geohash7,
+        city: non_empty_str_at(Some(report), &["/geo/city", "/geocode/city", "/location/city"]),
+        state: non_empty_str_at(
+            Some(report),
+            &["/geo/state", "/geocode/state", "/location/state"],
+        ),
+        county: non_empty_str_at(
+            Some(report),
+            &["/geo/county", "/geocode/county", "/location/county"],
+        ),
+        zip: non_empty_str_at(Some(report), &["/geo/zip", "/geocode/zip", "/location/zip"]),
+        neighborhood_name: non_empty_str_at(
+            Some(report),
+            &[
+                "/facts/neighborhood",
+                "/geo/neighborhood",
+                "/geocode/neighborhood",
+                "/location/neighborhoodName",
+            ],
+        ),
+    })
+}
+
+/// Reads a fresh (`<= 30d` TTL) tract- or geohash6-scoped `NeighborhoodNarrativeProto` from `shared_data_records`.
+pub async fn get_cached_neighborhood_narrative(
+    db: &DbStore,
+    report: &Value,
+) -> Result<Option<(SharedDataRecordRow, NeighborhoodNarrativeProto)>> {
+    let Some(ns) = derive_neighborhood_scope(report) else {
+        return Ok(None);
+    };
+    if let Some(hit) = get_shared_dataset_proto::<NeighborhoodNarrativeProto>(
+        Some(SharedExtensionCache::global()),
+        db,
+        dataset_ids::NEIGHBORHOOD_NARRATIVE,
+        ns.scope,
+        &ns.scope_key,
+        NEIGHBORHOOD_NARRATIVE_PARAMS_HASH,
+    )
+    .await?
+    {
+        return Ok(Some(hit));
+    }
+    if ns.scope == ShareScope::CensusTract {
+        if let Some(ref gh6) = ns.geohash6 {
+            return get_shared_dataset_proto::<NeighborhoodNarrativeProto>(
+                Some(SharedExtensionCache::global()),
+                db,
+                dataset_ids::NEIGHBORHOOD_NARRATIVE,
+                ShareScope::Geohash6,
+                gh6,
+                NEIGHBORHOOD_NARRATIVE_PARAMS_HASH,
+            )
+            .await;
+        }
+    }
+    Ok(None)
+}
+
+fn collect_non_empty_list(val: Option<&Value>, max_items: usize) -> Vec<String> {
+    val.and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .take(max_items)
+                .map(|s| s.to_string())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Persists generated LLM neighborhood narrative fields (`sectionNotes.neighborhood`, localized zh/es,
+/// highlights/tradeoffs, model & effort provenance) into `shared_data_records` with 30-day TTL.
+pub async fn put_neighborhood_narrative(
+    db: &DbStore,
+    report: &Value,
+    ai_data: &Value,
+) -> Result<Option<SharedDataRecordRow>> {
+    let Some(ns) = derive_neighborhood_scope(report) else {
+        return Ok(None);
+    };
+    let model = ai_data
+        .get("model")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && *s != "deterministic-fallback")
+        .map(|s| s.to_string());
+    let Some(model) = model else {
+        return Ok(None);
+    };
+    let Some(summary_en) = ai_data
+        .pointer("/sectionNotes/neighborhood")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+    else {
+        return Ok(None);
+    };
+
+    let effort = ai_data
+        .get("effort")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+    let summary_zh = ai_data
+        .pointer("/translations/zh/sectionNotes/neighborhood")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+    let summary_es = ai_data
+        .pointer("/translations/es/sectionNotes/neighborhood")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+    let highlights = collect_non_empty_list(ai_data.get("upside"), 6);
+    let tradeoffs = collect_non_empty_list(
+        ai_data
+            .get("downside")
+            .or_else(|| ai_data.pointer("/fit/tradeoffs")),
+        6,
+    );
+    let generated_at = ai_data
+        .get("generatedAt")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .unwrap_or_else(now_iso);
+
+    let msg = NeighborhoodNarrativeProto {
+        scope_key: ns.scope_key.clone(),
+        geohash6: ns.geohash6.clone(),
+        tract: ns.tract.clone(),
+        city: ns.city.clone(),
+        state: ns.state.clone(),
+        neighborhood_name: ns.neighborhood_name.clone(),
+        summary_en: summary_en.clone(),
+        summary_zh: summary_zh.clone(),
+        summary_es: summary_es.clone(),
+        highlights,
+        model: model.clone(),
+        effort: effort.clone(),
+        generated_at: generated_at.clone(),
+        tradeoffs,
+    };
+
+    let geo = GeoIndexColumns {
+        geohash5: ns.geohash5,
+        geohash6: ns.geohash6,
+        geohash7: ns.geohash7,
+        tract: ns.tract,
+        zip: ns.zip,
+        county: ns.county,
+        state: ns.state,
+        bbox_south: None,
+        bbox_west: None,
+        bbox_north: None,
+        bbox_east: None,
+    };
+    let payload_json = serde_json::to_string(&json!({
+        "scopeKey": msg.scope_key,
+        "tract": msg.tract,
+        "geohash6": msg.geohash6,
+        "summaryEn": msg.summary_en,
+        "summaryZh": msg.summary_zh,
+        "summaryEs": msg.summary_es,
+        "highlights": msg.highlights,
+        "tradeoffs": msg.tradeoffs,
+    }))
+    .ok();
+    let provenance_json = serde_json::to_string(&json!({
+        "datasetId": dataset_ids::NEIGHBORHOOD_NARRATIVE,
+        "scope": ns.scope.as_str(),
+        "model": model,
+        "effort": effort,
+        "generatedAt": generated_at,
+    }))
+    .ok();
+
+    let row = put_shared_dataset_proto(
+        Some(SharedExtensionCache::global()),
+        db,
+        dataset_ids::NEIGHBORHOOD_NARRATIVE,
+        ns.scope,
+        &ns.scope_key,
+        NEIGHBORHOOD_NARRATIVE_PARAMS_HASH,
+        geo,
+        &msg,
+        payload_json,
+        provenance_json,
+        None,
+        NEIGHBORHOOD_NARRATIVE_TTL_SECS,
+    )
+    .await?;
+    Ok(Some(row))
+}
+
+fn apply_cached_neighborhood_narrative(
+    data: &mut Value,
+    cached: &NeighborhoodNarrativeProto,
+    row: &SharedDataRecordRow,
+) {
+    if !cached.summary_en.trim().is_empty() {
+        if let Some(slot) = data.pointer_mut("/sectionNotes/neighborhood") {
+            *slot = Value::String(cached.summary_en.clone());
+        }
+    }
+    if let Some(ref zh) = cached.summary_zh {
+        if !zh.trim().is_empty() {
+            if let Some(slot) = data.pointer_mut("/translations/zh/sectionNotes/neighborhood") {
+                *slot = Value::String(zh.clone());
+            }
+        }
+    }
+    if let Some(ref es) = cached.summary_es {
+        if !es.trim().is_empty() {
+            if let Some(slot) = data.pointer_mut("/translations/es/sectionNotes/neighborhood") {
+                *slot = Value::String(es.clone());
+            }
+        }
+    }
+    if let Some(obj) = data.as_object_mut() {
+        obj.insert(
+            "neighborhoodCache".to_string(),
+            json!({
+                "cached": true,
+                "datasetId": dataset_ids::NEIGHBORHOOD_NARRATIVE,
+                "scope": row.scope,
+                "scopeKey": row.scope_key,
+                "tract": cached.tract,
+                "geohash6": cached.geohash6,
+                "model": cached.model,
+                "effort": cached.effort,
+                "generatedAt": cached.generated_at,
+            }),
+        );
+    }
+}
+
 /// Run grounded AI Analyst synthesis (`LLM_MODEL` -> `LLM_FALLBACK_MODEL`) over a Open Estate `report` JSON,
 /// with automatic Fair-Housing sanitization and deterministic fallback when AI keys are absent.
 pub async fn run_ai_analyst(
@@ -1018,7 +1375,7 @@ pub async fn run_ai_analyst(
     report: &Value,
     cache: Option<&dyn LlmCache>,
 ) -> Result<ModuleOutput> {
-    run_ai_analyst_with_refresh(http, env, report, cache, false).await
+    run_ai_analyst_with_store(http, env, None, report, cache, false).await
 }
 
 pub async fn run_ai_analyst_with_refresh(
@@ -1028,8 +1385,21 @@ pub async fn run_ai_analyst_with_refresh(
     cache: Option<&dyn LlmCache>,
     refresh: bool,
 ) -> Result<ModuleOutput> {
-    let brand_name = env.brand_name();
+    run_ai_analyst_with_store(http, env, None, report, cache, refresh).await
+}
+
+pub async fn run_ai_analyst_with_store(
+    http: &HttpClient,
+    env: &EnvConfig,
+    db: Option<&DbStore>,
+    report: &Value,
+    cache: Option<&dyn LlmCache>,
+    refresh: bool,
+) -> Result<ModuleOutput> {
     let mut warnings = Vec::new();
+    let active_db = db
+        .cloned()
+        .or_else(|| ExtensionHub::global().active_db());
 
     if !env.llm_configured() {
         let mut fallback = build_deterministic_analyst_fallback(report);
@@ -1049,29 +1419,49 @@ pub async fn run_ai_analyst_with_refresh(
         return Ok(ModuleOutput {
             data: fallback,
             sources: vec![SourceItem::new(
-                format!(
-                    "{brand_name} Deterministic Property Synthesis (grounded on cited report data)"
-                ),
+                "Open Estate Deterministic Property Synthesis (grounded on cited report data)",
                 "https://census.gov/",
             )],
             warnings,
         });
     }
 
-    let brief = build_brief(report);
-    let user_prompt = format!(
-        "Analyze the following US residential property brief and return the structured JSON assessment.\n\nPROPERTY_BRIEF_JSON:\n{}",
-        serde_json::to_string(&brief)?
-    );
+    let cached_neighborhood = if !refresh {
+        if let Some(ref store) = active_db {
+            get_cached_neighborhood_narrative(store, report)
+                .await
+                .ok()
+                .flatten()
+        } else {
+            None
+        }
+    } else {
+        None
+    };
 
-    let instructions = crate::shared::apply_brand_to_str(ANALYST_INSTRUCTIONS, &brand_name, "");
+    let brief = build_brief(report);
+    let user_prompt = if let Some((_, ref proto)) = cached_neighborhood {
+        format!(
+            "Analyze the following US residential property brief and return the structured JSON assessment.\n\nCACHED_TRACT_NEIGHBORHOOD_SUMMARY_EN:\n{}\n\nPROPERTY_BRIEF_JSON:\n{}",
+            proto.summary_en,
+            serde_json::to_string(&brief)?
+        )
+    } else {
+        format!(
+            "Analyze the following US residential property brief and return the structured JSON assessment.\n\nPROPERTY_BRIEF_JSON:\n{}",
+            serde_json::to_string(&brief)?
+        )
+    };
+
     let mut opts = LlmCallOptions::new(
         "report_synthesis",
         "property_analysis",
-        instructions,
+        ANALYST_INSTRUCTIONS,
         user_prompt,
         analysis_schema(),
-    );
+    )
+    .with_task("analyst_verdict")
+    .with_profile("reasoning_standard");
     opts.timeout_ms = Some(
         env.get("LLM_TIMEOUT_MS")
             .and_then(|s| s.trim().parse::<u64>().ok())
@@ -1123,15 +1513,20 @@ pub async fn run_ai_analyst_with_refresh(
         obj.insert("generatedAt".to_string(), Value::String(res.created_at));
     }
 
+    if let Some((ref row, ref proto)) = cached_neighborhood {
+        apply_cached_neighborhood_narrative(&mut data, proto, row);
+    } else if let Some(ref store) = active_db {
+        if let Err(e) = put_neighborhood_narrative(store, report, &data).await {
+            tracing::warn!("analyst: persist NEIGHBORHOOD_NARRATIVE failed ({e})");
+        }
+    }
+
     let src_label = match res.effort.as_deref() {
         Some(eff) => format!(
-            "{brand_name} AI Analyst ({} · {eff} reasoning) grounded on cited report data",
+            "Open Estate AI Analyst ({} · {eff} reasoning) grounded on cited report data",
             res.model
         ),
-        None => format!(
-            "{brand_name} AI Analyst ({}) grounded on cited report data",
-            res.model
-        ),
+        None => format!("Open Estate AI Analyst ({}) grounded on cited report data", res.model),
     };
 
     Ok(ModuleOutput {

@@ -141,67 +141,6 @@ pub fn normalize_retired_brand(s: &str) -> String {
         .into_owned()
 }
 
-/// Normalizes a candidate brand display name, falling back to `"Open Estate"` when blank.
-pub fn effective_brand_name(raw: &str) -> &str {
-    let t = raw.trim();
-    if t.is_empty() {
-        "Open Estate"
-    } else {
-        t
-    }
-}
-
-/// Normalizes a candidate brand domain, falling back to `"open-estate.local"` when blank.
-pub fn effective_brand_domain(raw: &str) -> &str {
-    let t = raw.trim();
-    if t.is_empty() {
-        "open-estate.local"
-    } else {
-        t
-    }
-}
-
-/// Rewrites default `"Open Estate"` / `"open-estate.local"` occurrences in a string when
-/// a custom white-label brand name or domain is active.
-pub fn apply_brand_to_str(raw: &str, brand_name: &str, brand_domain: &str) -> String {
-    let eff_name = effective_brand_name(brand_name);
-    let eff_domain = effective_brand_domain(brand_domain);
-    let mut out = raw.to_string();
-    if eff_domain != "open-estate.local" && out.contains("open-estate.local") {
-        out = out.replace("open-estate.local", eff_domain);
-    }
-    if eff_name != "Open Estate" && out.contains("Open Estate") {
-        out = out.replace("Open Estate", eff_name);
-    }
-    if eff_name != "Open Estate" && out.contains("open-estate-deal-room-comparison.csv") {
-        let brand_slug = slugify(eff_name);
-        if !brand_slug.is_empty() {
-            out = out.replace(
-                "open-estate-deal-room-comparison.csv",
-                &format!("{brand_slug}-deal-room-comparison.csv"),
-            );
-        }
-    }
-    out
-}
-
-/// Extracts the normalized `(name, domain)` configured on a report JSON value (`brand` or `meta.brand`).
-pub fn report_brand(report: &Value) -> (&str, &str) {
-    let name = report
-        .pointer("/brand/name")
-        .or_else(|| report.pointer("/meta/brand/name"))
-        .and_then(Value::as_str)
-        .map(effective_brand_name)
-        .unwrap_or("Open Estate");
-    let domain = report
-        .pointer("/brand/domain")
-        .or_else(|| report.pointer("/meta/brand/domain"))
-        .and_then(Value::as_str)
-        .map(effective_brand_domain)
-        .unwrap_or("open-estate.local");
-    (name, domain)
-}
-
 /// Renders a two-tone HTML wordmark (`Open <b>Estate</b>` or CamelCase split) from `brand_name`.
 pub fn format_brand_wordmark_html(brand_name: &str) -> String {
     format_brand_wordmark_styled_html(brand_name, None)
@@ -1030,12 +969,10 @@ impl EnvConfig {
     }
 
     pub fn llm_base_url(&self) -> Option<&str> {
-        if let Some(url) = self
-            .get("OPENAI_BASE_URL")
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-        {
-            return Some(url.trim_end_matches('/'));
+        for key in ["OPENAI_BASE_URL", "OPENAI_API_ENDPOINT"] {
+            if let Some(url) = self.get(key).map(str::trim).filter(|s| !s.is_empty()) {
+                return Some(url.trim_end_matches('/'));
+            }
         }
         let explicitly_disabled = self
             .vars
@@ -1435,7 +1372,6 @@ impl HttpClient {
     pub fn from_env(env: &EnvConfig, disk_cache_dir: Option<PathBuf>) -> Self {
         let raw_proxies = env.get("OUTBOUND_PROXY_URLS").unwrap_or("");
         let mut bypass = vec![
-            "api.rentcast.io".to_string(),
             "api.gateway.attomdata.com".to_string(),
             "api.simplyrets.com".to_string(),
             // [feat/insurance-risk]
@@ -1455,6 +1391,7 @@ impl HttpClient {
         ];
         for key in [
             "OPENAI_BASE_URL",
+            "OPENAI_API_ENDPOINT",
             "PUBLIC_BASE_URL",
             "MYSQL_HTTP_URL",
             "RESO_API_URL",
@@ -1974,7 +1911,17 @@ impl HttpClient {
                 "offline test mode: external HTTP blocked for {host_lbl}"
             ));
         }
+        crate::metering::add_external_call_with_env(Some(&self.env), &host);
         Ok(&self.direct_client)
+    }
+
+    /// Records an external HTTP call and downloaded bytes into the active `MeterScope`, if any.
+    pub fn record_external_http_response(&self, url_or_host: &str, bytes_downloaded: u64) {
+        crate::metering::add_external_call_with_bytes(
+            Some(&self.env),
+            url_or_host,
+            bytes_downloaded,
+        );
     }
 
     pub fn is_offline_external_blocked(&self) -> bool {
@@ -1982,6 +1929,7 @@ impl HttpClient {
     }
 
     pub(crate) fn make_egress_handle(&self, target: EgressTarget, host: String) -> EgressHandle {
+        crate::metering::add_external_call_with_env(Some(&self.env), &host);
         match target {
             EgressTarget::Static(idx) => {
                 let slot = &self.egress_slots[idx];
@@ -2030,11 +1978,13 @@ impl HttpClient {
                 EgressTarget::Static(idx) => {
                     if let Some(slot) = self.egress_slots.get(idx) {
                         slot.requests.fetch_add(1, Ordering::Relaxed);
+                        crate::metering::add_external_call_with_env(Some(&self.env), &host);
                         return slot.client.clone();
                     }
                 }
                 EgressTarget::Dynamic(wp) => {
                     wp.last_used_at.store(now_unix_secs(), Ordering::Relaxed);
+                    crate::metering::add_external_call_with_env(Some(&self.env), &host);
                     return wp.client.clone();
                 }
             }
@@ -2042,6 +1992,7 @@ impl HttpClient {
         if self.strict_proxy_egress && !self.should_bypass_proxy(&host) {
             return fail_closed_client();
         }
+        crate::metering::add_external_call_with_env(Some(&self.env), &host);
         self.direct_client.clone()
     }
 
@@ -2157,7 +2108,9 @@ impl HttpClient {
         if let Some(mb) = max_bytes {
             req = req.max_bytes(mb);
         }
-        req.bytes().await
+        let bytes = req.bytes().await?;
+        crate::metering::add_bytes_downloaded(bytes.len() as u64);
+        Ok(bytes)
     }
 
     /// One logical GET through the egress pool for endpoints that must be treated politely.
@@ -2180,7 +2133,9 @@ impl HttpClient {
         if let Some(hdrs) = headers {
             req = req.headers(hdrs);
         }
-        req.send_status_text().await
+        let (code, txt) = req.send_status_text().await?;
+        crate::metering::add_bytes_downloaded(txt.len() as u64);
+        Ok((code, txt))
     }
 
     pub fn is_offline_blocked(&self) -> bool {
@@ -2265,6 +2220,7 @@ impl HttpClient {
         ttl_secs: i64,
         headers: Option<&[(&str, &str)]>,
     ) -> Result<String> {
+        let before_calls = crate::metering::current_dims().map(|d| d.external_api_calls);
         let mut req = self
             .scrape_get(url_str)
             .timeout_ms(timeout_ms)
@@ -2273,7 +2229,12 @@ impl HttpClient {
         if let Some(hdrs) = headers {
             req = req.headers(hdrs);
         }
-        req.text().await
+        let txt = req.text().await?;
+        let after_calls = crate::metering::current_dims().map(|d| d.external_api_calls);
+        if matches!((before_calls, after_calls), (Some(b), Some(a)) if a > b) {
+            crate::metering::add_bytes_downloaded(txt.len() as u64);
+        }
+        Ok(txt)
     }
 
     pub async fn get_json_opts(
@@ -2284,6 +2245,7 @@ impl HttpClient {
         ttl_secs: i64,
         headers: Option<&[(&str, &str)]>,
     ) -> Result<Value> {
+        let before_calls = crate::metering::current_dims().map(|d| d.external_api_calls);
         let mut req = self
             .scrape_get(url_str)
             .timeout_ms(timeout_ms)
@@ -2292,7 +2254,20 @@ impl HttpClient {
         if let Some(hdrs) = headers {
             req = req.headers(hdrs);
         }
-        req.json_value().await
+        let txt = req.text().await?;
+        let after_calls = crate::metering::current_dims().map(|d| d.external_api_calls);
+        if matches!((before_calls, after_calls), (Some(b), Some(a)) if a > b) {
+            crate::metering::add_bytes_downloaded(txt.len() as u64);
+        }
+        serde_json::from_str::<Value>(&txt).map_err(|e| {
+            let preview: String = txt.chars().take(80).collect();
+            anyhow!(
+                "{} returned an unexpected (non-JSON) response: {} ({})",
+                url_host_label(url_str),
+                e,
+                preview.split_whitespace().collect::<Vec<_>>().join(" ")
+            )
+        })
     }
 
     pub async fn get_json(&self, url_str: &str) -> Result<Value> {
@@ -2590,6 +2565,7 @@ impl HttpClient {
             saw_direct |= is_direct;
             let req_started = tokio::time::Instant::now();
             let timeout_ms = remaining.as_millis() as u64;
+            crate::metering::add_external_call_with_env(Some(&self.env), &host);
             let resp = client_ref
                 .post(&ep)
                 .form(&[("data", query)])
@@ -2599,7 +2575,9 @@ impl HttpClient {
 
             match resp {
                 Ok(r) if r.status().is_success() => match r.text().await {
-                    Ok(txt) => match serde_json::from_str::<Value>(&txt) {
+                    Ok(txt) => {
+                        crate::metering::add_bytes_downloaded(txt.len() as u64);
+                        match serde_json::from_str::<Value>(&txt) {
                         Ok(j) if overpass_reports_failure(&j) => {
                             self.overpass_penalize(&ep, OVERPASS_BASE_PENALTY_SECS);
                             return Err(anyhow!("{host} reported a server-side query timeout"));
@@ -2627,7 +2605,8 @@ impl HttpClient {
                                 "{host} returned an unexpected (non-JSON) response"
                             ));
                         }
-                    },
+                        }
+                    }
                     Err(e) => {
                         last_msg = format!("{host} {}", net_error_reason(&e, timeout_ms));
                         if !is_direct {

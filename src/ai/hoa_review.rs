@@ -27,9 +27,7 @@ use crate::ai::doc_pipeline::{
     append_scrubbed_lines_warning, build_report_brief_or_default, clip_sanitized_text,
     init_deterministic_ai_meta, redact_pii_string_array, stamp_ai_enhancement_meta,
 };
-use crate::ai::llm::{
-    resolve_model_specs_with_effort, responses_json_with_cache, LlmCache, LlmCallOptions,
-};
+use crate::ai::llm::{responses_json_with_cache, LlmCache, LlmCallOptions};
 use crate::ai::pdf::{extract_and_ocr_uploads_async, ExtractedDocument, UploadedDocInput};
 use crate::ai::title_review::redact_title_pii;
 use crate::guardrails::{
@@ -1657,8 +1655,9 @@ pub async fn analyze_hoa_documents(
             HOA_REVIEW_INSTRUCTIONS,
             prompt,
             hoa_review_schema(),
-        );
-        opts.models = resolve_model_specs_with_effort(env, Some("medium"));
+        )
+        .with_task("hoa_review")
+        .with_profile("deep_analysis");
         opts.max_output_tokens = Some(6_144);
         opts.timeout_ms = Some(120_000);
 
@@ -1763,8 +1762,7 @@ pub async fn analyze_hoa_documents(
         data: parsed,
         sources: vec![SourceItem::new(
             format!(
-                "{} HOA Reserve, Governance & Warrantability Analyzer over {}",
-                env.brand_name(),
+                "Open Estate HOA Reserve, Governance & Warrantability Analyzer over {}",
                 file_names.join(", ")
             ),
             "https://singlefamily.fanniemae.com/originating-underwriting/condo-co-op-and-pud-eligibility",

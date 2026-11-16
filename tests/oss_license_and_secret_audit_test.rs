@@ -405,6 +405,8 @@ fn audit_zero_secrets_cluster_ips_and_real_street_addresses() {
 
         let allow_proxy_or_rate_test_ips = rel_str == "tests/free_proxy_pool_test.rs"
             || rel_str == "tests/ddos_bombing_test.rs";
+        let allow_civic_reference_addresses =
+            rel_str.replace('\\', "/") == "tests/live_support/reference_sites.rs";
 
         for (idx, line) in text.lines().enumerate() {
             let lineno = idx + 1;
@@ -422,14 +424,18 @@ fn audit_zero_secrets_cluster_ips_and_real_street_addresses() {
                 }
             }
 
-            for m in street_addr_rx.find_iter(line) {
-                let s = m.as_str();
-                if !s.contains("Synth")
-                    && !s.contains("Example")
-                    && !s.contains("Sample")
-                    && !s.contains("Test")
-                {
-                    violations.push(format!("{rel_str}:{lineno}: non-synthetic street address `{s}`"));
+            if !allow_civic_reference_addresses {
+                for m in street_addr_rx.find_iter(line) {
+                    let s = m.as_str();
+                    if !s.contains("Synth")
+                        && !s.contains("Example")
+                        && !s.contains("Sample")
+                        && !s.contains("Test")
+                    {
+                        violations.push(format!(
+                            "{rel_str}:{lineno}: non-synthetic street address `{s}`"
+                        ));
+                    }
                 }
             }
 

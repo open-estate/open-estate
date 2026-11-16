@@ -688,8 +688,6 @@ fn infer_source_name_from_url(url_str: &str) -> &'static str {
         "MLS Listing Archive"
     } else if host_matches(&host, "homes.com") || host_matches(&host, "homesstatic.com") {
         "Public Listing Archive"
-    } else if host_matches(&host, "rentcast.io") {
-        "RentCast Listing Archive"
     } else {
         "Public Listing Archive"
     }
@@ -1558,7 +1556,6 @@ fn discover_candidate_property_urls(
                 ("zillowUrl", "Public Listing Archive"),
                 ("realtorUrl", "MLS Listing Archive"),
                 ("homesUrl", "Public Listing Archive"),
-                ("rentcastUrl", "RentCast Listing Archive"),
                 ("listingUrl", "Public Listing Archive"),
                 ("propertyUrl", "Public Listing Archive"),
             ] {
@@ -1613,8 +1610,6 @@ fn portal_label_for_key(key: &str) -> &'static str {
     let low = key.to_ascii_lowercase();
     if low.contains("redfin") || low.contains("realtor") {
         "MLS Listing Archive"
-    } else if low.contains("rentcast") {
-        "RentCast Listing Archive"
     } else {
         "Public Listing Archive"
     }
@@ -2180,10 +2175,10 @@ fn aerial_crop_urls(
     if resolved.proxied {
         (
             format!(
-                "/api/media/satellite/export?bbox={x1:.6},{y1:.6},{x2:.6},{y2:.6}&w=1200&h=800&zoom={zoom}"
+                "/api/media/satellite/export?bbox={x1:.6},{y1:.6},{x2:.6},{y2:.6}&w=1600&h=1080&zoom={zoom}"
             ),
             format!(
-                "/api/media/satellite/export?bbox={x1:.6},{y1:.6},{x2:.6},{y2:.6}&w=600&h=400&zoom={zoom}"
+                "/api/media/satellite/export?bbox={x1:.6},{y1:.6},{x2:.6},{y2:.6}&w=960&h=648&zoom={zoom}"
             ),
         )
     } else {
@@ -2193,10 +2188,10 @@ fn aerial_crop_urls(
             .unwrap_or(USGS_IMAGERY_ONLY_EXPORT);
         (
             format!(
-                "{base}?bbox={x1:.6},{y1:.6},{x2:.6},{y2:.6}&bboxSR=4326&imageSR=3857&size=1200,800&format=jpg&f=image"
+                "{base}?bbox={x1:.6},{y1:.6},{x2:.6},{y2:.6}&bboxSR=4326&imageSR=3857&size=1600,1080&format=jpg&f=image"
             ),
             format!(
-                "{base}?bbox={x1:.6},{y1:.6},{x2:.6},{y2:.6}&bboxSR=4326&imageSR=3857&size=600,400&format=jpg&f=image"
+                "{base}?bbox={x1:.6},{y1:.6},{x2:.6},{y2:.6}&bboxSR=4326&imageSR=3857&size=960,648&format=jpg&f=image"
             ),
         )
     }
@@ -2217,7 +2212,8 @@ fn build_three_aerial_cards(
         .map(scrub_text)
         .unwrap_or_else(|| format!("{lat:.5}, {lon:.5}"));
 
-    let (u1, t1) = aerial_crop_urls(resolved, bbox_wgs84(lat, lon, 28.0, 1.5), 19);
+    let z_roof = resolved.max_native_zoom.clamp(16, 20);
+    let (u1, t1) = aerial_crop_urls(resolved, bbox_wgs84(lat, lon, 28.0, 1.5), z_roof);
     let rooftop = PropertyMediaItem {
         id: resolved.rooftop_id.to_string(),
         url: u1,
@@ -2234,7 +2230,8 @@ fn build_three_aerial_cards(
         is_historical_sale: false,
     };
 
-    let (u2, t2) = aerial_crop_urls(resolved, bbox_wgs84(lat, lon, 60.0, 1.5), 18);
+    let z_lot = resolved.max_native_zoom.clamp(16, 19);
+    let (u2, t2) = aerial_crop_urls(resolved, bbox_wgs84(lat, lon, 60.0, 1.5), z_lot);
     let lot = PropertyMediaItem {
         id: resolved.lot_id.to_string(),
         url: u2,
@@ -2258,7 +2255,8 @@ fn build_three_aerial_cards(
         is_historical_sale: false,
     };
 
-    let (u3, t3) = aerial_crop_urls(resolved, bbox_wgs84(lat, lon, 145.0, 1.5), 17);
+    let z_hood = resolved.max_native_zoom.clamp(16, 18);
+    let (u3, t3) = aerial_crop_urls(resolved, bbox_wgs84(lat, lon, 145.0, 1.5), z_hood);
     let neighborhood = PropertyMediaItem {
         id: resolved.neighborhood_id.to_string(),
         url: u3,

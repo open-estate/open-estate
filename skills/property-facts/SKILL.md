@@ -4,7 +4,7 @@ description: >-
   Gather and normalize the subject property's facts for a US address — type, beds, baths, living area, lot size and
   shape, year built, stories, garage, HOA, APN, zoning, sale & listing history, property-tax rate and assessments,
   third-party value/rent estimates, assigned schools, recent comparable sales and local context notes — with a
-  citation for every field and explicit conflict notes. Uses the RentCast API when RENTCAST_API_KEY is set, otherwise
+  citation for every field and explicit conflict notes. Uses licensed MLS/ATTOM connectors when configured, otherwise
   guides agent web research into a facts.json file. Use before valuation/reporting or when asked for a home's
   details, sale history or comps.
 ---
@@ -19,7 +19,7 @@ a comp.** Unknown → leave it out (the pipeline warns).
 (`src/web/orchestrator.rs`, second wave) for every report the `open-estate-server` binary builds; the result is
 `report.facts`. It merges, in this order of precedence:
 1. facts supplied by the caller (`given_facts`, see Option B);
-2. the licensed connectors in `src/property/mls.rs` (`fetch_mls_and_records`): RESO Web API, SimplyRETS, RentCast,
+2. the licensed connectors in `src/property/mls.rs` (`fetch_mls_and_records`): RESO Web API, SimplyRETS,
    ATTOM — each runs only when its key is configured;
 3. keyless county assessor, state controller and municipal GIS records (`src/property/public_records.rs`), queried
    for every report.
@@ -34,10 +34,7 @@ and mailing addresses are never requested and are stripped before the facts are 
 > not sales: never present them as comparable sales.
 
 ## Option A — licensed connectors (automatic)
-Set `RENTCAST_API_KEY` (free tier available) in the environment (`.env` or a Kubernetes Secret). The connector calls
-RentCast `/v1/properties`, `/v1/avm/value` (with comparables), `/v1/avm/rent/long-term` and `/v1/listings/sale`
-for the subject, plus nearby active listings from `/v1/listings/sale` and `/v1/listings/rental/long-term`.
-`RESO_API_URL` + `RESO_BEARER_TOKEN`, `SIMPLYRETS_AUTH` and `ATTOM_API_KEY` enable the other connectors.
+Set `RESO_API_URL` + `RESO_BEARER_TOKEN`, `SIMPLYRETS_AUTH`, or `ATTOM_API_KEY` in the environment (`.env` or a Kubernetes Secret) to enable the optional MLS/assessor connectors.
 
 ## Option B — agent research → `given_facts`
 Search in this order and record the source of each field:

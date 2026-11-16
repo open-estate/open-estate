@@ -1,4 +1,4 @@
-// MLS & property-data connectors (RESO Web API 2.0, RentCast, SimplyRETS, ATTOM) + County Assessor GIS merge.
+// MLS & property-data connectors (RESO Web API 2.0, SimplyRETS, ATTOM) + County Assessor GIS merge.
 // Zero owner PII: never requests or emits `Owner*`, `ASSESSEE`, or `Mailing*` fields.
 
 use crate::property::public_records::{fetch_public_parcel_records, NeighborParcel};
@@ -10,7 +10,6 @@ use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, HashSet};
 use url::Url;
 
-const RC_BASE: &str = crate::registry::endpoints::RENTCAST_BASE_URL;
 const ATTOM_BASE: &str = crate::registry::endpoints::ATTOM_BASE_URL;
 const SIMPLYRETS_BASE: &str = crate::registry::endpoints::SIMPLYRETS_BASE_URL;
 
@@ -48,12 +47,6 @@ pub fn connector_status(env: &EnvConfig) -> Vec<Value> {
             "name": "RESO Web API 2.0 (MLS IDX)",
             "active": env.get("RESO_API_URL").is_some() && env.get("RESO_BEARER_TOKEN").is_some(),
             "envVars": ["RESO_API_URL", "RESO_BEARER_TOKEN"],
-        }),
-        json!({
-            "id": "rentcast",
-            "name": "RentCast MLS Listings, Records & AVM",
-            "active": env.get("RENTCAST_API_KEY").is_some(),
-            "envVars": ["RENTCAST_API_KEY"],
         }),
         json!({
             "id": "simplyrets",
@@ -106,7 +99,7 @@ pub fn connector_status(env: &EnvConfig) -> Vec<Value> {
         }),
         json!({
             "id": "ai_analyst",
-            "name": format!("{} Residential Property AI (Purpose-Locked)", env.brand_name()),
+            "name": "Open Estate Residential Property AI (Purpose-Locked)",
             "active": env.llm_configured(),
         }),
     ]
@@ -632,407 +625,6 @@ async fn fetch_reso(
     })
 }
 
-fn normalize_rentcast_tax_history(
-    tax_assessments: Option<&Value>,
-    property_taxes: Option<&Value>,
-) -> Vec<Value> {
-    let mut years = HashSet::new();
-    if let Some(obj) = tax_assessments.and_then(|v| v.as_object()) {
-        years.extend(obj.keys().cloned());
-    }
-    if let Some(obj) = property_taxes.and_then(|v| v.as_object()) {
-        years.extend(obj.keys().cloned());
-    }
-    let mut rows = Vec::new();
-    for y in years {
-        let Ok(yr) = y.parse::<i64>() else {
-            continue;
-        };
-        if !(1980..=2100).contains(&yr) {
-            continue;
-        }
-        let a = tax_assessments.and_then(|v| v.get(&y));
-        let t = property_taxes.and_then(|v| v.get(&y));
-        let tax = t
-            .and_then(|o| {
-                o.get("total")
-                    .or_else(|| o.get("tax"))
-                    .or_else(|| o.get("amount"))
-            })
-            .and_then(|v| v.as_f64());
-        let assessed = a
-            .and_then(|o| {
-                o.get("value")
-                    .or_else(|| o.get("assessed"))
-                    .or_else(|| o.get("total"))
-            })
-            .and_then(|v| v.as_f64());
-        if tax.is_none() && assessed.is_none() {
-            continue;
-        }
-        let mut row = Map::new();
-        row.insert("year".into(), json!(yr));
-        if let Some(tx) = tax {
-            row.insert("tax".into(), json!(tx.round() as i64));
-        }
-        if let Some(ass) = assessed {
-            row.insert("assessed".into(), json!(ass.round() as i64));
-        }
-        if let Some(l) = a.and_then(|o| o.get("land")).and_then(|v| v.as_f64()) {
-            row.insert("land".into(), json!(l.round() as i64));
-        }
-        if let Some(im) = a
-            .and_then(|o| o.get("improvements"))
-            .and_then(|v| v.as_f64())
-        {
-            row.insert("improvements".into(), json!(im.round() as i64));
-        }
-        rows.push(Value::Object(row));
-    }
-    rows.sort_by_key(|r| r.get("year").and_then(|v| v.as_i64()).unwrap_or(0));
-    rows
-}
-
-async fn fetch_rentcast(
-    http: &HttpClient,
-    address: &str,
-    geo: &Value,
-    api_key: &str,
-) -> Result<MlsAndRecordsOutput, String> {
-    let headers = [("X-Api-Key", api_key), ("Accept", "application/json")];
-    let q = urlencoding::encode(address);
-    let u_sale = format!("{RC_BASE}/listings/sale?address={q}");
-    let u_prop = format!("{RC_BASE}/properties?address={q}");
-    let u_val = format!("{RC_BASE}/avm/value?address={q}&compCount=12");
-    let u_rent = format!("{RC_BASE}/avm/rent/long-term?address={q}&compCount=10");
-
-    let lat = geo.get("lat").and_then(|v| v.as_f64());
-    let lon = geo.get("lon").and_then(|v| v.as_f64());
-    let nearby_sale_fut = async {
-        if let (Some(la), Some(lo)) = (lat, lon) {
-            let u = format!(
-                "{RC_BASE}/listings/sale?latitude={la}&longitude={lo}&radius=0.6&status=Active&limit=6"
-            );
-            http.get_json_opts(&u, 18_000, 1, 3600, Some(&headers))
-                .await
-                .ok()
-        } else {
-            None
-        }
-    };
-    let nearby_rent_fut = async {
-        if let (Some(la), Some(lo)) = (lat, lon) {
-            let u = format!(
-                "{RC_BASE}/listings/rental/long-term?latitude={la}&longitude={lo}&radius=0.6&status=Active&limit=6"
-            );
-            http.get_json_opts(&u, 18_000, 1, 3600, Some(&headers))
-                .await
-                .ok()
-        } else {
-            None
-        }
-    };
-
-    let (r_sale, r_prop, r_val, r_rent, r_ns, r_nr) = tokio::join!(
-        http.get_json_opts(&u_sale, 18_000, 1, 3600, Some(&headers)),
-        http.get_json_opts(&u_prop, 18_000, 1, 86400, Some(&headers)),
-        http.get_json_opts(&u_val, 18_000, 1, 86400, Some(&headers)),
-        http.get_json_opts(&u_rent, 18_000, 1, 86400, Some(&headers)),
-        nearby_sale_fut,
-        nearby_rent_fut
-    );
-
-    let mut out = MlsAndRecordsOutput::default();
-
-    if let Ok(sl_raw) = r_sale {
-        let sl = sl_raw.as_array().and_then(|a| a.first()).unwrap_or(&sl_raw);
-        if sl.get("price").is_some() || sl.get("status").is_some() {
-            let mut mls_obj = json!({
-                "provider": "RentCast MLS Feed",
-                "mlsNumber": sl.get("mlsNumber"),
-                "mlsName": sl.get("mlsName"),
-                "status": sl.get("status"),
-                "listPrice": sl.get("price"),
-                "daysOnMarket": sl.get("daysOnMarket"),
-                "listDate": sl.get("listedDate").and_then(|v| v.as_str()).map(|s| &s[..s.len().min(10)]),
-                "removedDate": sl.get("removedDate").and_then(|v| v.as_str()).map(|s| &s[..s.len().min(10)]),
-                "agentName": sl.get("listingAgent").and_then(|a| a.get("name")),
-                "officeName": sl.get("listingOffice").and_then(|o| o.get("name")),
-                "listingType": sl.get("listingType"),
-            });
-            if let Some(m) = mls_obj.as_object_mut() {
-                attach_optional_engagement_fields(m, sl);
-                for doc_key in [
-                    "documents",
-                    "attachments",
-                    "inspectionUrl",
-                    "disclosureUrl",
-                    "prelimUrl",
-                ] {
-                    if let Some(dv) = sl.get(doc_key).filter(|v| !v.is_null()) {
-                        m.insert(doc_key.to_string(), dv.clone());
-                    }
-                }
-            }
-            out.facts.insert("mlsListing".into(), mls_obj);
-            if let Some(hoa_obj) = sl.get("hoa").filter(|v| v.is_object()) {
-                if let Some(fee) = hoa_obj.get("fee").and_then(|v| v.as_i64()) {
-                    out.facts.insert("hoaMonthly".into(), json!(fee));
-                }
-                if let Some(nm) = hoa_obj.get("name").and_then(|v| v.as_str()).filter(|s| !s.trim().is_empty()) {
-                    out.facts.insert("hoaName".into(), json!(nm.trim()));
-                }
-                out.facts.insert("hoa".into(), hoa_obj.clone());
-            }
-            if let Some(sub) = sl
-                .get("subdivision")
-                .and_then(|v| v.as_str())
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-            {
-                out.facts.insert("subdivision".into(), json!(sub));
-            }
-            out.sources.push(SourceItem::new(
-                "RentCast sale listing",
-                format!("{RC_BASE}/listings/sale"),
-            ));
-        }
-    }
-
-    if let Ok(p_raw) = r_prop {
-        let p = p_raw.as_array().and_then(|a| a.first()).unwrap_or(&p_raw);
-        if p.is_object() {
-            let feat = p.get("features").cloned().unwrap_or(Value::Null);
-            let th =
-                normalize_rentcast_tax_history(p.get("taxAssessments"), p.get("propertyTaxes"));
-            if let Some(pt) = p.get("propertyType").filter(|v| !v.is_null()) {
-                out.facts.insert("propertyType".into(), pt.clone());
-            }
-            if let Some(b) = p.get("bedrooms").filter(|v| !v.is_null()) {
-                out.facts.insert("beds".into(), b.clone());
-            }
-            if let Some(ba) = p.get("bathrooms").filter(|v| !v.is_null()) {
-                out.facts.insert("baths".into(), ba.clone());
-            }
-            if let Some(sq) = p.get("squareFootage").filter(|v| !v.is_null()) {
-                out.facts.insert("sqft".into(), sq.clone());
-            }
-            if let Some(ls) = p.get("lotSize").filter(|v| !v.is_null()) {
-                out.facts.insert("lotSqft".into(), ls.clone());
-            }
-            if let Some(yb) = p.get("yearBuilt").filter(|v| !v.is_null()) {
-                out.facts.insert("yearBuilt".into(), yb.clone());
-            }
-            if let Some(st) = feat.get("floorCount").filter(|v| !v.is_null()) {
-                out.facts.insert("stories".into(), st.clone());
-            }
-            if let Some(apn) = p.get("assessorID").filter(|v| !v.is_null()) {
-                out.facts.insert("apn".into(), apn.clone());
-            }
-            if let Some(z) = p.get("zoning").filter(|v| !v.is_null()) {
-                out.facts.insert("zoning".into(), z.clone());
-            }
-            if let (Some(dt), Some(pr)) = (
-                p.get("lastSaleDate").and_then(|v| v.as_str()),
-                p.get("lastSalePrice").and_then(|v| v.as_i64()),
-            ) {
-                if pr > 0 {
-                    out.facts.insert(
-                        "lastSale".into(),
-                        json!({ "date": &dt[..dt.len().min(10)], "price": pr }),
-                    );
-                }
-            }
-            if let Some(hist_obj) = p.get("history").and_then(|h| h.as_object()) {
-                let mut sh = Vec::new();
-                for (key, ev) in hist_obj {
-                    let dt = ev
-                        .get("date")
-                        .and_then(|v| v.as_str())
-                        .and_then(parse_portal_date_iso)
-                        .or_else(|| parse_portal_date_iso(key));
-                    let Some(dt) = dt else { continue };
-                    let ev_name = ev
-                        .get("event")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("Sale")
-                        .to_string();
-                    let pr = ev
-                        .get("price")
-                        .and_then(|v| v.as_f64())
-                        .map(|x| x.round() as i64)
-                        .filter(|&x| x > 0);
-                    sh.push(json!({
-                        "date": dt,
-                        "event": ev_name,
-                        "price": pr,
-                        "source": "RentCast Property History",
-                    }));
-                }
-                sh.sort_by(|a, b| {
-                    let da = a.get("date").and_then(|v| v.as_str()).unwrap_or("");
-                    let db = b.get("date").and_then(|v| v.as_str()).unwrap_or("");
-                    db.cmp(da)
-                });
-                if !sh.is_empty() {
-                    out.facts.insert("saleHistory".into(), Value::Array(sh));
-                }
-            }
-            if !th.is_empty() {
-                out.facts.insert("taxHistory".into(), json!(th));
-            }
-            out.sources.push(SourceItem::new(
-                "RentCast property & county tax records",
-                format!("{RC_BASE}/properties"),
-            ));
-        }
-    }
-
-    if let Ok(v) = r_val {
-        if let Some(price) = v.get("price").and_then(|x| x.as_f64()) {
-            out.avms.push(json!({
-                "source": "RentCast AVM",
-                "value": price.round() as i64,
-                "low": v.get("priceRangeLow"),
-                "high": v.get("priceRangeHigh"),
-                "date": &now_iso()[..10],
-            }));
-            if let Some(arr) = v.get("comparables").and_then(|c| c.as_array()) {
-                out.comps = arr
-                    .iter()
-                    .filter_map(|c| {
-                        let pr = c.get("price")?.as_f64()?.round() as i64;
-                        let sq = c.get("squareFootage")?.as_f64()?.round() as i64;
-                        if pr <= 0 || sq <= 0 {
-                            return None;
-                        }
-                        let sold_dt = c
-                            .get("removedDate")
-                            .or_else(|| c.get("lastSeenDate"))
-                            .or_else(|| c.get("listedDate"))
-                            .and_then(|v| v.as_str())
-                            .map(|s| s[..s.len().min(10)].to_string())
-                            .unwrap_or_default();
-                        Some(json!({
-                            "address": c.get("formattedAddress"),
-                            "lat": c.get("latitude"),
-                            "lon": c.get("longitude"),
-                            "price": pr,
-                            "soldPrice": pr,
-                            "listPrice": Value::Null,
-                            "saleToListPct": Value::Null,
-                            "soldDate": sold_dt,
-                            "beds": c.get("bedrooms"),
-                            "baths": c.get("bathrooms"),
-                            "sqft": sq,
-                            "lotSqft": c.get("lotSize"),
-                            "yearBuilt": c.get("yearBuilt"),
-                            "pricePerSqft": (pr as f64 / sq as f64).round() as i64,
-                            "distanceMi": c.get("distance"),
-                            "daysOnMarket": c.get("daysOnMarket"),
-                            "mlsNumber": c.get("mlsNumber"),
-                            "dealType": if c.get("mlsNumber").and_then(|m| m.as_str()).is_some() { "MLS / Brokered" } else { "Public record / Direct" },
-                            "assetClass": classify_asset_class(c.get("propertyType").and_then(|x| x.as_str())),
-                            "status": c.get("status").and_then(|x| x.as_str()).unwrap_or("Closed"),
-                            "source": "RentCast",
-                        }))
-                    })
-                    .collect();
-            }
-            out.sources.push(SourceItem::new(
-                "RentCast value AVM & comparables",
-                format!("{RC_BASE}/avm/value"),
-            ));
-        }
-    }
-
-    if let Ok(rv) = r_rent {
-        if let Some(rent) = rv.get("rent").and_then(|x| x.as_f64()) {
-            out.rent_estimate = Some(rent.round() as i64);
-            if let (Some(lo), Some(hi)) = (
-                rv.get("rentRangeLow").and_then(|x| x.as_i64()),
-                rv.get("rentRangeHigh").and_then(|x| x.as_i64()),
-            ) {
-                out.rent_range = Some(json!([lo, hi]));
-            }
-            if let Some(arr) = rv.get("comparables").and_then(|c| c.as_array()) {
-                out.rental_comps = arr
-                    .iter()
-                    .filter_map(|c| {
-                        let r_val = c.get("price")?.as_f64()?.round() as i64;
-                        let sq = c.get("squareFootage").and_then(|x| x.as_f64());
-                        Some(json!({
-                            "address": c.get("formattedAddress"),
-                            "lat": c.get("latitude"),
-                            "lon": c.get("longitude"),
-                            "rent": r_val,
-                            "rentPerSqft": sq.filter(|&s| s > 0.0).map(|s| round_n(r_val as f64 / s, 2)),
-                            "listedDate": c.get("listedDate").and_then(|v| v.as_str()).map(|s| &s[..s.len().min(10)]),
-                            "beds": c.get("bedrooms"),
-                            "baths": c.get("bathrooms"),
-                            "sqft": sq.map(|s| s.round() as i64),
-                            "yearBuilt": c.get("yearBuilt"),
-                            "distanceMi": c.get("distance"),
-                            "status": c.get("status").and_then(|v| v.as_str()).unwrap_or("Leased / Listed"),
-                            "source": "RentCast Rent AVM",
-                        }))
-                    })
-                    .collect();
-            }
-            out.sources.push(SourceItem::new(
-                "RentCast long-term rent AVM & lease comparables",
-                format!("{RC_BASE}/avm/rent/long-term"),
-            ));
-        }
-    }
-
-    if let Some(Value::Array(ns)) = r_ns {
-        out.nearby_listings = ns
-            .into_iter()
-            .filter(|l| l.get("price").is_some() && l.get("formattedAddress").is_some())
-            .take(6)
-            .map(|l| {
-                json!({
-                    "address": l.get("formattedAddress"),
-                    "lat": l.get("latitude"),
-                    "lon": l.get("longitude"),
-                    "status": l.get("status").and_then(|v| v.as_str()).unwrap_or("Active"),
-                    "price": l.get("price"),
-                    "beds": l.get("bedrooms"),
-                    "baths": l.get("bathrooms"),
-                    "sqft": l.get("squareFootage"),
-                    "yearBuilt": l.get("yearBuilt"),
-                    "daysOnMarket": l.get("daysOnMarket"),
-                    "source": "RentCast Active MLS",
-                })
-            })
-            .collect();
-    }
-
-    if let Some(Value::Array(nr)) = r_nr {
-        out.nearby_rentals = nr
-            .into_iter()
-            .filter(|l| l.get("price").is_some() && l.get("formattedAddress").is_some())
-            .take(6)
-            .map(|l| {
-                json!({
-                    "address": l.get("formattedAddress"),
-                    "lat": l.get("latitude"),
-                    "lon": l.get("longitude"),
-                    "status": l.get("status").and_then(|v| v.as_str()).unwrap_or("For Rent"),
-                    "rent": l.get("price"),
-                    "beds": l.get("bedrooms"),
-                    "baths": l.get("bathrooms"),
-                    "sqft": l.get("squareFootage"),
-                    "source": "RentCast Active Rentals",
-                })
-            })
-            .collect();
-    }
-
-    Ok(out)
-}
-
 async fn fetch_simplyrets(
     http: &HttpClient,
     address: &str,
@@ -1359,12 +951,6 @@ async fn fetch_mls_and_records_inner(
             _ => None,
         }
     });
-    let rc_fut = Box::pin(async {
-        match env.get("RENTCAST_API_KEY") {
-            Some(k) => Some(Box::pin(fetch_rentcast(http, address, geo, k)).await),
-            None => None,
-        }
-    });
     let sr_fut = Box::pin(async {
         match env.get("SIMPLYRETS_AUTH") {
             Some(a) => Some(Box::pin(fetch_simplyrets(http, address, geo, a)).await),
@@ -1387,13 +973,11 @@ async fn fetch_mls_and_records_inner(
             ..Default::default()
         })
     });
-    let (reso_opt, sr_opt, rc_opt, attom_opt, gis_res) =
-        tokio::join!(reso_fut, sr_fut, rc_fut, attom_fut, gis_fut);
+    let (reso_opt, sr_opt, attom_opt, gis_res) = tokio::join!(reso_fut, sr_fut, attom_fut, gis_fut);
 
-    let ordered: [(&str, Option<Result<MlsAndRecordsOutput, String>>); 5] = [
+    let ordered: [(&str, Option<Result<MlsAndRecordsOutput, String>>); 4] = [
         ("reso", reso_opt),
         ("simplyrets", sr_opt),
-        ("rentcast", rc_opt),
         ("attom", attom_opt),
         ("county_gis", Some(gis_res)),
     ];
@@ -2581,7 +2165,10 @@ mod tests {
             Some(&json!({ "date": "2022-06-14", "price": 2_180_000 }))
         );
         assert_eq!(parsed.sold_comps.len(), 3);
-        assert_eq!(parsed.sold_comps[0]["address"], json!("214 Synthcomp01 Ave"));
+        assert_eq!(
+            parsed.sold_comps[0]["address"],
+            json!("214 Synthcomp01 Ave")
+        );
         assert_eq!(parsed.sold_comps[0]["soldDate"], json!("2025-04-25"));
         assert_eq!(parsed.sold_comps[0]["price"], json!(2_420_000));
         assert_eq!(parsed.sold_comps[0]["listPrice"], Value::Null);

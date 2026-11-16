@@ -1,10 +1,19 @@
 mod common;
 
+use open_estate::db::shared_cache_store::get_shared_data_record;
+use open_estate::db::DbStore;
+use open_estate::extensions::proto::shared_v1::{
+    FaultLinesTileProto, HazardPolygonTileProto, TractIndicatorsProto,
+};
+use open_estate::extensions::shared_cache::{
+    dataset_ids, encode_geohash, get_shared_dataset_proto, seed_builtin_shared_datasets,
+    ShareScope, ShareScopeExt, SharedExtensionCache,
+};
 use open_estate::modules::hazards::{
     build_highlights, build_nhd, clip_and_simplify_arcgis_geometry, compute_scores,
     epa_radon_label, epa_radon_zone, fetch_flood, fetch_flood_with_endpoints, flood_zone_info,
-    resolve_nfhl_with_hedge, run_hazards, summarize_fault_features, NfhlEndpoints,
-    NFHL_SOURCE_LIVING_ATLAS, NFHL_SOURCE_MSC, NFHL_SOURCE_PRIMARY,
+    resolve_nfhl_with_hedge, run_hazards, run_hazards_with_db, summarize_fault_features,
+    NfhlEndpoints, NFHL_SOURCE_LIVING_ATLAS, NFHL_SOURCE_MSC, NFHL_SOURCE_PRIMARY,
 };
 use open_estate::shared::{point_in_ring, EnvConfig, HttpClient};
 use open_estate::web::summary::climate_factors;
@@ -732,4 +741,150 @@ async fn test_offline_hazards_and_summary_honest_nulls_and_dam_inundation() {
     assert_eq!(out.data["wildfire"]["california"]["checked"], json!(false));
     assert!(out.data["scores"]["wind"].is_null());
     assert!(out.data["scores"]["radon"].is_null());
+}
+
+#[tokio::test]
+#[ignore = "live external hazard services; run with --ignored"]
+async fn live_public_hazards_shared_data_reuses_polygons_faults_and_tract_across_parcels() {
+    let db = DbStore::connect_url(":memory:", Some("sqlite"))
+        .await
+        .expect("connect sqlite");
+    seed_builtin_shared_datasets(&db)
+        .await
+        .expect("seed builtin shared datasets");
+
+    let live_http = HttpClient::new(None);
+    let env = EnvConfig::from_map(HashMap::new());
+    let (lat1, lon1) = (37.2872, -121.9500);
+    let gh5 = encode_geohash(lat1, lon1, 5).expect("geohash5");
+    let geo1 = json!({
+        "state": "CA",
+        "city": "Campbell",
+        "county": "Santa Clara",
+        "countyFips": "06085",
+        "stateFips": "06",
+        "zip": "95008",
+    });
+
+    let out1 = run_hazards_with_db(&live_http, &env, Some(&db), lat1, lon1, &geo1)
+        .await
+        .expect("live parcel 1 hazards");
+    assert_eq!(out1.data["checks"]["nri"], json!(true));
+    assert_eq!(out1.data["checks"]["faults"], json!(true));
+    assert_eq!(out1.data["checks"]["floodNear"], json!(true));
+    let tract11 = out1.data["nri"]["tract"]
+        .as_str()
+        .expect("NRI tract FIPS present")
+        .to_string();
+    assert_eq!(tract11.len(), 11);
+
+    let (nri_row, nri_proto) = get_shared_dataset_proto::<TractIndicatorsProto>(
+        None,
+        &db,
+        dataset_ids::TRACT_INDICATORS,
+        ShareScope::CensusTract,
+        &tract11,
+        "fema_nri",
+    )
+    .await
+    .expect("read fema_nri")
+    .expect("fema_nri persisted in shared_data_records");
+    assert_eq!(nri_proto.tract_geoid, tract11);
+    assert!(nri_proto.nri_composite_score.is_some());
+    assert_eq!(nri_row.hit_count, 0);
+
+    let (fault_row, fault_proto) = get_shared_dataset_proto::<FaultLinesTileProto>(
+        None,
+        &db,
+        dataset_ids::FAULT_LINES,
+        ShareScope::Geohash5,
+        &gh5,
+        "usgs_qfaults_33km",
+    )
+    .await
+    .expect("read FAULT_LINES")
+    .expect("FAULT_LINES persisted in shared_data_records");
+    assert!(!fault_proto.faults.is_empty());
+    assert_eq!(fault_row.hit_count, 0);
+
+    let (nfhl_row, nfhl_proto) = get_shared_dataset_proto::<HazardPolygonTileProto>(
+        None,
+        &db,
+        dataset_ids::HAZARD_POLYGON_TILE,
+        ShareScope::Geohash5,
+        &gh5,
+        "fema_nfhl_sfha",
+    )
+    .await
+    .expect("read HAZARD_POLYGON_TILE fema_nfhl_sfha")
+    .expect("fema_nfhl_sfha persisted in shared_data_records");
+    assert_eq!(nfhl_proto.layer, "fema_nfhl_sfha");
+    assert_eq!(nfhl_row.hit_count, 0);
+
+    // Clear L1 memory cache so Parcel 2 must load all shared datasets from SQLite with offline HTTP.
+    SharedExtensionCache::global().invalidate_l1_all().await;
+
+    let offline = HttpClient::offline_loopback_only(None);
+    let (lat2, lon2) = (37.2874, -121.9498);
+    assert_eq!(encode_geohash(lat2, lon2, 5).as_deref(), Some(gh5.as_str()));
+    let geo2 = json!({
+        "state": "CA",
+        "city": "Campbell",
+        "county": "Santa Clara",
+        "countyFips": "06085",
+        "stateFips": "06",
+        "tract": tract11,
+        "zip": "95008",
+    });
+
+    let out2 = run_hazards_with_db(&offline, &env, Some(&db), lat2, lon2, &geo2)
+        .await
+        .expect("offline parcel 2 hazards reuses shared DB datasets");
+    assert_eq!(out2.data["checks"]["nri"], json!(true));
+    assert_eq!(out2.data["nri"]["riskScore"], out1.data["nri"]["riskScore"]);
+    assert_eq!(out2.data["checks"]["faults"], json!(true));
+    assert!(
+        !out2.data["earthquake"]["nearestFaults"]
+            .as_array()
+            .map(Vec::is_empty)
+            .unwrap_or(true),
+        "parcel 2 faults should compute from cached FAULT_LINES tile"
+    );
+    assert_eq!(out2.data["checks"]["floodNear"], json!(true));
+
+    let nri_after = get_shared_data_record(
+        &db,
+        dataset_ids::TRACT_INDICATORS,
+        ShareScope::CensusTract.as_str(),
+        &tract11,
+        "fema_nri",
+    )
+    .await
+    .expect("read nri hit_count")
+    .expect("nri row");
+    assert!(nri_after.hit_count >= 1);
+
+    let fault_after = get_shared_data_record(
+        &db,
+        dataset_ids::FAULT_LINES,
+        ShareScope::Geohash5.as_str(),
+        &gh5,
+        "usgs_qfaults_33km",
+    )
+    .await
+    .expect("read faults hit_count")
+    .expect("fault row");
+    assert!(fault_after.hit_count >= 1);
+
+    let nfhl_after = get_shared_data_record(
+        &db,
+        dataset_ids::HAZARD_POLYGON_TILE,
+        ShareScope::Geohash5.as_str(),
+        &gh5,
+        "fema_nfhl_sfha",
+    )
+    .await
+    .expect("read nfhl tile hit_count")
+    .expect("nfhl tile row");
+    assert!(nfhl_after.hit_count >= 1);
 }

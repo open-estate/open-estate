@@ -356,7 +356,7 @@
     var quakeMonthlyBase = quakeAddOn != null ? quakeAddOn : optNum(mo.earthquakeInsurance);
     var maintMonthly = optNum(mo.maintenance);
     var hoaMonthly = optNum(mo.hoa) != null ? optNum(mo.hoa) : optNum(facts.hoaMonthly);
-    var rentEst = posNum(own.rentEstimate) || posNum(facts.avms && facts.avms.rentcast && facts.avms.rentcast.rent);
+    var rentEst = posNum(own.rentEstimate);
     var aduRent = posNum(lotAdu.estRentMonthly);
 
     function resolveHorizonDollar(h, dollarKey, pctKey) {

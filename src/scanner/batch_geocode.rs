@@ -343,7 +343,9 @@ fn parse_census_batch_csv(
     expected_chunk: &[BatchAddressInput],
 ) -> Result<Vec<BatchGeocodeHit>> {
     // Strip UTF-8 BOM if present
-    let slice = csv_bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(csv_bytes);
+    let slice = csv_bytes
+        .strip_prefix(&[0xEF, 0xBB, 0xBF])
+        .unwrap_or(csv_bytes);
     let mut rdr = csv::ReaderBuilder::new()
         .has_headers(false)
         .flexible(true)
@@ -406,7 +408,11 @@ fn parse_lon_lat_pair(raw: &str) -> Option<(f64, f64)> {
     let mut parts = raw.split(',');
     let lon = parts.next()?.trim().parse::<f64>().ok()?;
     let lat = parts.next()?.trim().parse::<f64>().ok()?;
-    if lon.is_finite() && lat.is_finite() && (-180.0..=180.0).contains(&lon) && (-90.0..=90.0).contains(&lat) {
+    if lon.is_finite()
+        && lat.is_finite()
+        && (-180.0..=180.0).contains(&lon)
+        && (-90.0..=90.0).contains(&lat)
+    {
         Some((lon, lat))
     } else {
         None
@@ -427,7 +433,10 @@ fn parse_uncomma_address(id: String, single: &str) -> BatchAddressInput {
     if let Some(caps) = RE_NO_COMMA_ADDR.captures(single) {
         let prefix = caps[1].trim().to_string();
         let st_cand = &caps[2];
-        let zip = caps.get(3).map(|m| m.as_str().to_string()).unwrap_or_default();
+        let zip = caps
+            .get(3)
+            .map(|m| m.as_str().to_string())
+            .unwrap_or_default();
         if let Some(state) = normalize_us_state(st_cand) {
             return BatchAddressInput {
                 id,
@@ -479,7 +488,10 @@ fn parse_state_zip_tail(segment: &str) -> (String, String, String) {
 
     let (before_zip, zip) = if let Some(caps) = RE_TRAILING_ZIP.captures(seg) {
         let bz = caps.get(1).map(|m| m.as_str().trim()).unwrap_or("");
-        let zp = caps.get(2).map(|m| m.as_str().to_string()).unwrap_or_default();
+        let zp = caps
+            .get(2)
+            .map(|m| m.as_str().to_string())
+            .unwrap_or_default();
         (bz, zp)
     } else {
         (seg, String::new())

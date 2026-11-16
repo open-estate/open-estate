@@ -2479,8 +2479,7 @@ pub fn enrich_facts_cross_reference_links(
         .or_else(|| {
             sources.iter().find_map(|s| {
                 if (s.url.starts_with("https://") || s.url.starts_with("http://"))
-                    && (s.name.contains("RentCast")
-                        || s.name.contains("Redfin")
+                    && (s.name.contains("Redfin")
                         || s.name.contains("Zillow")
                         || s.name.contains("MLS"))
                 {

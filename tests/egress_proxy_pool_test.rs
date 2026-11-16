@@ -21,7 +21,7 @@ fn test_egress_bypass_control_plane_vs_public_gis_and_redaction() {
     for host in [
         "api.openai.com",
         "us.api.openai.com",
-        "api.rentcast.io",
+        "api.gateway.attomdata.com",
         "places.googleapis.com",
         "translation.googleapis.com",
         "api.shovels.ai",
@@ -91,7 +91,7 @@ fn test_egress_bypass_control_plane_vs_public_gis_and_redaction() {
 async fn test_round_robin_selection_and_health_cooldown_scoring() {
     let bypass_hosts = vec![
         "api.openai.com".to_string(),
-        "api.rentcast.io".to_string(),
+        "api.gateway.attomdata.com".to_string(),
         "places.googleapis.com".to_string(),
     ];
     let client = HttpClient::with_egress_config(

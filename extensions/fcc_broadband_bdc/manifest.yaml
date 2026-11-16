@@ -9,6 +9,17 @@ driver: openapi_yaml
 proto_message_type: "openestate.extension.v1.BroadbandCatalogProto"
 priority: 290
 enabled_by_default: true
+tier: basic
+license_class: public_open_data
+execution_mode: eager
+requires_manual_approval: false
+min_plan_tier: ""
+metering:
+  dimensions:
+    - invocations
+    - wall_time_ms
+    - external_api_calls
+    - bytes_downloaded
 provenance: live_verified
 homepage_url: "https://broadbandmap.fcc.gov/"
 documentation_url: "https://www.fcc.gov/BroadbandData"
@@ -29,6 +40,11 @@ rate_limit:
   burst: 6
   timeout_ms: 2500
 cache_ttl_secs: 604800
+sharing:
+  scope: geohash7
+  ttl_secs: 2592000
+  stale_while_revalidate_secs: 604800
+  background_refresh: true
 source_attribution:
   name: "FCC National Broadband Map / Broadband Data Collection (BDC)"
   url: "https://broadbandmap.fcc.gov/"

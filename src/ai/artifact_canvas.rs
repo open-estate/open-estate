@@ -656,7 +656,6 @@ fn extract_report_numbers(report: &Value) -> ReportNumbers {
         report,
         &["modules", "valuation", "data", "ownership", "rentEstimate"],
     )
-    .or_else(|| get_num(report, &["facts", "avms", "rentcast", "rent"]))
     .filter(|v| *v > 0.0);
 
     let adu_rent_mo =
@@ -2429,8 +2428,27 @@ pub async fn generate_llm_artifact_with_client(
         instructions,
         user_input,
         artifact_canvas_schema(),
-    );
-    opts.models = resolve_interactive_model_specs(env);
+    )
+    .with_task("artifact_canvas")
+    .with_profile("writing_light");
+    if let Some(artifact_model) = env
+        .get("LLM_ARTIFACT_MODEL")
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        if crate::metering::MeterScope::active_llm_spec().is_none()
+            && crate::metering::active_extension_id().is_none()
+        {
+            opts.models = vec![artifact_model.to_string()];
+        }
+    } else if ["SLIDES_LLM_MODEL", "SLIDES_LLM_EFFORT"]
+        .iter()
+        .any(|k| env.get(k).map(str::trim).filter(|s| !s.is_empty()).is_some())
+        && crate::metering::MeterScope::active_llm_spec().is_none()
+        && crate::metering::active_extension_id().is_none()
+    {
+        opts.models = resolve_interactive_model_specs(env);
+    }
     opts.timeout_ms = Some(10_500);
     opts.max_output_tokens = Some(1_600);
     opts.validator = Some(Arc::new(validate_llm_artifact_candidate));

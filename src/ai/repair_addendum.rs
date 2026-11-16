@@ -19,9 +19,7 @@
 
 use crate::ai::doc_pipeline::{init_deterministic_ai_meta, stamp_ai_enhancement_meta};
 use crate::ai::hoa_review::DocPageCitation;
-use crate::ai::llm::{
-    resolve_model_specs_with_effort, responses_json_with_cache, LlmCache, LlmCallOptions,
-};
+use crate::ai::llm::{responses_json_with_cache, LlmCache, LlmCallOptions};
 use crate::ai::packet_review::calibrate_regional_cost_multiplier;
 use crate::ai::title_review::redact_title_pii;
 use crate::guardrails::{
@@ -1081,8 +1079,9 @@ pub async fn generate_repair_addendum(
             REPAIR_ADDENDUM_INSTRUCTIONS,
             prompt,
             repair_addendum_schema(),
-        );
-        opts.models = resolve_model_specs_with_effort(env, Some("low"));
+        )
+        .with_task("repair_addendum")
+        .with_profile("reasoning_standard");
         opts.max_output_tokens = Some(2_048);
         opts.timeout_ms = Some(60_000);
 
@@ -1194,19 +1193,11 @@ pub async fn generate_repair_addendum(
         obj.insert("ms".to_string(), json!(t0.elapsed().as_millis() as u64));
     }
 
-    let addendum_src_url = {
-        let dom = env.brand_domain();
-        if dom == "open-estate.local" {
-            "https://openestate.org/repair-addendum".to_string()
-        } else {
-            format!("https://{dom}/repair-addendum")
-        }
-    };
     Ok(ModuleOutput {
         data,
         sources: vec![SourceItem::new(
-            format!("{} Repair & Seller Credit Addendum Generator", env.brand_name()),
-            addendum_src_url,
+            "Open Estate Repair & Seller Credit Addendum Generator",
+            "https://openestate.org/repair-addendum",
         )],
         warnings,
     })

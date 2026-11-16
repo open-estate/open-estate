@@ -3,19 +3,20 @@
 // implicit TLS (port 465), AUTH PLAIN / LOGIN, UTF-8 subjects, multipart/alternative,
 // and RFC 8058 one-click `List-Unsubscribe` + `List-Unsubscribe-Post` headers.
 
-use crate::shared::EnvConfig;
+use crate::shared::{format_brand_wordmark_html, is_truthy_flag, EnvConfig};
 use anyhow::{anyhow, Context, Result};
+use html_escape::encode_safe;
 use lettre::message::header::{ContentType, Header, HeaderName, HeaderValue};
 use lettre::message::{Mailbox, MultiPart, SinglePart};
 use lettre::transport::smtp::authentication::{Credentials, Mechanism};
 use lettre::transport::smtp::client::{Tls, TlsParameters};
 use lettre::transport::smtp::extension::ClientId;
 use lettre::{AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor};
-use std::error::Error as StdError;
 use once_cell::sync::Lazy;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::error::Error as StdError;
 use std::time::Duration;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -63,11 +64,7 @@ impl Header for ListUnsubscribeHeader {
     }
 
     fn display(&self) -> HeaderValue {
-        let clean: String = self
-            .0
-            .chars()
-            .filter(|c| c.is_ascii_graphic())
-            .collect();
+        let clean: String = self.0.chars().filter(|c| c.is_ascii_graphic()).collect();
         let val = format!("<{clean}>");
         HeaderValue::dangerous_new_pre_encoded(Self::name(), val.clone(), val)
     }
@@ -168,12 +165,18 @@ static MULTI_SPACE_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\s+").unwrap());
 
 fn parse_mailbox(spec: &str) -> Result<Mailbox> {
     let clean = strip_crlf(spec);
-    clean
-        .parse::<Mailbox>()
-        .with_context(|| format!("Invalid email mailbox specification: {}", &clean[..clean.len().min(64)]))
+    clean.parse::<Mailbox>().with_context(|| {
+        format!(
+            "Invalid email mailbox specification: {}",
+            &clean[..clean.len().min(64)]
+        )
+    })
 }
 
-pub fn build_lettre_message(env: &EnvConfig, req: &EmailRequest) -> Result<(Message, Vec<String>, String)> {
+pub fn build_lettre_message(
+    env: &EnvConfig,
+    req: &EmailRequest,
+) -> Result<(Message, Vec<String>, String)> {
     let from_raw = env
         .get("SMTP_FROM")
         .or_else(|| env.get("SMTP_USER"))
@@ -197,11 +200,7 @@ pub fn build_lettre_message(env: &EnvConfig, req: &EmailRequest) -> Result<(Mess
     } else {
         parse_mailbox(from_raw)?
     };
-    let ehlo_domain = from_mb
-        .email
-        .domain()
-        .trim()
-        .to_string();
+    let ehlo_domain = from_mb.email.domain().trim().to_string();
     let ehlo_domain = if ehlo_domain.is_empty() {
         env.brand_domain()
     } else {
@@ -213,13 +212,14 @@ pub fn build_lettre_message(env: &EnvConfig, req: &EmailRequest) -> Result<(Mess
     }
 
     let default_subj = format!("{} Property Alert", env.brand_name());
-    let mut builder = Message::builder()
-        .from(from_mb)
-        .subject(strip_crlf(if req.subject.trim().is_empty() {
-            &default_subj
-        } else {
-            &req.subject
-        }));
+    let mut builder =
+        Message::builder()
+            .from(from_mb)
+            .subject(strip_crlf(if req.subject.trim().is_empty() {
+                &default_subj
+            } else {
+                &req.subject
+            }));
 
     let mut rcpt_addrs = Vec::with_capacity(req.to.len());
     for raw_to in &req.to {
@@ -250,7 +250,10 @@ pub fn build_lettre_message(env: &EnvConfig, req: &EmailRequest) -> Result<(Mess
         (Some(t), _) if !t.is_empty() => t.clone(),
         (_, Some(h)) => {
             let stripped = HTML_TAG_RE.replace_all(h, " ");
-            MULTI_SPACE_RE.replace_all(&stripped, " ").trim().to_string()
+            MULTI_SPACE_RE
+                .replace_all(&stripped, " ")
+                .trim()
+                .to_string()
         }
         _ => String::new(),
     };
@@ -270,17 +273,15 @@ pub fn build_lettre_message(env: &EnvConfig, req: &EmailRequest) -> Result<(Mess
                 ),
         )?
     } else {
-        builder
-            .header(ContentType::TEXT_PLAIN)
-            .body(plain_body)?
+        builder.header(ContentType::TEXT_PLAIN).body(plain_body)?
     };
 
     Ok((msg, rcpt_addrs, ehlo_domain))
 }
 
 pub async fn send_smtp_email(env: &EnvConfig, req: &EmailRequest) -> Result<EmailDelivery> {
-    let (host, port, secure) = resolve_host_port_secure(env)
-        .ok_or_else(|| anyhow!("SMTP_HOST is not configured"))?;
+    let (host, port, secure) =
+        resolve_host_port_secure(env).ok_or_else(|| anyhow!("SMTP_HOST is not configured"))?;
 
     let (message, recipients, ehlo_domain) = build_lettre_message(env, req)?;
 
@@ -297,8 +298,8 @@ pub async fn send_smtp_email(env: &EnvConfig, req: &EmailRequest) -> Result<Emai
             transport_builder.tls(Tls::Required(tls_params))
         }
         _ => {
-            let tls_params =
-                TlsParameters::new(host.clone()).context("Failed to initialize SMTPS TLS parameters")?;
+            let tls_params = TlsParameters::new(host.clone())
+                .context("Failed to initialize SMTPS TLS parameters")?;
             transport_builder.tls(Tls::Wrapper(tls_params))
         }
     };
@@ -314,6 +315,7 @@ pub async fn send_smtp_email(env: &EnvConfig, req: &EmailRequest) -> Result<Emai
         .send(message)
         .await
         .map_err(|e| anyhow!("SMTP delivery failed: {e}"))?;
+    crate::metering::add_email_sent(1);
 
     let server_response: String = resp
         .message()
@@ -331,4 +333,135 @@ pub async fn send_smtp_email(env: &EnvConfig, req: &EmailRequest) -> Result<Emai
         recipients,
         server_response,
     })
+}
+
+pub use crate::web::hooks::SectionReadyNotification;
+
+/// Checks recipient allowlist when test-mode email guard is enabled (`EMAIL_TEST_MODE=1` or
+/// `SECTION_EMAIL_TEST_MODE=1`) so tests never dispatch email to arbitrary addresses.
+pub fn enforce_test_recipient_allowlist(env: &EnvConfig, recipients: &[String]) -> Result<()> {
+    let test_mode = env
+        .get("SECTION_EMAIL_TEST_MODE")
+        .or_else(|| env.get("EMAIL_TEST_MODE"))
+        .map(is_truthy_flag)
+        .unwrap_or(false);
+    if !test_mode {
+        return Ok(());
+    }
+    let raw_allowlist = env
+        .get("SECTION_TEST_RECIPIENT_ALLOWLIST")
+        .or_else(|| env.get("EMAIL_TEST_RECIPIENT_ALLOWLIST"))
+        .unwrap_or("");
+    let allowed: Vec<String> = raw_allowlist
+        .split([',', ';', ' '])
+        .map(|s| s.trim().to_ascii_lowercase())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if allowed.is_empty() {
+        return Err(anyhow!(
+            "SECTION_EMAIL_TEST_MODE is enabled but EMAIL_TEST_RECIPIENT_ALLOWLIST / SECTION_TEST_RECIPIENT_ALLOWLIST is empty"
+        ));
+    }
+    for rcpt in recipients {
+        let norm = rcpt
+            .rsplit_once('<')
+            .map(|(_, right)| right.trim_end_matches('>'))
+            .unwrap_or(rcpt.as_str())
+            .trim()
+            .to_ascii_lowercase();
+        if !allowed.iter().any(|a| a == &norm) {
+            return Err(anyhow!(
+                "Recipient '{norm}' rejected by test-mode recipient allowlist guard"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Builds an RFC-compliant multipart/alternative `EmailRequest` with RFC 8058
+/// `List-Unsubscribe` headers and a section deep link (`/r/:slug/#<section>`).
+pub fn build_section_ready_email_request(
+    env: &EnvConfig,
+    notif: &SectionReadyNotification,
+) -> EmailRequest {
+    let brand_name = env.brand_name();
+    let origin = notif.base_origin.trim().trim_end_matches('/');
+    let deep_link = if !notif.deep_link_url.trim().is_empty() {
+        notif.deep_link_url.trim().to_string()
+    } else if origin.is_empty() {
+        format!("/r/{}/#{}", notif.slug.trim(), notif.section_id.trim())
+    } else {
+        format!(
+            "{origin}/r/{}/#{}",
+            notif.slug.trim(),
+            notif.section_id.trim()
+        )
+    };
+    let unsub_url = if !notif.unsubscribe_url.trim().is_empty() {
+        notif.unsubscribe_url.trim().to_string()
+    } else if origin.is_empty() {
+        format!(
+            "/u/section/{}",
+            urlencoding::encode(notif.unsubscribe_token.trim())
+        )
+    } else {
+        format!(
+            "{origin}/u/section/{}",
+            urlencoding::encode(notif.unsubscribe_token.trim())
+        )
+    };
+
+    let section_label = strip_crlf(&notif.section_label);
+    let display_address = strip_crlf(&notif.display_address);
+    let subject = format!("{brand_name} — {section_label} is ready for {display_address}");
+
+    let plain_text = format!(
+        "{brand_name}: {section_label} is now ready for {display_address}.\n\n\
+         View section directly:\n{deep_link}\n\n\
+         Unsubscribe from updates for this section:\n{unsub_url}\n"
+    );
+
+    let wordmark_html = format_brand_wordmark_html(&brand_name);
+    let esc_section = encode_safe(&section_label);
+    let esc_addr = encode_safe(&display_address);
+    let esc_deep_link = encode_safe(&deep_link);
+    let esc_unsub = encode_safe(&unsub_url);
+
+    let html = format!(
+        r#"<!doctype html><html lang="en"><body style="margin:0;padding:20px;background:#f5f6f8;font-family:Inter,-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;color:#111827">
+  <div style="max-width:580px;margin:0 auto">
+    <div style="background:#ffffff;border:1px solid #e5e7eb;border-radius:14px;padding:22px 24px">
+      <div style="font-weight:800;font-size:20px;color:#111827;margin-bottom:14px">{wordmark_html}</div>
+      <div style="display:inline-block;background:#ecfdf5;border:1px solid #a7f3d0;color:#065f46;font-size:11.5px;font-weight:700;padding:3px 10px;border-radius:999px;margin-bottom:10px">Section Ready</div>
+      <h2 style="margin:0 0 8px;font-size:18px;font-weight:800;color:#111827">{esc_section} is ready</h2>
+      <p style="margin:0 0 16px;font-size:14.5px;color:#374151;line-height:1.55">Your requested report section for <strong>{esc_addr}</strong> has finished loading and is now available on the property report.</p>
+      <div style="margin-bottom:8px">
+        <a href="{esc_deep_link}" style="display:inline-block;background:#0f766e;color:#ffffff;text-decoration:none;font-size:14px;font-weight:700;padding:10px 18px;border-radius:9px">Open {esc_section} →</a>
+      </div>
+    </div>
+    <div style="font-size:12px;color:#6b7280;margin-top:14px;text-align:center;line-height:1.6">
+      <a href="{esc_unsub}" style="color:#6b7280;text-decoration:underline">Unsubscribe from {esc_section} updates</a>
+    </div>
+  </div>
+</body></html>"#
+    );
+
+    EmailRequest {
+        to: vec![notif.email.clone()],
+        subject,
+        text: Some(plain_text),
+        html: Some(html),
+        reply_to: None,
+        unsubscribe_url: Some(unsub_url),
+    }
+}
+
+/// Dispatches a section-ready notification email via configured SMTP transport.
+pub async fn send_section_ready_email(
+    env: &EnvConfig,
+    notif: &SectionReadyNotification,
+) -> Result<EmailDelivery> {
+    let req = build_section_ready_email_request(env, notif);
+    enforce_test_recipient_allowlist(env, &req.to)?;
+    send_smtp_email(env, &req).await
 }

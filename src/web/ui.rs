@@ -11,8 +11,8 @@ use crate::web::i18n::{
     LANG_COOKIE_NAME,
 };
 use crate::web::render::{
-    localize_i18n_json_for_brand, safe_inline_js, safe_inline_json, safe_open_estate_core_js,
-    I18NEXT_JS, I18N_EN_JSON, I18N_ES_JSON, I18N_ZH_JSON,
+    safe_open_estate_core_js, safe_inline_js, safe_inline_json, I18NEXT_JS, I18N_EN_JSON,
+    I18N_ES_JSON, I18N_ZH_JSON,
 };
 use minijinja::{context, Environment};
 use once_cell::sync::Lazy;
@@ -951,13 +951,6 @@ const HOME_CLIENT_JS: &str = r###"
 (function(){
   const LANG_COOKIE = window.__OPEN_ESTATE_LANG_COOKIE__ || 'open_estate_lang';
   const i18nRes = window.__OPEN_ESTATE_I18N_RESOURCES__ || { en: { translation: {} }, 'zh-CN': { translation: {} }, es: { translation: {} } };
-  const BRAND_INFO = window.__OPEN_ESTATE_BRAND__ || {};
-  const BRAND_NAME = (BRAND_INFO.name && String(BRAND_INFO.name).trim()) || __HOME_BRAND_NAME_JSON__;
-  const _DEF_BRAND_RE = new RegExp('Open\\s+' + 'Estate', 'g');
-  const displayListingSource = (src) => {
-    const s = String(src || '');
-    return s ? s.replace(_DEF_BRAND_RE, BRAND_NAME) : s;
-  };
   const rawInitLang = String(window.__OPEN_ESTATE_INIT_LANG__ || '').toLowerCase();
   const urlInitLang = (new URLSearchParams(location.search).get('lang') || '').toLowerCase();
   const effInitLang = urlInitLang || rawInitLang;
@@ -2278,9 +2271,9 @@ const HOME_CLIENT_JS: &str = r###"
           ? L('0 indexed homes match all selected filters', '暂无已收录房源同时满足当前筛选条件', '0 viviendas indexadas cumplen todos los filtros seleccionados')
           : L('No homes indexed in the local catalog yet', '本地房源目录暂未同步房源', 'Aún no hay viviendas sincronizadas en el catálogo local')) + '</h3>' +
         '<p>' + escH(L(
-          BRAND_NAME + ' never displays mock or invented listings. Relax a filter above, sync a real 5-digit US ZIP code from live feeds, or generate a full report on any US street address.',
-          BRAND_NAME + ' 绝不展示任何虚构或模拟房源。您可以放宽上方筛选条件、输入 5 位美国邮编实时同步真实房源，或在首页生成任意街道地址的深度报告。',
-          BRAND_NAME + ' nunca muestra anuncios falsos ni inventados. Relaje algún filtro, sincronice un código ZIP real de 5 dígitos o genere un informe completo por dirección.'
+          'Open Estate never displays mock or invented listings. Relax a filter above, sync a real 5-digit US ZIP code from live feeds, or generate a full report on any US street address.',
+          'Open Estate 绝不展示任何虚构或模拟房源。您可以放宽上方筛选条件、输入 5 位美国邮编实时同步真实房源，或在首页生成任意街道地址的深度报告。',
+          'Open Estate nunca muestra anuncios falsos ni inventados. Relaje algún filtro, sincronice un código ZIP real de 5 dígitos o genere un informe completo por dirección.'
         )) + '</p>' +
         '<div class="shop-empty-actions">' +
           (hasZipScope ? '<button type="button" class="btnsec" id="shopEmptyAllAreasBtn">' + escH(L('All Indexed Areas', '浏览全部已收录区域', 'Todas las zonas indexadas')) + '</button>' : '') +
@@ -2353,7 +2346,7 @@ const HOME_CLIENT_JS: &str = r###"
             '<span class="mbadge ' + stClass + '">' + escH(stLabel) + '</span>' +
             (m.schoolScore != null ? '<span class="mbadge mb-sch">' + escH(L('School ', '学区 ', 'Escuela ') + m.schoolScore + (m.schoolGrade ? ' (' + m.schoolGrade + ')' : '')) + '</span>' : '') +
             (m.overallScore != null ? '<span class="mbadge mb-score">' + escH(L('Score ', '评分 ', 'Puntaje ') + Math.round(m.overallScore)) + '</span>' : '') +
-          '</div><span style="font-size:11px;color:#9ca3af">' + escH(displayListingSource(m.source || '')) + '</span></div>' +
+          '</div><span style="font-size:11px;color:#9ca3af">' + escH(m.source || '') + '</span></div>' +
           '<a class="shop-addr" href="' + escH(href) + '">' + escH(m.address) + '</a>' +
           (subLoc ? '<div class="shop-subloc">' + escH(subLoc) + '</div>' : '') +
           '<div class="shop-price-row"><span class="shop-price">' + (dispPrice ? escH(fmtCurrency(dispPrice)) : escH(L('See Valuation', '查看估值', 'Ver Estimación'))) + '</span>' +
@@ -2591,9 +2584,9 @@ const HOME_CLIENT_JS: &str = r###"
         const utilPillsHtml = renderUtilityFiberPills(fullM, true);
         const href = m.reportSlug ? ('/r/' + encodeURIComponent(m.reportSlug) + '/') : ('/report?address=' + encodeURIComponent(m.address));
         const btnLabel = curLang === 'es' ? (m.reportSlug ? 'Ver informe completo →' : 'Analizar informe →') : escH(m.reportSlug ? T('home.viewFullReport') : T('home.analyzeFullReport'));
-        return '<div class="mcard"><div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;margin-bottom:6px"><div style="display:flex;gap:6px;flex-wrap:wrap"><span class="mbadge ' + stClass + '">' + escH(stLabel) + '</span><span class="mbadge mb-score">' + escH(m.matchScore) + '/100 · ' + escH(m.matchTier || 'Match') + '</span>' + (m.schoolScore != null ? '<span class="mbadge mb-sch">' + escH(T('home.schoolTag', { score: m.schoolScore })) + (m.schoolGrade ? ' (' + escH(m.schoolGrade) + ')' : '') + '</span>' : '') + '</div><span style="font-size:11.5px;color:#6b7280">' + escH(displayListingSource(m.source || '')) + '</span></div><div style="font-weight:700;font-size:15.5px">' + escH(m.address) + '</div><div style="font-size:22px;font-weight:800;color:#0f766e;margin:4px 0">' + (m.price ? escH(fmtCurrency(m.price)) : escH(T('home.viewEstimate'))) + '</div><div style="font-size:12.5px;color:#4b5563">' + escH(specs) + '</div>' + utilPillsHtml + '<div class="whybox">' + escH(m.whyItMatches || '') + '</div><div style="display:flex;justify-content:space-between;align-items:center;margin-top:8px"><span style="font-size:12px;color:#6b7280">' + escH(m.propertyType || '') + '</span><a class="btnsec" href="' + escH(href) + '">' + btnLabel + '</a></div></div>';
+        return '<div class="mcard"><div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;margin-bottom:6px"><div style="display:flex;gap:6px;flex-wrap:wrap"><span class="mbadge ' + stClass + '">' + escH(stLabel) + '</span><span class="mbadge mb-score">' + escH(m.matchScore) + '/100 · ' + escH(m.matchTier || 'Match') + '</span>' + (m.schoolScore != null ? '<span class="mbadge mb-sch">' + escH(T('home.schoolTag', { score: m.schoolScore })) + (m.schoolGrade ? ' (' + escH(m.schoolGrade) + ')' : '') + '</span>' : '') + '</div><span style="font-size:11.5px;color:#6b7280">' + escH(m.source || '') + '</span></div><div style="font-weight:700;font-size:15.5px">' + escH(m.address) + '</div><div style="font-size:22px;font-weight:800;color:#0f766e;margin:4px 0">' + (m.price ? escH(fmtCurrency(m.price)) : escH(T('home.viewEstimate'))) + '</div><div style="font-size:12.5px;color:#4b5563">' + escH(specs) + '</div>' + utilPillsHtml + '<div class="whybox">' + escH(m.whyItMatches || '') + '</div><div style="display:flex;justify-content:space-between;align-items:center;margin-top:8px"><span style="font-size:12px;color:#6b7280">' + escH(m.propertyType || '') + '</span><a class="btnsec" href="' + escH(href) + '">' + btnLabel + '</a></div></div>';
       }).join('');
-      nlResults.innerHTML = '<div class="mbanner"><div style="font-weight:700;color:#065f46">' + escH(j.overview || '') + '</div>' + (f.fairHousingNotice ? '<div style="font-size:12px;color:#6b7280;margin-top:4px">' + escH(T('home.fairHousingNote')) + ' ' + escH(displayListingSource(f.fairHousingNotice)) + '</div>' : '') + '</div>' + (cards ? '<div class="grid" style="margin-top:14px">' + cards + '</div>' : '');
+      nlResults.innerHTML = '<div class="mbanner"><div style="font-weight:700;color:#065f46">' + escH(j.overview || '') + '</div>' + (f.fairHousingNotice ? '<div style="font-size:12px;color:#6b7280;margin-top:4px">' + escH(T('home.fairHousingNote')) + ' ' + escH(f.fairHousingNotice) + '</div>' : '') + '</div>' + (cards ? '<div class="grid" style="margin-top:14px">' + cards + '</div>' : '');
       nlResults.querySelectorAll('a[href^="/report?address="]').forEach((a) => {
         a.addEventListener('click', () => {
           try {
@@ -3077,7 +3070,7 @@ const HOME_CLIENT_JS: &str = r###"
       bq2Q: 'What could go wrong — or wasn’t disclosed?',
       bq2A: 'FEMA flood zone, USGS earthquake shaking & active faults, wildfire zones, EPA radon, Superfund & cleanup sites, water safety & traffic noise — plus upload inspection, disclosure, HOA, or title PDFs to cross-check against public records.',
       bq3Q: 'Is the asking price right?',
-      bq3A: `${BRAND_NAME}’s True Estimate and value range from repeat-sales history, adjusted comparable sales, and county tax rolls — plus historical upside and drawdown stress scenarios.`,
+      bq3A: `${(window.__OPEN_ESTATE_BRAND__ && window.__OPEN_ESTATE_BRAND__.name) || 'Open Estate'}’s True Estimate and value range from repeat-sales history, adjusted comparable sales, and county tax rolls — plus historical upside and drawdown stress scenarios.`,
       bq4Q: 'What is it like to live there?',
       bq4A: 'Assigned public schools from official state academic records, EPA walkability, groceries, parks & transit within a mile, drive times to your own places, and city crime context.',
       bq5Q: 'What can you do with the property?',
@@ -5560,10 +5553,6 @@ pub fn render_home_html_with_options(
         format!("{eff_brand}’s True Estimate and value range from repeat-sales history, adjusted comparable sales, and county tax rolls — plus historical upside and drawdown stress scenarios.")
     };
 
-    let brand_name_json = safe_inline_json(
-        &serde_json::to_string(eff_brand).unwrap_or_else(|_| "\"Open Estate\"".into()),
-    );
-    let rendered_home_js = HOME_CLIENT_JS.replace("__HOME_BRAND_NAME_JSON__", &brand_name_json);
     tmpl.render(context! {
         favicon_tags => FAVICON_HEAD_TAGS.as_str(),
         logo_mark => logo_mark_img(36),
@@ -5700,10 +5689,10 @@ pub fn render_home_html_with_options(
         i18next_js => safe_inline_js(I18NEXT_JS),
         init_lang_json => serde_json::to_string(init_lang).unwrap_or_else(|_| "\"en\"".into()),
         lang_cookie_json => serde_json::to_string(LANG_COOKIE_NAME).unwrap_or_else(|_| "\"open_estate_lang\"".into()),
-        i18n_en_json => safe_inline_json(&localize_i18n_json_for_brand(I18N_EN_JSON, eff_brand, eff_domain)),
-        i18n_zh_json => safe_inline_json(&localize_i18n_json_for_brand(I18N_ZH_JSON, eff_brand, eff_domain)),
-        i18n_es_json => safe_inline_json(&localize_i18n_json_for_brand(I18N_ES_JSON, eff_brand, eff_domain)),
-        home_client_js => rendered_home_js,
+        i18n_en_json => safe_inline_json(I18N_EN_JSON),
+        i18n_zh_json => safe_inline_json(I18N_ZH_JSON),
+        i18n_es_json => safe_inline_json(I18N_ES_JSON),
+        home_client_js => HOME_CLIENT_JS,
         core_ui_js => safe_open_estate_core_js(),
     })
     .unwrap_or_default()

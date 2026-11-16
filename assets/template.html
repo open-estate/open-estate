@@ -138,9 +138,31 @@ a{color:var(--blue);text-decoration:none}a:hover{text-decoration:underline}
 .gtile.main .gtag{bottom:44px}
 .gtag .gleg{display:inline-flex;align-items:center;gap:4px;white-space:nowrap}
 .gtag .gsw{display:inline-block;width:10px;height:10px;border-radius:2.5px;flex:0 0 auto}
-.gbtns{position:absolute;right:10px;top:10px;z-index:500;display:flex;gap:6px}
+.gbtns{position:absolute;right:48px;top:10px;z-index:500;display:flex;gap:6px}
 .gbtn{background:#fff;color:var(--ink);border-radius:999px;padding:6px 12px;font:600 12.5px var(--font);box-shadow:0 2px 10px rgba(0,0,0,.18)}
 .gbtn:hover{text-decoration:none;background:#f3f4f6}
+.map-expand-btn{position:absolute;top:10px;right:10px;z-index:520;width:32px;height:32px;padding:0;border-radius:9px;border:1px solid rgba(15,23,42,.16);background:rgba(255,255,255,.94);color:var(--ink);display:grid;place-items:center;cursor:pointer;box-shadow:0 2px 10px rgba(0,0,0,.18);backdrop-filter:blur(6px);transition:background .12s,transform .12s}
+.map-expand-btn:hover{background:#fff;transform:scale(1.04)}
+.map-basemap-bar{position:absolute;top:10px;right:48px;z-index:520;display:inline-flex;align-items:center;gap:2px;background:rgba(255,255,255,.94);border:1px solid rgba(15,23,42,.15);border-radius:999px;padding:2px;box-shadow:0 2px 10px rgba(0,0,0,.16);backdrop-filter:blur(6px);max-width:calc(100% - 94px);overflow-x:auto;scrollbar-width:none}
+.map-basemap-bar::-webkit-scrollbar{display:none}
+.map-basemap-bar button{border:0;background:transparent;font:700 11px var(--font);padding:4px 8px;border-radius:999px;color:var(--ink2);cursor:pointer;white-space:nowrap;line-height:1.15}
+.map-basemap-bar button.on{background:var(--brand);color:#fff}
+.mexp-bg{position:fixed;inset:0;z-index:9600;background:rgba(15,23,42,.74);backdrop-filter:blur(6px);display:flex;align-items:center;justify-content:center;padding:16px}
+.mexp-bg[hidden]{display:none!important}
+.mexp-card{width:min(1240px,94vw);height:min(820px,88vh);background:#fff;border-radius:16px;box-shadow:0 24px 60px rgba(0,0,0,.38);display:flex;flex-direction:column;overflow:hidden;border:1px solid rgba(255,255,255,.2)}
+.mexp-hdr{padding:11px 16px;border-bottom:1px solid var(--line);display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;background:var(--surface)}
+.mexp-title-wrap{display:flex;align-items:center;gap:8px;min-width:0;flex-wrap:wrap}
+.mexp-title{font-weight:800;font-size:15px;color:var(--ink)}
+.mexp-tools{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.mexp-basebar{display:inline-flex;align-items:center;gap:2px;background:var(--soft);border:1px solid var(--line);border-radius:999px;padding:3px}
+.mexp-basebar button{border:0;background:transparent;font:700 12px var(--font);padding:4px 10px;border-radius:999px;color:var(--ink2);cursor:pointer;white-space:nowrap}
+.mexp-basebar button.on{background:var(--brand);color:#fff}
+.mexp-close{width:32px;height:32px;border-radius:9px;border:1px solid var(--line);background:#fff;color:var(--ink);font:700 18px/1 var(--font);cursor:pointer;display:grid;place-items:center}
+.mexp-close:hover{background:var(--soft)}
+.mexp-chips{padding:8px 16px;border-bottom:1px solid var(--line);display:flex;flex-wrap:wrap;gap:6px;background:var(--soft)}
+.mexp-chips[hidden]{display:none!important}
+.mexp-body{position:relative;flex:1 1 auto;min-height:0;background:#dfe5ec}
+.mexp-body .gmap{position:absolute;inset:0;width:100%;height:100%}
 .gmode{position:absolute;left:54px;top:10px;z-index:500;display:inline-flex;background:#fff;border-radius:999px;padding:3px;box-shadow:0 2px 10px rgba(0,0,0,.18)}
 .gmode button{border:0;background:transparent;font:700 12.5px var(--font);padding:4px 11px;border-radius:999px;color:var(--ink2);cursor:pointer;line-height:1.2}
 .gmode button.on{background:var(--brand);color:#fff}.gmode button[hidden]{display:none}
@@ -241,7 +263,7 @@ main section.sec{background:var(--surface);border:1px solid var(--line);border-r
 .tile.hl{background:var(--brandsoft);border-color:#c7efe4}
 .up{color:var(--good)}.dn{color:var(--bad)}
 .chart{width:100%;height:280px}.chart.sm{height:220px}.chart.lg{height:340px}
-.map{height:380px;border-radius:12px;border:1px solid var(--line);overflow:hidden;background:#e5e9ef}
+.map{position:relative;height:380px;border-radius:12px;border:1px solid var(--line);overflow:hidden;background:#e5e9ef}
 .map.tall{height:440px}
 .chips{display:flex;flex-wrap:wrap;gap:6px;margin:0 0 10px}
 .chip{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--line);background:#fff;border-radius:999px;padding:5px 11px;font:600 12.5px var(--font);color:var(--ink2);cursor:pointer;user-select:none}
@@ -534,6 +556,31 @@ main section.sec,.q-card,#rentResearch,#insuranceQuoteStudio,#insDeductibleSeg,.
 .chap-bar-inner .db-chap-actions>*{flex:0 0 auto!important}
 body.db-cmd-active #verdictHeroGrid,body.db-cmd-active #questionCardsStack,body.db-cmd-active #roleHiddenNote,body.db-cmd-active #roleSwitchInline{display:none!important}
 .hscroll-fade-r{-webkit-mask-image:linear-gradient(90deg,#000 calc(100% - 24px),transparent);mask-image:linear-gradient(90deg,#000 calc(100% - 24px),transparent)}
+/* Wave B: Lazy sections, subscribe prompts, paywall placeholders, and disclosure packet cards */
+.oe-lazy-card,.oe-paywall-lock-card,.oe-disclosures-card{margin:12px 0;padding:14px 16px;border-radius:12px;border:1px solid var(--line);background:var(--soft);display:flex;flex-direction:column;gap:10px}
+.oe-lazy-card[data-status="pending"],.oe-lazy-card[data-status="awaiting_external_response"]{background:var(--brandsoft);border-color:rgba(15,118,110,.26)}
+.oe-lazy-card[data-status="failed"],.oe-lazy-card[data-status="not_enabled"]{background:var(--watchbg);border-color:rgba(180,83,9,.28)}
+.oe-lazy-card[data-status="awaiting_approval"]{background:#f5f3ff;border-color:rgba(109,40,217,.24)}
+.oe-paywall-lock-card{background:linear-gradient(135deg,#f8fafc 0%,#fffbeb 100%);border:1px dashed rgba(180,83,9,.45)}
+.oe-disclosures-card{background:var(--surface);border-color:rgba(15,118,110,.28)}
+.oe-lazy-head,.oe-paywall-head,.oe-disc-head{display:flex;align-items:flex-start;justify-content:space-between;gap:10px;flex-wrap:wrap}
+.oe-lazy-title,.oe-paywall-title{font-weight:700;font-size:14px;color:var(--ink);display:flex;align-items:center;gap:7px;flex-wrap:wrap}
+.oe-lazy-msg,.oe-paywall-msg,.oe-disc-summary{font-size:13px;color:var(--ink2);line-height:1.45}
+.oe-lazy-sub-form{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.oe-lazy-sub-form input[type="email"]{flex:1 1 210px;min-width:180px;max-width:320px;border:1px solid var(--line);border-radius:9px;padding:7px 11px;font:13px var(--font);background:#fff;color:var(--ink)}
+.oe-lazy-sub-form button{border:0;border-radius:9px;padding:8px 14px;font:600 13px var(--font);background:var(--brand);color:#fff;cursor:pointer;white-space:nowrap}
+.oe-lazy-sub-form button:hover:not(:disabled){background:#0d655e}
+.oe-lazy-sub-form button:disabled{opacity:.65;cursor:wait}
+.oe-lazy-sub-status{font-size:12.5px;font-weight:600;color:var(--good)}
+.oe-lazy-sub-status.err{color:var(--bad)}
+.oe-paywall-meta{display:flex;gap:6px;flex-wrap:wrap;align-items:center}
+.oe-paywall-cta{display:inline-flex;align-items:center;gap:6px;border-radius:9px;padding:7px 12px;background:var(--ink);color:#fff;font:600 12.5px var(--font);text-decoration:none;white-space:nowrap}
+.oe-paywall-cta:hover{background:#1f2937;text-decoration:none}
+.oe-disc-files{display:flex;flex-wrap:wrap;gap:6px}
+.oe-disc-file{display:inline-flex;align-items:center;gap:6px;padding:5px 9px;border-radius:8px;border:1px solid var(--line);background:var(--soft);font-size:12px;color:var(--ink2)}
+.oe-rental-index-bar{display:flex;flex-wrap:wrap;gap:8px 12px;align-items:center;justify-content:space-between;padding:10px 12px;border-radius:10px;border:1px solid var(--line);background:var(--soft);margin-bottom:10px}
+.oe-rental-src-chips{display:flex;flex-wrap:wrap;gap:5px;align-items:center}
+[data-paywall-section]:has(.db-paywall-lock-card) .oe-paywall-lock-card{display:none!important}
 /* Role Lens System (buyer | seller | agent | all) */
 html,html[data-role="all"]{--role-accent:#475569;--role-tint:#f8fafc;--role-dot:#cbd5e1}
 html[data-role="buyer"]{--role-accent:#0f766e;--role-tint:#f0fdfa;--role-dot:#5eead4}
@@ -968,12 +1015,13 @@ html:not([data-role="all"]) .verdict-media-col .bento-grid,html:not([data-role="
 }
 .db-drawer{position:fixed;right:16px;bottom:74px;z-index:945;width:min(420px,calc(100vw - 24px));max-height:min(620px,calc(100vh - 90px));background:#fff;border:1px solid #cbd5e1;border-radius:16px;box-shadow:0 22px 52px rgba(15,23,42,.26),0 4px 12px rgba(15,23,42,.08);display:none;flex-direction:column;overflow:hidden}
 .db-drawer.open{display:flex}
+.db-drawer.maximized{right:16px;bottom:16px;left:auto;top:auto;width:min(980px,calc(100vw - 32px));height:min(820px,calc(100vh - 32px));max-height:calc(100vh - 32px)}
 .db-dhdr{padding:12px 14px 10px;background:linear-gradient(135deg,#0f766e 0%,#134e4a 60%,#1e1b4b 100%);color:#fff}
 .db-dhdr-top{display:flex;align-items:center;justify-content:space-between;gap:8px}
 .db-dtitle{display:flex;align-items:center;gap:8px;font-weight:800;font-size:14.5px}
 .db-dacts{display:flex;align-items:center;gap:5px}
-.db-dbtn{background:rgba(255,255,255,.15);border:1px solid rgba(255,255,255,.25);color:#fff;border-radius:7px;padding:3px 8px;font:600 11.5px var(--font);cursor:pointer}
-.db-dbtn:hover{background:rgba(255,255,255,.26)}
+.db-dbtn{width:28px;height:28px;padding:0;background:rgba(255,255,255,.15);border:1px solid rgba(255,255,255,.25);color:#fff;border-radius:7px;display:inline-flex;align-items:center;justify-content:center;cursor:pointer}
+.db-dbtn:hover{background:rgba(255,255,255,.28)}
 .db-dmeta{display:flex;flex-wrap:wrap;gap:5px;margin-top:8px}
 .db-dpill{display:inline-flex;align-items:center;gap:4px;font-size:10.8px;font-weight:600;padding:2px 8px;border-radius:999px;background:rgba(255,255,255,.14);color:#f8fafc;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .db-dpill.guard{background:rgba(16,185,129,.24);border:1px solid rgba(110,231,183,.42);color:#ecfdf5}
@@ -981,6 +1029,7 @@ html:not([data-role="all"]) .verdict-media-col .bento-grid,html:not([data-role="
 .db-dqs button{background:#fff;border:1px solid var(--line);border-radius:999px;padding:4px 9px;font:500 11.4px var(--font);color:var(--ink2);cursor:pointer;text-align:left;transition:border-color .12s,color .12s}
 .db-dqs button:hover{border-color:var(--brand);color:var(--brand);background:var(--brandsoft)}
 .db-dlog{flex:1 1 auto;min-height:170px;max-height:310px;overflow-y:auto;padding:10px 12px;display:flex;flex-direction:column;gap:8px;background:#fff}
+.db-drawer.maximized .db-dlog{max-height:none}
 .db-dlog .msg{padding:8px 11px;border-radius:11px;font-size:12.8px;line-height:1.55;max-width:92%;white-space:pre-wrap;word-break:break-word}
 .db-dlog .msg.u{align-self:flex-end;background:var(--brand);color:#fff}
 .db-dlog .msg.a{align-self:flex-start;background:var(--soft);border:1px solid var(--line);color:var(--ink)}
@@ -1048,8 +1097,8 @@ html:not([data-role="all"]) .verdict-media-col .bento-grid,html:not([data-role="
 .cre-poitag small{font-weight:700;opacity:.82}
 .cre-award{display:inline-flex;align-items:center;gap:3px;padding:1.5px 7px;border-radius:999px;font-size:10.8px;font-weight:700;background:#fef9c3;border:1px solid #fde047;color:#854d0e;white-space:nowrap;margin:1px 2px 1px 0}
 @media(max-width:860px){.cre-wf{grid-template-columns:repeat(2,minmax(0,1fr))}.cre-coten{grid-template-columns:1fr}}
-@media(max-width:600px){.db-fab{padding:9px 14px 9px 10px}.db-fab-sub{display:none}.db-drawer{left:10px;right:10px;bottom:12px;width:auto;max-height:calc(100vh - 24px)}.cre-wf{grid-template-columns:1fr}}
-@media print{.db-echart-tip,.db-float-tip,.db-fab-dock,.db-fab,.db-drawer,.cre-inprow button,.toc-aside,.toc-reopen-btn,.toc-scrim,#roleSwitchHdr,#roleSwitchInline,#roleHiddenNote,.role-brief{display:none!important}.layout{display:block!important;max-width:100%!important}}
+@media(max-width:600px){.db-fab{padding:9px 14px 9px 10px}.db-fab-sub{display:none}.db-drawer{left:10px;right:10px;bottom:12px;width:auto;max-height:calc(100vh - 24px)}.db-drawer.maximized{left:8px;right:8px;top:8px;bottom:8px;width:auto;height:auto;max-height:none}.mexp-bg{padding:8px}.mexp-card{width:96vw;height:90vh}.cre-wf{grid-template-columns:1fr}}
+@media print{.db-echart-tip,.db-float-tip,.db-fab-dock,.db-fab,.db-drawer,.map-expand-btn,.map-basemap-bar,#mapExpandModal,.cre-inprow button,.toc-aside,.toc-reopen-btn,.toc-scrim,#roleSwitchHdr,#roleSwitchInline,#roleHiddenNote,.role-brief{display:none!important}.layout{display:block!important;max-width:100%!important}}
 </style>
 </head>
 <body>
@@ -1114,15 +1163,17 @@ html:not([data-role="all"]) .verdict-media-col .bento-grid,html:not([data-role="
       <div class="verdict-media-col" id="verdictMediaCol">
         <div class="media-bento-shell" id="mediaBento"><div id="heroMediaBento"></div></div>
         <div class="gallery" id="gallery">
-          <div class="gtile main"><div class="gmap" id="gMain"></div><div class="gmap g3d" id="gMain3d" hidden></div><div class="gmap gsvw" id="gSv" hidden></div><div class="gmode" id="gMode" role="group"><button type="button" data-v="2d" class="on">2D</button><button type="button" data-v="3d">3D</button><button type="button" data-v="sv" hidden data-en="Street View" data-zh="街景" data-es="Street View">Street View</button></div><span class="gtag" id="gMainTag" data-en="Satellite · footprint &amp; facing" data-zh="卫星图 · 建筑轮廓与朝向" data-es="Satélite · huella y orientación">Satellite · footprint &amp; facing</span><div class="gbtns" id="gBtns"></div></div>
+          <div class="gtile main"><div class="gmap" id="gMain"></div><div class="gmap g3d" id="gMain3d" hidden></div><div class="gmap gsvw" id="gSv" hidden></div><div class="gmode" id="gMode" role="group"><button type="button" data-v="2d" class="on">2D</button><button type="button" data-v="3d">3D</button><button type="button" data-v="sv" hidden data-en="Street View" data-zh="街景" data-es="Street View">Street View</button></div><span class="gtag" id="gMainTag" data-en="Satellite · footprint &amp; facing" data-zh="卫星图 · 建筑轮廓与朝向" data-es="Satélite · huella y orientación">Satellite · footprint &amp; facing</span><div class="gbtns" id="gBtns"></div><button type="button" class="map-expand-btn" id="expBtnHero" data-map-expand="hero" aria-label="Expand map" title="Expand map"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 3h6v6"/><path d="M9 21H3v-6"/><path d="M21 3l-7 7"/><path d="M3 21l7-7"/></svg></button></div>
           <div class="gcol">
-            <div class="gtile"><div class="gmap" id="gStreet"></div><span class="gtag" data-en="Street map" data-zh="街道地图" data-es="Mapa de calles">Street map</span></div>
-            <div class="gtile"><div class="gmap" id="gTerrain"></div><span class="gtag" data-en="Terrain" data-zh="地形图" data-es="Terreno">Terrain</span></div>
+            <div class="gtile"><div class="gmap" id="gStreet"></div><span class="gtag" data-en="Street map" data-zh="街道地图" data-es="Mapa de calles">Street map</span><button type="button" class="map-expand-btn" id="expBtnStreet" data-map-expand="gStreet" aria-label="Expand map" title="Expand map"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 3h6v6"/><path d="M9 21H3v-6"/><path d="M21 3l-7 7"/><path d="M3 21l7-7"/></svg></button></div>
+            <div class="gtile"><div class="gmap" id="gTerrain"></div><span class="gtag" data-en="Terrain" data-zh="地形图" data-es="Terreno">Terrain</span><button type="button" class="map-expand-btn" id="expBtnTerrain" data-map-expand="gTerrain" aria-label="Expand map" title="Expand map"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 3h6v6"/><path d="M9 21H3v-6"/><path d="M21 3l-7 7"/><path d="M3 21l7-7"/></svg></button></div>
           </div>
         </div>
         <div id="roleFocusBrief" class="role-brief" role="tabpanel"></div>
       </div>
     </div>
+
+    <div id="lazySectionsFallbackMount" hidden></div>
 
     <div class="q-cards-stack" id="questionCardsStack">
       <article class="q-card" id="qCardCost" data-q-id="cost">
@@ -1188,7 +1239,22 @@ html:not([data-role="all"]) .verdict-media-col .bento-grid,html:not([data-role="
 <footer><div class="row" id="footer"></div></footer>
 <div id="walkthroughModal" class="wt-modal-bg" hidden></div>
 <div id="photoLightboxModal" class="plb-modal-bg" hidden></div>
-<aside class="db-drawer" id="openEstateDrawer" role="dialog" aria-label="__REPORT_BRAND_NAME__ Property Assistant" aria-hidden="true"></aside>
+<div id="mapExpandModal" class="mexp-bg" hidden role="dialog" aria-modal="true" aria-labelledby="mapExpandTitle">
+  <div class="mexp-card">
+    <div class="mexp-hdr">
+      <div class="mexp-title-wrap">
+        <span class="mexp-title" id="mapExpandTitle"></span>
+      </div>
+      <div class="mexp-tools">
+        <div class="mexp-basebar" id="mapExpandBaseBar" role="group"></div>
+        <button type="button" class="mexp-close" id="mapExpandClose" aria-label="Close" title="Close">×</button>
+      </div>
+    </div>
+    <div class="mexp-chips" id="mapExpandChips" hidden></div>
+    <div class="mexp-body" id="mapExpandBody"><div class="gmap" id="mapExpandCanvas"></div></div>
+  </div>
+</div>
+<aside class="db-drawer" id="openEstateDrawer" role="dialog" aria-label="Property Assistant" aria-hidden="true"></aside>
 
 <script>__I18NEXT_JS__</script>
 <script>
@@ -1302,17 +1368,19 @@ const detectInitialLang = () => {
 };
 let LANG = detectInitialLang();
 if (document.documentElement) document.documentElement.lang = LANG === 'zh' ? 'zh-CN' : LANG;
+const _DEFAULT_BRAND_NAME = ['Open', 'Estate'].join(' ');
+const _DEFAULT_BRAND_DOMAIN = ['open-estate', 'local'].join('.');
 window.__OPEN_ESTATE_BRAND__ = {
-  name: (R && R.brand && R.brand.name && String(R.brand.name).trim()) || __REPORT_BRAND_NAME_JSON__,
-  domain: (R && R.brand && R.brand.domain && String(R.brand.domain).trim()) || __REPORT_BRAND_DOMAIN_JSON__
+  name: (R && R.brand && R.brand.name && String(R.brand.name).trim()) || _DEFAULT_BRAND_NAME,
+  domain: (R && R.brand && R.brand.domain && String(R.brand.domain).trim()) || _DEFAULT_BRAND_DOMAIN
 };
 (() => {
   const b = window.__OPEN_ESTATE_BRAND__ || {};
-  const bName = (b.name && String(b.name).trim()) || __REPORT_BRAND_NAME_JSON__;
-  const bDom = (b.domain && String(b.domain).trim()) || __REPORT_BRAND_DOMAIN_JSON__;
+  const bName = (b.name && String(b.name).trim()) || _DEFAULT_BRAND_NAME;
+  const bDom = (b.domain && String(b.domain).trim()) || _DEFAULT_BRAND_DOMAIN;
   const resEn = window.__OPEN_ESTATE_I18N_RES__ && window.__OPEN_ESTATE_I18N_RES__.en && window.__OPEN_ESTATE_I18N_RES__.en.translation;
-  const resBrand = (resEn && resEn.brand && resEn.brand.name) || '';
-  const resDom = (resEn && resEn.brand && resEn.brand.domain) || '';
+  const resBrand = (resEn && resEn.brand && resEn.brand.name) || _DEFAULT_BRAND_NAME;
+  const resDom = (resEn && resEn.brand && resEn.brand.domain) || _DEFAULT_BRAND_DOMAIN;
   if (((resBrand && resBrand !== bName) || (resDom && resDom !== bDom)) && window.__OPEN_ESTATE_I18N_RES__) {
     const walk = (n) => {
       if (!n || typeof n !== 'object') return;
@@ -1338,8 +1406,8 @@ if (window.i18next) {
   });
 }
 const brandInfo = () => ({
-  name: (R.brand && R.brand.name && String(R.brand.name).trim()) || window.__OPEN_ESTATE_BRAND__?.name || __REPORT_BRAND_NAME_JSON__,
-  domain: (R.brand && R.brand.domain && String(R.brand.domain).trim()) || window.__OPEN_ESTATE_BRAND__?.domain || __REPORT_BRAND_DOMAIN_JSON__,
+  name: (R.brand && R.brand.name && String(R.brand.name).trim()) || window.__OPEN_ESTATE_BRAND__?.name || _DEFAULT_BRAND_NAME,
+  domain: (R.brand && R.brand.domain && String(R.brand.domain).trim()) || window.__OPEN_ESTATE_BRAND__?.domain || _DEFAULT_BRAND_DOMAIN,
 });
 const TKEY = (key, vars, fallback) => {
   if (window.i18next && typeof window.i18next.t === 'function') {
@@ -1430,7 +1498,7 @@ function savePendingBrowserRecentReport(rawAddress, exactSlug) {
 try {
   if (R?.meta?.slug) {
     for (const [prop, pfx] of [['inspection', 'openestate:inspection:'], ['titleReview', 'openestate:title:'], ['hoaReview', 'openestate:hoa:'], ['packetReview', 'openestate:packet:'], ['repairAddendum', 'openestate:addendum:'], ['creReview', 'openestate:cre_review:']]) {
-      if (!R[prop]) {
+      if (!R[prop] && !R.paywallLocks?.[prop]) {
         const saved = localStorage.getItem(pfx + R.meta.slug);
         if (saved) R[prop] = JSON.parse(saved);
       }
@@ -1461,6 +1529,559 @@ const txk = (k, enFb, vars) => {
   const esStr = fx('es', enStr);
   return `<span data-i18n="${esc(k)}" data-en="${esc(enStr)}" data-zh="${esc(zhStr)}" data-es="${esc(esStr)}">${esc(LANG === 'zh' ? zhStr : LANG === 'es' ? esStr : enStr)}</span>`;
 };
+
+window.OpenEstateLazy = (() => {
+  const TIER_LABELS = {
+    free: 'Free',
+    buyer: 'Buyer',
+    investor: 'Investor',
+    agent_pro: 'Agent Pro',
+    enterprise: 'Enterprise',
+  };
+  const DEDICATED_LAZY_SECTIONS = new Set([
+    'disclosuresAndInspections',
+    'inspection',
+    'packetReview',
+    'rentResearch',
+  ]);
+  const DEDICATED_PAYWALL_SECTIONS = new Set([
+    'disclosuresAndInspections',
+    'inspection',
+    'packetReview',
+    'titleReview',
+    'hoaReview',
+    'creReview',
+    'sonicAvailability',
+    'mlsBboRemarks',
+    'rentResearch',
+  ]);
+  let pollTimer = null;
+  let pollInFlight = false;
+  let reloadInFlight = false;
+  let unloadBound = false;
+
+  const humanizeSectionTitle = (sectionId) => {
+    const k = String(sectionId || '');
+    if (k === 'disclosuresAndInspections') return tr3('Disclosures & Inspections', '披露文件与验房', 'Divulgaciones e Inspecciones');
+    if (k === 'rentResearch') return tr3('Rental Market Index & Rent Estimate', '区域租金指数与租金测算', 'Índice de Alquiler y Estimación');
+    if (k === 'packetReview') return tr3('Full Disclosure Packet Review', '全量披露文件包审阅', 'Revisión del Paquete de Divulgación');
+    if (k === 'inspection') return tr3('Home Inspection Review', '验房报告审阅', 'Revisión de Inspección');
+    if (k === 'titleReview') return tr3('Preliminary Title Review', '初步产权报告审阅', 'Revisión Preliminar de Título');
+    if (k === 'hoaReview') return tr3('HOA & Reserve Review', 'HOA 与储备金审阅', 'Revisión de HOA y Reservas');
+    if (k === 'creReview') return tr3('Commercial Underwriting Review', '商业地产审阅', 'Revisión Comercial');
+    if (k === 'sonicAvailability') return tr3('Address-Level Fiber Availability', '门牌级光纤覆盖核查', 'Disponibilidad de Fibra');
+    if (k === 'mlsBboRemarks') return tr3('Private MLS Broker Remarks', 'MLS 经纪人内部备注', 'Comentarios Privados MLS');
+    return k.replace(/([a-z0-9])([A-Z])/g, '$1 $2').replace(/[_-]+/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase()).trim() || tr3('Additional Section', '附加板块', 'Sección adicional');
+  };
+
+  const humanizeStatusToken = (raw) => {
+    const s = String(raw || '').trim().toLowerCase();
+    if (!s) return '';
+    if (s === 'verified' || s === 'ready' || s === 'complete' || s === 'completed') return tr3('Verified', '已核验', 'Verificado');
+    if (s === 'quarantine_human_review' || s === 'awaiting_approval') return tr3('Awaiting Review', '待审阅', 'En revisión');
+    if (s === 'awaiting_browser_skill' || s === 'awaiting_external_response') return tr3('Preparing', '准备中', 'Preparando');
+    if (s === 'pending' || s === 'queued') return tr3('Queued', '排队中', 'En cola');
+    if (s === 'redacted') return tr3('Upgrade Required', '需升级查看', 'Requiere plan');
+    return s.replace(/[_-]+/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
+  };
+
+  const formatLazyTime = (iso) => {
+    if (!iso) return '';
+    try {
+      const d = new Date(iso);
+      if (Number.isNaN(d.getTime())) return '';
+      return d.toLocaleDateString(LANG === 'zh' ? 'zh-CN' : LANG === 'es' ? 'es-ES' : 'en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+    } catch {
+      return '';
+    }
+  };
+
+  const pickFiniteNum = (a, b) => {
+    const raw = a != null ? a : b;
+    if (raw == null || raw === '') return null;
+    const n = Number(raw);
+    return Number.isFinite(n) ? n : null;
+  };
+
+  const isPaywallLockStub = (val) => Boolean(val && typeof val === 'object' && !Array.isArray(val) && val.paywallLocked === true);
+
+  const normalizePaywallLock = (sectionId, raw) => {
+    if (!raw || typeof raw !== 'object') return null;
+    const sid = raw.sectionId || raw.section_id || sectionId;
+    const reqTier = String(raw.requiredTier || raw.required_tier || 'buyer').trim().toLowerCase() || 'buyer';
+    const tierLbl = String(raw.requiredTierLabel || raw.required_tier_label || TIER_LABELS[reqTier] || humanizeStatusToken(reqTier) || 'Buyer').trim();
+    const pmRaw = (raw.previewMeta && typeof raw.previewMeta === 'object')
+      ? raw.previewMeta
+      : ((raw.preview_meta && typeof raw.preview_meta === 'object') ? raw.preview_meta : {});
+    return {
+      sectionId: sid,
+      requiredTier: reqTier,
+      requiredTierLabel: tierLbl,
+      previewMeta: {
+        available: pmRaw.available === true,
+        documentCount: pickFiniteNum(pmRaw.documentCount, pmRaw.document_count),
+        findingCount: pickFiniteNum(pmRaw.findingCount, pmRaw.finding_count),
+        compCount: pickFiniteNum(pmRaw.compCount, pmRaw.comp_count),
+        itemCount: pickFiniteNum(pmRaw.itemCount, pmRaw.item_count),
+        redactedFieldCount: pickFiniteNum(pmRaw.redactedFieldCount, pmRaw.redacted_field_count),
+        status: pmRaw.status ? humanizeStatusToken(pmRaw.status) : null,
+      },
+    };
+  };
+
+  const collectPaywallLocksClient = () => {
+    const out = {};
+    const put = (sid, raw) => {
+      if (!sid || !raw || out[sid]) return;
+      if (isPaywallLockStub(raw) || raw.requiredTier || raw.required_tier) {
+        out[sid] = normalizePaywallLock(sid, raw);
+      }
+    };
+    const topLocks = R?.paywallLocks;
+    if (topLocks && typeof topLocks === 'object' && !Array.isArray(topLocks)) {
+      for (const [sid, raw] of Object.entries(topLocks)) put(sid, raw);
+    }
+    const pr = (typeof resolvePublicResearch === 'function') ? resolvePublicResearch() : (R?.publicResearch || {});
+    const apiRev = (pr && pr.apiFetchedReviews) || {};
+    const valData = R?.modules?.valuation?.data || {};
+    const candidates = [
+      ['disclosuresAndInspections', R?.disclosuresAndInspections],
+      ['disclosuresAndInspections', pr?.discoveredDocumentsPaywall],
+      ['inspection', R?.inspection],
+      ['inspection', apiRev.inspection],
+      ['packetReview', R?.packetReview],
+      ['packetReview', apiRev.packetReview],
+      ['titleReview', R?.titleReview],
+      ['titleReview', apiRev.titleReview],
+      ['hoaReview', R?.hoaReview],
+      ['hoaReview', apiRev.hoaReview],
+      ['creReview', R?.creReview],
+      ['rentResearch', R?.rentResearch],
+      ['rentResearch', valData?.rentResearch],
+      ['rentResearch', valData?.ownership?.rentalResearch],
+      ['mlsBboRemarks', R?.facts?.mlsBboRemarks],
+      ['mlsBboRemarks', R?.facts?.mlsListing?.bbo],
+      ['sonicAvailability', R?.buyerDiligence?.connectivity?.sonic],
+    ];
+    for (const [sid, raw] of candidates) {
+      if (isPaywallLockStub(raw)) put(sid, raw);
+    }
+    if (Array.isArray(R?.extensions)) {
+      for (const ext of R.extensions) {
+        if (isPaywallLockStub(ext)) put(ext.sectionId || ext.id || 'extension', ext);
+      }
+    }
+    return out;
+  };
+
+  const formatPaywallMetaBadges = (lock) => {
+    const pm = (lock && lock.previewMeta) || {};
+    const pills = [];
+    if (pm.documentCount != null) pills.push(`<span class="pill info">📄 ${pm.documentCount} ${tr3(pm.documentCount === 1 ? 'document' : 'documents', '份文件', pm.documentCount === 1 ? 'documento' : 'documentos')}</span>`);
+    if (pm.findingCount != null) pills.push(`<span class="pill watch">🔎 ${pm.findingCount} ${tr3(pm.findingCount === 1 ? 'finding' : 'findings', '项发现', pm.findingCount === 1 ? 'hallazgo' : 'hallazgos')}</span>`);
+    if (pm.compCount != null) pills.push(`<span class="pill info">🏠 ${pm.compCount} ${tr3(pm.compCount === 1 ? 'comp' : 'comps', '条可比租金', pm.compCount === 1 ? 'comparable' : 'comparables')}</span>`);
+    if (pm.itemCount != null) pills.push(`<span class="pill mute">📋 ${pm.itemCount} ${tr3(pm.itemCount === 1 ? 'item' : 'items', '项明细', pm.itemCount === 1 ? 'elemento' : 'elementos')}</span>`);
+    if (pm.redactedFieldCount != null) pills.push(`<span class="pill mute">🔒 ${pm.redactedFieldCount} ${tr3(pm.redactedFieldCount === 1 ? 'protected field' : 'protected fields', '项受保护字段', pm.redactedFieldCount === 1 ? 'campo protegido' : 'campos protegidos')}</span>`);
+    if (pm.status) pills.push(`<span class="pill good">${esc(pm.status)}</span>`);
+    return pills.join('');
+  };
+
+  const renderPaywallCardHtml = (sectionId, lock) => {
+    const norm = lock?.previewMeta ? lock : normalizePaywallLock(sectionId, lock);
+    if (!norm) return '';
+    const title = humanizeSectionTitle(sectionId);
+    const tierLabel = norm.requiredTierLabel || 'Buyer';
+    const msg = tr3(
+      `Upgrade to at least ${tierLabel} to unlock`,
+      `升级至 ${tierLabel} 及以上方案即可解锁查看`,
+      `Actualice al menos a ${tierLabel} para desbloquear`
+    );
+    const metaHtml = formatPaywallMetaBadges(norm);
+    return `<div class="oe-paywall-lock-card" data-oe-paywall-section="${esc(norm.sectionId)}">
+      <div class="oe-paywall-head">
+        <div>
+          <div class="oe-paywall-title">🔒 ${esc(title)} <span class="pill watch">${esc(tierLabel)}</span></div>
+          <div class="oe-paywall-msg">${esc(msg)}</div>
+        </div>
+        ${location.protocol !== 'file:' ? `<a class="oe-paywall-cta" href="/pricing?tier=${encodeURIComponent(norm.requiredTier)}">${esc(tr3(`View ${tierLabel} plans`, `查看 ${tierLabel} 方案`, `Ver planes ${tierLabel}`))} ↗</a>` : ''}
+      </div>
+      ${metaHtml ? `<div class="oe-paywall-meta">${metaHtml}</div>` : ''}
+    </div>`;
+  };
+
+  const lazyStatusBadgeInfo = (status) => {
+    const s = String(status || '').toLowerCase();
+    if (s === 'pending') return { tone: 'info', label: tr3('Queued', '排队中', 'En cola') };
+    if (s === 'awaiting_external_response') return { tone: 'info', label: tr3('Preparing', '准备中', 'Preparando') };
+    if (s === 'awaiting_approval') return { tone: 'watch', label: tr3('Awaiting Review', '待审批', 'En revisión') };
+    if (s === 'not_enabled') return { tone: 'mute', label: tr3('Not Enabled', '未启用', 'No habilitado') };
+    if (s === 'failed') return { tone: 'bad', label: tr3('Unavailable', '暂不可用', 'No disponible') };
+    return { tone: 'good', label: tr3('Ready', '已就绪', 'Listo') };
+  };
+
+  const subStorageKey = (slug, sectionId) => `oe:lazy-sub:${slug || 'local'}:${sectionId}`;
+
+  const renderLazyStatusCardHtml = (sectionId, entry) => {
+    if (!entry || typeof entry !== 'object') return '';
+    const status = String(entry.status || 'pending').toLowerCase();
+    const title = humanizeSectionTitle(sectionId);
+    const badge = lazyStatusBadgeInfo(status);
+    const slug = R?.meta?.slug || '';
+    const ts = formatLazyTime(entry.fetchedAt || entry.updatedAt);
+    const isWait = status === 'pending' || status === 'awaiting_external_response';
+    const headline = isWait
+      ? tr3('This section is being prepared — notify me when it\'s ready', '该板块正在后台准备中——完成后通知我', 'Esta sección se está preparando — avísame cuando esté lista')
+      : status === 'awaiting_approval'
+        ? tr3('This section is awaiting review — notify me when it\'s ready', '该板块等待审核通过——完成后通知我', 'Esta sección espera aprobación — avísame cuando esté lista')
+        : status === 'not_enabled'
+          ? tr3('This optional section is not enabled on this report.', '此可选板块尚未在本报告启用。', 'Esta sección opcional no está habilitada.')
+          : status === 'failed'
+            ? tr3('Background preparation could not be completed yet.', '后台准备暂未完成。', 'La preparación en segundo plano no pudo completarse aún.')
+            : tr3('This section is ready.', '该板块已就绪。', 'Esta sección está lista.');
+    const rawDetail = String(entry.message || '').trim();
+    const detailText = rawDetail ? rawDetail.replace(/\b(awaiting_external_response|awaiting_approval|not_enabled|awaiting_browser_skill|quarantine_human_review)\b/g, (m) => humanizeStatusToken(m)) : '';
+    const canSub = status !== 'ready' && (entry.canSubscribe === true || (entry.canSubscribe !== false && (isWait || status === 'awaiting_approval')));
+    let savedSub = null;
+    try {
+      const rawSub = sessionStorage.getItem(subStorageKey(slug, sectionId));
+      if (rawSub) savedSub = JSON.parse(rawSub);
+    } catch { /* ignore */ }
+    const formHtml = canSub ? `
+      <form class="oe-lazy-sub-form" data-lazy-sub-section="${esc(sectionId)}">
+        <input type="email" name="email" required value="${esc(savedSub?.email || '')}" placeholder="${esc(tr3('Enter email to be notified…', '输入邮箱以接收就绪通知…', 'Ingrese su correo para recibir aviso…'))}" aria-label="${esc(title)} email">
+        <button type="submit">${esc(savedSub?.email ? tr3('Update alert', '更新提醒', 'Actualizar aviso') : tr3('Notify me', '完成后通知我', 'Notificarme'))}</button>
+        <span class="oe-lazy-sub-status">${savedSub?.email ? esc(`✓ ${tr3('We\'ll notify ', '就绪后将通知 ', 'Avisaremos a ')}${savedSub.email}`) : ''}</span>
+      </form>` : '';
+
+    return `<div class="oe-lazy-card" data-lazy-section="${esc(sectionId)}" data-status="${esc(status)}">
+      <div class="oe-lazy-head">
+        <div class="oe-lazy-title">⏳ ${esc(title)} <span class="pill ${badge.tone}">${esc(badge.label)}</span></div>
+        ${ts ? `<span class="small">${esc(ts)}</span>` : ''}
+      </div>
+      <div class="oe-lazy-msg"><b>${esc(headline)}</b>${detailText && detailText !== headline ? ` · ${esc(detailText)}` : ''}</div>
+      ${formHtml}
+    </div>`;
+  };
+
+  const renderDisclosuresPacketCardHtml = (disc) => {
+    if (!disc || typeof disc !== 'object' || isPaywallLockStub(disc)) return '';
+    const st = String(disc.status || '').toLowerCase();
+    if (st === 'awaiting_browser_skill' || st === 'quarantine_human_review') {
+      const synthEntry = R?.lazySections?.disclosuresAndInspections || {
+        sectionId: 'disclosuresAndInspections',
+        status: st === 'quarantine_human_review' ? 'awaiting_approval' : 'awaiting_external_response',
+        message: disc.message || '',
+        canSubscribe: true,
+        updatedAt: disc.updatedAt,
+      };
+      return renderLazyStatusCardHtml('disclosuresAndInspections', synthEntry);
+    }
+    const verLabel = disc.verificationStatus ? humanizeStatusToken(disc.verificationStatus) : tr3('Verified Packet', '已核验文件包', 'Paquete verificado');
+    const authRaw = Number(disc.authenticityScore);
+    const authPct = Number.isFinite(authRaw) ? (authRaw <= 1 ? Math.round(authRaw * 100) : Math.round(authRaw)) : null;
+    const files = Array.isArray(disc.files) ? disc.files : [];
+    const canShareRaw = String(disc.rawFileSharingPolicy || '').toLowerCase() !== 'redacted';
+    const summaryText = disc.analysis?.summary || disc.analysis?.headline || disc.message || '';
+    const agentLine = [disc.listingAgent?.name, disc.listingAgent?.brokerage, disc.listingAgent?.email].filter(Boolean).join(' · ');
+    const ts = formatLazyTime(disc.updatedAt);
+
+    return `<div class="oe-disclosures-card" data-oe-disclosures="ready">
+      <div class="oe-disc-head">
+        <div class="oe-lazy-title">📑 ${esc(tr3('Disclosures & Inspections Packet', '披露文件与验房档案', 'Paquete de Divulgaciones e Inspecciones'))} <span class="pill good">${esc(verLabel)}</span>${authPct != null ? `<span class="pill info">${authPct}% ${esc(tr3('authenticity', '可信度', 'autenticidad'))}</span>` : ''}</div>
+        ${ts ? `<span class="small">${esc(ts)}</span>` : ''}
+      </div>
+      ${summaryText ? `<div class="oe-disc-summary">${esc(summaryText)}</div>` : ''}
+      ${files.length ? `<div class="oe-disc-files">${files.map((f) => {
+        const fname = f.name || f.filename || f.title || 'Disclosure File';
+        const href = canShareRaw ? safeHttpUrl(f.url) : null;
+        const badge = f.docType ? ` (${humanizeStatusToken(f.docType)})` : '';
+        return `<span class="oe-disc-file">📄 ${href ? `<a href="${esc(href)}" target="_blank" rel="noopener noreferrer">${esc(fname)}</a>` : esc(fname)}${badge ? `<span class="small">${esc(badge)}</span>` : ''}</span>`;
+      }).join('')}</div>` : ''}
+      ${agentLine ? `<div class="small">${esc(tr3('Listing contact:', '挂牌方联系信息：', 'Contacto del anuncio:'))} ${esc(agentLine)}</div>` : ''}
+    </div>`;
+  };
+
+  const bindLazySubForms = (root = document) => {
+    if (!root || typeof root.querySelectorAll !== 'function') return;
+    root.querySelectorAll('form.oe-lazy-sub-form[data-lazy-sub-section]').forEach((form) => {
+      if (form.dataset.oeBound === '1') return;
+      form.dataset.oeBound = '1';
+      form.addEventListener('submit', async (ev) => {
+        ev.preventDefault();
+        const sectionId = form.getAttribute('data-lazy-sub-section') || '';
+        const emailIn = form.querySelector('input[name="email"]');
+        const btn = form.querySelector('button[type="submit"]');
+        const stEl = form.querySelector('.oe-lazy-sub-status');
+        const email = String(emailIn?.value || '').trim();
+        if (!email || !email.includes('@')) {
+          if (stEl) {
+            stEl.className = 'oe-lazy-sub-status err';
+            stEl.textContent = tr3('Please enter a valid email address.', '请输入有效的电子邮箱地址。', 'Ingrese un correo electrónico válido.');
+          }
+          return;
+        }
+        if (location.protocol === 'file:' || !R?.meta?.slug) {
+          if (stEl) {
+            stEl.className = 'oe-lazy-sub-status err';
+            stEl.textContent = tr3('Start the server to save notification subscriptions.', '请连接服务端以保存就绪通知订阅。', 'Inicie el servidor para guardar la suscripción.');
+          }
+          return;
+        }
+        if (btn) btn.disabled = true;
+        if (stEl) {
+          stEl.className = 'oe-lazy-sub-status';
+          stEl.textContent = tr3('Saving…', '保存中…', 'Guardando…');
+        }
+        try {
+          const res = await fetch(`/api/report/${encodeURIComponent(R.meta.slug)}/subscriptions`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ sectionId, email }),
+          });
+          const j = await res.json().catch(() => ({}));
+          if (!res.ok || !j?.ok) throw new Error(j?.error || ('HTTP ' + res.status));
+          try {
+            sessionStorage.setItem(subStorageKey(R.meta.slug, sectionId), JSON.stringify({ email, alreadySubscribed: Boolean(j.alreadySubscribed), ts: Date.now() }));
+          } catch { /* ignore */ }
+          if (j.sectionStatus && typeof j.sectionStatus === 'object') {
+            R.lazySections = R.lazySections || {};
+            R.lazySections[sectionId] = j.sectionStatus;
+          }
+          if (stEl) {
+            stEl.className = 'oe-lazy-sub-status';
+            stEl.textContent = j.alreadySubscribed
+              ? `✓ ${tr3('Already subscribed — we\'ll notify ', '已订阅——就绪后将通知 ', 'Ya suscrito — avisaremos a ')}${email}`
+              : `✓ ${tr3('Subscribed — we\'ll notify ', '订阅成功——就绪后将通知 ', 'Suscrito — avisaremos a ')}${email}`;
+          }
+          if (j.sectionStatus?.status === 'ready') {
+            reloadReportFromServer();
+          }
+        } catch (err) {
+          if (stEl) {
+            stEl.className = 'oe-lazy-sub-status err';
+            stEl.textContent = String(err?.message || tr3('Unable to subscribe right now.', '暂时无法订阅，请稍后再试。', 'No se pudo suscribir ahora.'));
+          }
+        } finally {
+          if (btn) btn.disabled = false;
+        }
+      });
+    });
+  };
+
+  const setOeAnchorHtml = (el, html, kindClass) => {
+    if (!el) return;
+    const hasCloudCard = Boolean(el.querySelector('.db-paywall-lock-card') || el.closest('[data-paywall-section]')?.querySelector('.db-paywall-lock-card'));
+    if (kindClass === 'oe-paywall-lock-card' && hasCloudCard) {
+      el.querySelectorAll('.oe-paywall-lock-card').forEach((n) => n.remove());
+      return;
+    }
+    const existingCloud = Array.from(el.children).filter((c) => c.classList?.contains('db-paywall-lock-card'));
+    if (!existingCloud.length) {
+      el.innerHTML = html || '';
+    } else {
+      Array.from(el.children).forEach((c) => {
+        if (!c.classList?.contains('db-paywall-lock-card')) c.remove();
+      });
+      if (html && kindClass !== 'oe-paywall-lock-card') {
+        el.insertAdjacentHTML('beforeend', html);
+      }
+    }
+    bindLazySubForms(el);
+  };
+
+  const renderAllLazyAndPaywallAnchors = (opts) => {
+    const lazy = (R && R.lazySections && typeof R.lazySections === 'object') ? R.lazySections : {};
+    const locks = collectPaywallLocksClient();
+
+    const discEl = $('#disclosuresAndInspectionsMount');
+    if (discEl) {
+      let html = '';
+      if (locks.disclosuresAndInspections) {
+        html = renderPaywallCardHtml('disclosuresAndInspections', locks.disclosuresAndInspections);
+      } else if (R?.disclosuresAndInspections && !isPaywallLockStub(R.disclosuresAndInspections)) {
+        html = renderDisclosuresPacketCardHtml(R.disclosuresAndInspections);
+      } else if (lazy.disclosuresAndInspections && lazy.disclosuresAndInspections.status !== 'ready') {
+        html = renderLazyStatusCardHtml('disclosuresAndInspections', lazy.disclosuresAndInspections);
+      }
+      setOeAnchorHtml(discEl, html, locks.disclosuresAndInspections ? 'oe-paywall-lock-card' : 'oe-lazy-card');
+    }
+
+    const inspLazyEl = $('#inspLazyMount');
+    if (inspLazyEl) {
+      let html = '';
+      if (locks.inspection) {
+        html = renderPaywallCardHtml('inspection', locks.inspection);
+      } else if (lazy.inspection && lazy.inspection.status !== 'ready') {
+        html = renderLazyStatusCardHtml('inspection', lazy.inspection);
+      }
+      setOeAnchorHtml(inspLazyEl, html, locks.inspection ? 'oe-paywall-lock-card' : 'oe-lazy-card');
+    }
+
+    const packetLazyEl = $('#packetLazyMount');
+    if (packetLazyEl) {
+      let html = '';
+      if (locks.packetReview) {
+        html = renderPaywallCardHtml('packetReview', locks.packetReview);
+      } else if (lazy.packetReview && lazy.packetReview.status !== 'ready') {
+        html = renderLazyStatusCardHtml('packetReview', lazy.packetReview);
+      }
+      setOeAnchorHtml(packetLazyEl, html, locks.packetReview ? 'oe-paywall-lock-card' : 'oe-lazy-card');
+    }
+
+    const titlePwEl = $('#titlePaywallMount');
+    if (titlePwEl) {
+      setOeAnchorHtml(titlePwEl, locks.titleReview ? renderPaywallCardHtml('titleReview', locks.titleReview) : '', 'oe-paywall-lock-card');
+    }
+
+    const hoaPwEl = $('#hoaPaywallMount');
+    if (hoaPwEl) {
+      setOeAnchorHtml(hoaPwEl, locks.hoaReview ? renderPaywallCardHtml('hoaReview', locks.hoaReview) : '', 'oe-paywall-lock-card');
+    }
+
+    const crePwEl = $('#crePaywallAnchor');
+    if (crePwEl) {
+      setOeAnchorHtml(crePwEl, locks.creReview ? renderPaywallCardHtml('creReview', locks.creReview) : '', 'oe-paywall-lock-card');
+    }
+
+    const sonicPwEl = $('#sonicPaywallAnchor');
+    if (sonicPwEl) {
+      setOeAnchorHtml(sonicPwEl, locks.sonicAvailability ? renderPaywallCardHtml('sonicAvailability', locks.sonicAvailability) : '', 'oe-paywall-lock-card');
+    }
+
+    const mlsPwEl = $('#mlsBboPaywallAnchor');
+    if (mlsPwEl) {
+      setOeAnchorHtml(mlsPwEl, locks.mlsBboRemarks ? renderPaywallCardHtml('mlsBboRemarks', locks.mlsBboRemarks) : '', 'oe-paywall-lock-card');
+    }
+
+    const fallbackMount = $('#lazySectionsFallbackMount');
+    if (fallbackMount) {
+      const parts = [];
+      for (const [sid, entry] of Object.entries(lazy)) {
+        if (!entry || DEDICATED_LAZY_SECTIONS.has(sid)) continue;
+        if (locks[sid]) continue;
+        if (entry.status !== 'ready' || entry.message || (Array.isArray(entry.extensionIds) && entry.extensionIds.length)) {
+          parts.push(renderLazyStatusCardHtml(sid, entry));
+        }
+      }
+      for (const [sid, lock] of Object.entries(locks)) {
+        if (DEDICATED_PAYWALL_SECTIONS.has(sid)) continue;
+        parts.push(renderPaywallCardHtml(sid, lock));
+      }
+      if (parts.length) {
+        fallbackMount.hidden = false;
+        fallbackMount.innerHTML = parts.join('');
+        bindLazySubForms(fallbackMount);
+      } else {
+        fallbackMount.hidden = true;
+        fallbackMount.innerHTML = '';
+      }
+    }
+
+    if (!opts?.skipRent && window.OpenEstateWorkspace?.refreshRentResearch) {
+      try { window.OpenEstateWorkspace.refreshRentResearch(); } catch { /* ignore */ }
+    }
+  };
+
+  const hasActivePendingLazy = () => {
+    const lazy = R?.lazySections;
+    if (!lazy || typeof lazy !== 'object') return false;
+    return Object.values(lazy).some((e) => {
+      const s = String(e?.status || '').toLowerCase();
+      return s === 'pending' || s === 'awaiting_external_response';
+    });
+  };
+
+  const stopLazyStatusPolling = () => {
+    if (pollTimer) {
+      clearInterval(pollTimer);
+      pollTimer = null;
+    }
+  };
+
+  const reloadReportFromServer = async () => {
+    if (reloadInFlight || location.protocol === 'file:' || !R?.meta?.slug) return;
+    reloadInFlight = true;
+    try {
+      const res = await fetch(`/r/${encodeURIComponent(R.meta.slug)}/report.json`, { cache: 'no-store' });
+      if (!res.ok) return;
+      const fresh = await res.json();
+      if (!fresh || typeof fresh !== 'object' || Array.isArray(fresh) || !fresh.meta) return;
+      Object.assign(R, fresh);
+      try { refreshDynamicLanguageViews(); } catch { /* ignore */ }
+      try { window.OpenEstateCommercialWorkspace?.renderPaywallPlaceholders?.(); } catch { /* ignore */ }
+    } catch { /* ignore */ } finally {
+      reloadInFlight = false;
+    }
+  };
+
+  const pollOnce = async () => {
+    if (pollInFlight || location.protocol === 'file:' || !R?.meta?.slug) return;
+    if (!hasActivePendingLazy()) {
+      stopLazyStatusPolling();
+      return;
+    }
+    pollInFlight = true;
+    try {
+      const res = await fetch(`/api/report/${encodeURIComponent(R.meta.slug)}/lazy-status`, { cache: 'no-store' });
+      if (!res.ok) return;
+      const j = await res.json();
+      if (!j?.ok || !j.sections || typeof j.sections !== 'object') return;
+      const prev = R.lazySections || {};
+      let becameReady = false;
+      let changed = false;
+      for (const [sid, nextEntry] of Object.entries(j.sections)) {
+        const oldEntry = prev[sid];
+        if (!oldEntry || oldEntry.status !== nextEntry.status || oldEntry.updatedAt !== nextEntry.updatedAt || oldEntry.message !== nextEntry.message) {
+          changed = true;
+        }
+        if (nextEntry?.status === 'ready' && (!oldEntry || oldEntry.status !== 'ready')) {
+          becameReady = true;
+        }
+      }
+      R.lazySections = { ...prev, ...j.sections };
+      if (becameReady) {
+        await reloadReportFromServer();
+      } else if (changed) {
+        renderAllLazyAndPaywallAnchors();
+      }
+      if (!hasActivePendingLazy()) stopLazyStatusPolling();
+    } catch { /* ignore */ } finally {
+      pollInFlight = false;
+    }
+  };
+
+  const startLazyStatusPolling = () => {
+    if (location.protocol === 'file:' || !R?.meta?.slug) return;
+    if (!hasActivePendingLazy()) {
+      stopLazyStatusPolling();
+      return;
+    }
+    if (!unloadBound) {
+      unloadBound = true;
+      window.addEventListener('pagehide', stopLazyStatusPolling);
+      window.addEventListener('beforeunload', stopLazyStatusPolling);
+    }
+    if (pollTimer) return;
+    pollTimer = setInterval(pollOnce, 12000);
+  };
+
+  return {
+    humanizeSectionTitle,
+    humanizeStatusToken,
+    isPaywallLockStub,
+    normalizePaywallLock,
+    collectPaywallLocksClient,
+    renderPaywallCardHtml,
+    renderLazyStatusCardHtml,
+    renderDisclosuresPacketCardHtml,
+    bindLazySubForms,
+    renderAllLazyAndPaywallAnchors,
+    startLazyStatusPolling,
+    stopLazyStatusPolling,
+    reloadReportFromServer,
+    pollOnce,
+  };
+})();
 function activeText() {
   const s = R.summary || {}, n = s.narrative || {}, df = R.decisionFactors || {};
   const tr = LANG === 'zh'
@@ -2261,7 +2882,7 @@ function osmTileLayer(opts = {}) {
   const isFile = typeof location !== 'undefined' && location.protocol === 'file:';
   const url = isFile ? (USGS_BASEMAP + 'USGSImageryTopo/MapServer/tile/{z}/{y}/{x}') : OSM_URL;
   const lyr = L.tileLayer(url, Object.assign({
-    maxZoom: 19,
+    maxZoom: 21,
     maxNativeZoom: isFile ? 16 : 19,
     referrerPolicy: 'strict-origin-when-cross-origin',
     attribution: OSM_ATTR,
@@ -2291,6 +2912,7 @@ function resolveSatelliteConfig() {
       maxNativeZoom: fallbackMaxNative,
       maxZoom: 21,
       tileSize: 256,
+      use512Offset: false,
       bounds: null,
       attribution: fallbackAttr,
       fallbackMaxNativeZoom: fallbackMaxNative,
@@ -2305,12 +2927,18 @@ function resolveSatelliteConfig() {
   const effMaxNative = blockedOnFile ? fallbackMaxNative : (sc.maxNativeZoom || 19);
   const effMaxZoom = Math.max(21, sc.maxZoom || 22, effMaxNative);
   const effAttr = blockedOnFile ? fallbackAttr : (sc.attribution || fallbackAttr);
+  const rawTileSize = sc.tileSize || 256;
+  const isMapTile256Retina = !blockedOnFile && rawTileSize >= 512 && /\/api\/media\/satellite\/tile\b|@2x/i.test(String(effUrl));
+  const use512Offset = Boolean(!blockedOnFile && rawTileSize >= 512 && !isMapTile256Retina);
+  const wantDetectRetina = Boolean(!blockedOnFile && !isMapTile256Retina && !use512Offset && rawTileSize <= 256 && effMaxNative > 16);
   return {
     tileUrl: effUrl,
     fallbackTileUrl: fallbackUrl,
     maxNativeZoom: effMaxNative,
     maxZoom: effMaxZoom,
-    tileSize: sc.tileSize || 256,
+    tileSize: use512Offset ? 512 : 256,
+    use512Offset,
+    wantDetectRetina,
     bounds: Array.isArray(sc.bounds) && sc.bounds.length === 4 ? sc.bounds : null,
     attribution: effAttr,
     fallbackMaxNativeZoom: fallbackMaxNative,
@@ -2327,24 +2955,27 @@ const BASE = {
     const s = resolveSatelliteConfig();
     const baseLyr = L.tileLayer(s.fallbackTileUrl, { maxZoom: s.maxZoom, maxNativeZoom: s.fallbackMaxNativeZoom, attribution: s.fallbackAttribution });
     if (!s.hasOverlay) return baseLyr;
-    const topOpts = { maxZoom: s.maxZoom, maxNativeZoom: s.maxNativeZoom, tileSize: s.tileSize, attribution: s.attribution };
-    if (s.tileSize >= 512) {
-      topOpts.zoomOffset = -1;
-      topOpts.maxNativeZoom = s.maxNativeZoom + 1;
-    }
+    const topOpts = {
+      maxZoom: s.wantDetectRetina ? Math.max(22, s.maxZoom) : s.maxZoom,
+      maxNativeZoom: s.use512Offset ? (s.maxNativeZoom + 1) : s.maxNativeZoom,
+      tileSize: s.use512Offset ? 512 : 256,
+      zoomOffset: s.use512Offset ? -1 : 0,
+      detectRetina: s.wantDetectRetina,
+      attribution: s.attribution,
+    };
     if (s.bounds) topOpts.bounds = [[s.bounds[0], s.bounds[1]], [s.bounds[2], s.bounds[3]]];
     return L.layerGroup([baseLyr, L.tileLayer(s.tileUrl, topOpts)]);
   },
   terrain: () => L.layerGroup([
     osmTileLayer(),
-    L.tileLayer(USGS_BASEMAP + 'USGSShadedReliefOnly/MapServer/tile/{z}/{y}/{x}', { maxZoom: 19, maxNativeZoom: 16, opacity: 0.22, attribution: 'Hillshade: USGS 3DEP (Public Domain)' }),
+    L.tileLayer(USGS_BASEMAP + 'USGSShadedReliefOnly/MapServer/tile/{z}/{y}/{x}', { maxZoom: 21, maxNativeZoom: 16, opacity: 0.22, attribution: 'Hillshade: USGS 3DEP (Public Domain)' }),
   ]),
 };
 function arcgisExport(url, layers, opts = {}) {
   const hiDpi = typeof window !== 'undefined' && (window.devicePixelRatio || 1) > 1;
   const px = hiDpi ? 512 : 256, dpi = hiDpi ? 192 : 96;
   const Layer = L.TileLayer.extend({ getTileUrl(c) { const z = this._getZoomForUrl(), n = 2 ** z, o = Math.PI * 6378137, res = (2 * o) / (256 * n); const x0 = -o + c.x * 256 * res, y1 = o - c.y * 256 * res; return `${url}/export?bbox=${x0},${y1 - 256 * res},${x0 + 256 * res},${y1}&bboxSR=3857&imageSR=3857&size=${px},${px}&dpi=${dpi}&format=png32&transparent=true&layers=show:${layers}&f=image`; } });
-  return new Layer('', Object.assign({ opacity: 0.55, tileSize: 256, maxZoom: 19, maxNativeZoom: 19 }, opts));
+  return new Layer('', Object.assign({ opacity: 0.55, tileSize: 256, maxZoom: 21, maxNativeZoom: 19 }, opts));
 }
 /* Wheel-zoom engages once the reader aims at a map: a real pointer move, a press or keyboard focus inside it.
    A wheel event that arrives while the page is being scrolled past a map under a resting cursor keeps scrolling
@@ -2518,28 +3149,343 @@ function geoLayer(lyr, opts = {}) {
   });
 }
 const findLayer = (mod, id) => (D(mod)?.mapLayers || []).find((l) => l.id === id);
-/** Lazy Leaflet map with chip toggles. layers: [{key,label,color,count,make:()=>Layer,on}] */
+const _MAP_EXPAND_SVG = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 3h6v6"/><path d="M9 21H3v-6"/><path d="M21 3l-7 7"/><path d="M3 21l7-7"/></svg>';
+window.OpenEstateMapExpand = (() => {
+  const specs = Object.create(null);
+  const BASEMAP_DEFS = [
+    ['satellite', 'Satellite', '卫星', 'Satélite'],
+    ['streets', 'Streets', '街道', 'Calles'],
+    ['light', 'Light', '浅色', 'Claro'],
+    ['terrain', 'Terrain', '地形', 'Terreno'],
+  ];
+  let modalMap = null;
+  let modal3d = null;
+  let modalBaseLayer = null;
+  let modalOutlineGroup = null;
+  let lastTrigger = null;
+  let keyBound = false;
+
+  const mapTitleFor = (id) => {
+    if (id === 'hero' || id === 'gMain') return tr3('Property Map · Aerial & 3D', '房产地图 · 航拍与三维', 'Mapa de la propiedad');
+    if (id === 'gStreet') return tr3('Street Map', '街道地图', 'Mapa de calles');
+    if (id === 'gTerrain') return tr3('Terrain Map', '地形图', 'Mapa de terreno');
+    if (id === 'compMap') return tr3('Comparable Sales Map', '周边成交对比地图', 'Mapa de comparables');
+    if (id === 'hzMap') return tr3('Natural Hazards & Risk Map', '自然灾害风险地图', 'Mapa de riesgos');
+    if (id === 'envMap') return tr3('Environmental & Noise Map', '环境与噪音地图', 'Mapa ambiental');
+    if (id === 'schMap') return tr3('Assigned & Nearby Schools Map', '周边学区学校地图', 'Mapa escolar');
+    if (id === 'nbMap') return tr3('Neighborhood Amenities & Transit Map', '社区生活圈与交通地图', 'Mapa del vecindario');
+    if (id === 'fsMap') return tr3('堪舆地理形势图', '堪舆地理形势图', 'Mapa topográfico');
+    return tr3('Interactive Map', '交互地图', 'Mapa interactivo');
+  };
+
+  const bringLayerBack = (lyr) => {
+    if (!lyr) return;
+    if (typeof lyr.eachLayer === 'function') {
+      lyr.eachLayer((sub) => { try { sub.bringToBack?.(); } catch {} });
+    } else {
+      try { lyr.bringToBack?.(); } catch {}
+    }
+  };
+
+  const destroyModalMaps = () => {
+    if (modal3d) { try { modal3d.destroy(); } catch {} modal3d = null; }
+    if (modalMap) { try { modalMap.remove(); } catch {} modalMap = null; }
+    modalBaseLayer = null;
+    modalOutlineGroup = null;
+    const canvas = document.getElementById('mapExpandCanvas');
+    if (canvas) canvas.innerHTML = '';
+  };
+
+  const closeModal = () => {
+    const bg = document.getElementById('mapExpandModal');
+    destroyModalMaps();
+    if (bg) bg.hidden = true;
+    const chips = document.getElementById('mapExpandChips');
+    if (chips) { chips.hidden = true; chips.innerHTML = ''; }
+    const baseBar = document.getElementById('mapExpandBaseBar');
+    if (baseBar) baseBar.innerHTML = '';
+    if (lastTrigger && typeof lastTrigger.focus === 'function') {
+      try { lastTrigger.focus({ preventScroll: true }); } catch {}
+    }
+    lastTrigger = null;
+  };
+
+  const localizeAll = () => {
+    const lbl = tr3('Expand map', '放大地图', 'Ampliar mapa');
+    document.querySelectorAll('.map-expand-btn').forEach((btn) => {
+      btn.setAttribute('aria-label', lbl);
+      btn.setAttribute('title', lbl);
+    });
+    document.querySelectorAll('.map-basemap-bar button[data-bm]').forEach((b) => {
+      const def = BASEMAP_DEFS.find((d) => d[0] === b.dataset.bm);
+      if (def) b.textContent = tr3(def[1], def[2], def[3]);
+    });
+    const clsBtn = document.getElementById('mapExpandClose');
+    if (clsBtn) {
+      const cLbl = tr3('Close', '关闭', 'Cerrar');
+      clsBtn.setAttribute('aria-label', cLbl);
+      clsBtn.setAttribute('title', cLbl);
+    }
+  };
+
+  const openModal = (id, triggerEl) => {
+    const spec = specs[id];
+    const bg = document.getElementById('mapExpandModal');
+    const canvas = document.getElementById('mapExpandCanvas');
+    const titleEl = document.getElementById('mapExpandTitle');
+    const baseBar = document.getElementById('mapExpandBaseBar');
+    const chipsEl = document.getElementById('mapExpandChips');
+    if (!spec || !bg || !canvas) return;
+    if (!keyBound) {
+      keyBound = true;
+      bg.addEventListener('click', (ev) => { if (ev.target === bg) closeModal(); });
+      document.getElementById('mapExpandClose')?.addEventListener('click', closeModal);
+      document.addEventListener('keydown', (ev) => {
+        if (ev.key === 'Escape' && !bg.hidden) closeModal();
+      });
+    }
+    lastTrigger = triggerEl || document.activeElement;
+    destroyModalMaps();
+    if (titleEl) titleEl.textContent = mapTitleFor(id);
+    bg.hidden = false;
+
+    const mode = typeof spec.getMode === 'function' ? spec.getMode() : '2d';
+    if (mode === '3d') {
+      if (baseBar) { baseBar.hidden = true; baseBar.innerHTML = ''; }
+      if (chipsEl) { chipsEl.hidden = true; chipsEl.innerHTML = ''; }
+      const cam = spec.get3dCamera ? spec.get3dCamera() : null;
+      const msg = document.createElement('div');
+      msg.className = 'g3dmsg';
+      msg.textContent = tr3('Loading 3D view…', '正在加载三维视图…', 'Cargando vista 3D…');
+      canvas.appendChild(msg);
+      loadMapLibre()
+        .then((ml) => {
+          if (bg.hidden) return;
+          msg.remove();
+          modal3d = build3dView(ml, canvas, { camera: cam, inModal: true });
+          requestAnimationFrame(() => { try { modal3d?.resume?.(); } catch {} });
+        })
+        .catch(() => {
+          msg.textContent = tr3('The 3D view could not be loaded in this browser.', '当前浏览器无法加载三维视图。', 'No se pudo cargar la vista 3D en este navegador.');
+        });
+      return;
+    }
+
+    const srcMap = spec.getMap ? spec.getMap() : null;
+    const center = srcMap?.getCenter ? srcMap.getCenter() : HOME;
+    const zoom = srcMap?.getZoom ? srcMap.getZoom() : (spec.defaultZoom || 16);
+    let activeBase = (spec.getBase ? spec.getBase() : spec.base) || 'streets';
+    if (!BASE[activeBase]) activeBase = 'streets';
+
+    const maxAllowedZoom = Math.max(21, resolveSatelliteConfig().maxZoom || 21);
+    modalMap = L.map(canvas, {
+      zoomControl: true,
+      scrollWheelZoom: true,
+      attributionControl: true,
+      minZoom: 3,
+      maxZoom: Math.min(22, maxAllowedZoom),
+    }).setView(center, Math.min(maxAllowedZoom, zoom));
+
+    const applyModalBase = (nextBase) => {
+      if (!modalMap || !BASE[nextBase]) return;
+      activeBase = nextBase;
+      if (modalBaseLayer) { try { modalMap.removeLayer(modalBaseLayer); } catch {} }
+      modalBaseLayer = BASE[nextBase]().addTo(modalMap);
+      bringLayerBack(modalBaseLayer);
+      if (modalOutlineGroup) {
+        modalOutlineGroup.clearLayers();
+        if (spec.hasOutlines !== false) {
+          addPropertyOutlines(modalOutlineGroup, { theme: nextBase === 'satellite' ? 'satellite' : 'light' });
+        }
+      }
+      baseBar?.querySelectorAll('button[data-bm]').forEach((b) => b.classList.toggle('on', b.dataset.bm === nextBase));
+      if (typeof spec.setBase === 'function') {
+        try { spec.setBase(nextBase); } catch {}
+      }
+    };
+
+    if (baseBar) {
+      baseBar.hidden = false;
+      baseBar.innerHTML = BASEMAP_DEFS.map(([k, en, zh, es]) =>
+        `<button type="button" data-bm="${esc(k)}" class="${k === activeBase ? 'on' : ''}">${esc(tr3(en, zh, es))}</button>`
+      ).join('');
+      baseBar.querySelectorAll('button[data-bm]').forEach((btn) => {
+        btn.addEventListener('click', () => applyModalBase(btn.dataset.bm));
+      });
+    }
+
+    modalOutlineGroup = L.layerGroup().addTo(modalMap);
+    applyModalBase(activeBase);
+    if (spec.hasHome !== false) homeMarker().addTo(modalMap);
+
+    if (spec.kind === 'hero') {
+      const fs = D('fengshui');
+      if (fs?.orientation) {
+        L.polyline([HOME, destPt(HOME, fs.orientation.facingTrue, 26)], { color: '#ef4444', weight: 3, interactive: false }).addTo(modalMap);
+        L.marker(destPt(HOME, fs.orientation.facingTrue, 30), { icon: L.divIcon({ className: '', html: `<div class="pin subj" style="transform:translate(-50%,-50%)">Faces ${esc(fs.orientation[_PT.fComp])}</div>`, iconSize: [0, 0] }), interactive: false }).addTo(modalMap);
+      }
+    }
+
+    const srcLayers = Array.isArray(spec.layers) ? spec.layers : [];
+    if (chipsEl) {
+      if (srcLayers.length) {
+        const flags = spec.getLayerFlags ? spec.getLayerFlags() : srcLayers.map((l) => l.on !== false);
+        const modalLayers = srcLayers.map((l, i) => {
+          const lay = l.make ? l.make({ forModal: true }) : null;
+          if (lay && flags[i]) lay.addTo(modalMap);
+          return lay;
+        });
+        chipsEl.hidden = false;
+        chipsEl.innerHTML = srcLayers.map((l, i) => `<span class="chip ${flags[i] ? 'on' : ''}" data-mi="${i}"><i style="background:${l.color}"></i>${esc(l.label)}${l.count != null ? ` <em>${l.count}</em>` : ''}</span>`).join('');
+        chipsEl.querySelectorAll('.chip[data-mi]').forEach((ch) => {
+          ch.addEventListener('click', () => {
+            const i = +ch.dataset.mi;
+            const lay = modalLayers[i];
+            if (!lay) return;
+            const on = ch.classList.toggle('on');
+            if (on) lay.addTo(modalMap);
+            else modalMap.removeLayer(lay);
+            if (typeof spec.setLayerFlag === 'function') spec.setLayerFlag(i, on);
+          });
+        });
+      } else {
+        chipsEl.hidden = true;
+        chipsEl.innerHTML = '';
+      }
+    }
+    L.control.scale({ imperial: true, metric: false }).addTo(modalMap);
+    requestAnimationFrame(() => { try { modalMap?.invalidateSize?.({ pan: false }); } catch {} });
+    setTimeout(() => { try { modalMap?.invalidateSize?.({ pan: false }); } catch {} }, 120);
+  };
+
+  return {
+    register: (id, spec) => { specs[id] = spec; },
+    open: openModal,
+    close: closeModal,
+    localizeAll,
+    BASEMAP_DEFS,
+    bringLayerBack,
+    EXPAND_SVG: _MAP_EXPAND_SVG,
+  };
+})();
+
+/** Lazy Leaflet map with chip toggles + basemap switcher + expand modal. layers: [{key,label,color,count,make:()=>Layer,on}] */
 function sectionMap(mapId, chipsId, { base = 'streets', zoom = 15, layers = [], fit = null, extra = null } = {}) {
   const el = document.getElementById(mapId); if (!el) return;
   if (el._io) { try { el._io.disconnect(); } catch {} el._io = null; }
   if (el._ro) { try { el._ro.disconnect(); } catch {} el._ro = null; }
   if (el._map) { try { el._map.remove(); } catch {} el._map = null; }
-  if (chipsId) document.getElementById(chipsId).innerHTML = layers.map((l, i) => `<span class="chip ${l.on !== false ? 'on' : ''}" data-i="${i}"><i style="background:${l.color}"></i>${esc(l.label)}${l.count != null ? ` <em>${l.count}</em>` : ''}</span>`).join('');
+  const activeFlags = layers.map((l) => l.on !== false);
+  if (chipsId) {
+    const chHost = document.getElementById(chipsId);
+    if (chHost) {
+      chHost.innerHTML = layers.map((l, i) => `<span class="chip ${activeFlags[i] ? 'on' : ''}" data-i="${i}"><i style="background:${l.color}"></i>${esc(l.label)}${l.count != null ? ` <em>${l.count}</em>` : ''}</span>`).join('');
+    }
+  }
+  let curBase = BASE[base] ? base : 'streets';
+  let curBaseLayer = null;
+  let outlineGroup = null;
+  let made = [];
+  let map = null;
+  let bmBar = null;
+
+  const setBase = (nextBase) => {
+    if (!BASE[nextBase]) return;
+    curBase = nextBase;
+    el._baseKey = nextBase;
+    if (bmBar) bmBar.querySelectorAll('button[data-bm]').forEach((b) => b.classList.toggle('on', b.dataset.bm === nextBase));
+    if (!map) return;
+    if (curBaseLayer) { try { map.removeLayer(curBaseLayer); } catch {} }
+    curBaseLayer = BASE[nextBase]().addTo(map);
+    window.OpenEstateMapExpand.bringLayerBack(curBaseLayer);
+    if (outlineGroup) {
+      outlineGroup.clearLayers();
+      if (mapId !== 'fsMap') addPropertyOutlines(outlineGroup, { theme: nextBase === 'satellite' ? 'satellite' : 'light' });
+    }
+  };
+
+  const setLayerFlag = (idx, on) => {
+    activeFlags[idx] = Boolean(on);
+    const lay = made[idx];
+    if (map && lay) {
+      if (activeFlags[idx]) lay.addTo(map);
+      else map.removeLayer(lay);
+    }
+    if (chipsId) {
+      const chipEl = document.querySelector(`#${chipsId} .chip[data-i="${idx}"]`);
+      if (chipEl) chipEl.classList.toggle('on', activeFlags[idx]);
+    }
+  };
+
+  window.OpenEstateMapExpand.register(mapId, {
+    kind: 'section',
+    mapId,
+    defaultZoom: zoom,
+    getMap: () => map,
+    getBase: () => curBase,
+    setBase,
+    hasOutlines: mapId !== 'fsMap',
+    hasHome: true,
+    layers,
+    getLayerFlags: () => activeFlags.slice(),
+    setLayerFlag,
+  });
+
   const init = () => {
     if (!document.body.contains(el)) return;
     if (el._map) { try { el._map.remove(); } catch {} el._map = null; }
-    const effMaxZoom = base === 'satellite' ? Math.min(21, resolveSatelliteConfig().maxZoom) : 19;
-    const map = L.map(el, { scrollWheelZoom: false, zoomControl: true, minZoom: 3, maxZoom: effMaxZoom }).setView(HOME, Math.min(effMaxZoom, zoom));
-    BASE[base]().addTo(map);
-    const made = layers.map((l) => { const lay = l.make(); if (lay && l.on !== false) lay.addTo(map); return lay; });
-    if (mapId !== 'fsMap') addPropertyOutlines(map, { theme: base === 'satellite' ? 'satellite' : 'light' });
+    el.querySelectorAll(':scope > .map-basemap-bar, :scope > .map-expand-btn').forEach((n) => n.remove());
+    const effMaxZoom = Math.max(21, resolveSatelliteConfig().maxZoom || 21);
+    map = L.map(el, { scrollWheelZoom: false, zoomControl: true, minZoom: 3, maxZoom: Math.min(22, effMaxZoom) }).setView(HOME, Math.min(effMaxZoom, zoom));
+    curBaseLayer = BASE[curBase]().addTo(map);
+    window.OpenEstateMapExpand.bringLayerBack(curBaseLayer);
+    made = layers.map((l, i) => { const lay = l.make(); if (lay && activeFlags[i]) lay.addTo(map); return lay; });
+    outlineGroup = L.layerGroup().addTo(map);
+    if (mapId !== 'fsMap') addPropertyOutlines(outlineGroup, { theme: curBase === 'satellite' ? 'satellite' : 'light' });
     homeMarker().addTo(map);
     if (extra) extra(map);
-    if (fit) { const b = fit(); if (b && b.isValid && b.isValid()) map.fitBounds(b.pad(0.08), { maxZoom: 17 }); }
+    if (fit) { const b = fit(); if (b && b.isValid && b.isValid()) map.fitBounds(b.pad(0.08), { maxZoom: 18 }); }
     L.control.scale({ imperial: true, metric: false }).addTo(map);
-    if (chipsId) $$(`#${chipsId} .chip`).forEach((ch) => ch.addEventListener('click', () => { const i = +ch.dataset.i, lay = made[i]; if (!lay) return; const on = ch.classList.toggle('on'); if (on) lay.addTo(map); else map.removeLayer(lay); }));
+    if (chipsId) {
+      $$(`#${chipsId} .chip`).forEach((ch) => ch.addEventListener('click', () => {
+        const i = +ch.dataset.i;
+        setLayerFlag(i, !ch.classList.contains('on'));
+      }));
+    }
+    bmBar = document.createElement('div');
+    bmBar.className = 'map-basemap-bar';
+    bmBar.setAttribute('role', 'group');
+    bmBar.innerHTML = window.OpenEstateMapExpand.BASEMAP_DEFS.map(([k, en, zh, es]) =>
+      `<button type="button" data-bm="${esc(k)}" class="${k === curBase ? 'on' : ''}">${esc(tr3(en, zh, es))}</button>`
+    ).join('');
+    bmBar.querySelectorAll('button[data-bm]').forEach((btn) => {
+      btn.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        setBase(btn.dataset.bm);
+      });
+    });
+    const expBtn = document.createElement('button');
+    expBtn.type = 'button';
+    expBtn.className = 'map-expand-btn';
+    expBtn.setAttribute('data-map-expand', mapId);
+    const expLbl = tr3('Expand map', '放大地图', 'Ampliar mapa');
+    expBtn.setAttribute('aria-label', expLbl);
+    expBtn.setAttribute('title', expLbl);
+    expBtn.innerHTML = _MAP_EXPAND_SVG;
+    expBtn.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      window.OpenEstateMapExpand.open(mapId, expBtn);
+    });
+    if (window.L?.DomEvent) {
+      L.DomEvent.disableClickPropagation(bmBar);
+      L.DomEvent.disableScrollPropagation(bmBar);
+      L.DomEvent.disableClickPropagation(expBtn);
+    }
+    el.appendChild(bmBar);
+    el.appendChild(expBtn);
     wireMapZoom(map, el);
     el._map = map;
+    el._baseKey = curBase;
   };
   const io = new IntersectionObserver((ents) => { if (ents.some((e) => e.isIntersecting)) { io.disconnect(); el._io = null; init(); } }, { rootMargin: '300px' });
   el._io = io;
@@ -3259,7 +4205,8 @@ function renderGallery() {
     if (el._map) { try { el._map.remove(); } catch {} el._map = null; }
   });
   const satHero = resolveSatelliteConfig();
-  const m1 = L.map(gMainEl, { zoomControl: true, scrollWheelZoom: false, attributionControl: true, minZoom: 3, maxZoom: satHero.isHighRes ? Math.min(21, satHero.maxZoom) : 19 }).setView(HOME, satHero.isHighRes ? 19 : 18);
+  const heroMaxZ = Math.min(22, Math.max(21, satHero.maxZoom || 21));
+  const m1 = L.map(gMainEl, { zoomControl: true, scrollWheelZoom: false, attributionControl: true, minZoom: 3, maxZoom: heroMaxZ }).setView(HOME, Math.min(heroMaxZ, satHero.isHighRes ? 19 : 18));
   BASE.satellite().addTo(m1);
   addPropertyOutlines(m1, { theme: 'satellite' });
   homeMarker().addTo(m1);
@@ -3280,10 +4227,10 @@ function renderGallery() {
     if (lotPoly) parts.push(`<span class="gleg"><i class="gsw" style="border:2px dashed #38bdf8;background:rgba(56,189,248,.12)"></i>${tx('Lot', '地块红线', 'Lote')}</span>`);
     gTag.innerHTML = parts.join('');
   }
-  const m2 = L.map(gStreetEl, { zoomControl: true, scrollWheelZoom: false, attributionControl: false, dragging: true, minZoom: 3, maxZoom: 19 }).setView(HOME, 17);
+  const m2 = L.map(gStreetEl, { zoomControl: true, scrollWheelZoom: false, attributionControl: false, dragging: true, minZoom: 3, maxZoom: 21 }).setView(HOME, 17);
   BASE.streets().addTo(m2); addPropertyOutlines(m2, { theme: 'light' }); homeMarker().addTo(m2);
   wireMapZoom(m2, gStreetEl); gStreetEl._map = m2;
-  const m3 = L.map(gTerrainEl, { zoomControl: true, scrollWheelZoom: false, attributionControl: false, dragging: true, minZoom: 3, maxZoom: 19 }).setView(HOME, 12);
+  const m3 = L.map(gTerrainEl, { zoomControl: true, scrollWheelZoom: false, attributionControl: false, dragging: true, minZoom: 3, maxZoom: 21 }).setView(HOME, 13);
   BASE.terrain().addTo(m3); homeMarker().addTo(m3);
   wireMapZoom(m3, gTerrainEl); gTerrainEl._map = m3;
   const [la, lo] = HOME, q = encodeURIComponent(R.meta.displayAddress);
@@ -3291,6 +4238,74 @@ function renderGallery() {
   const sv = streetViewpoint();
   const svHref = `https://www.google.com/maps/@?api=1&map_action=pano&viewpoint=${sv.ll[0].toFixed(6)},${sv.ll[1].toFixed(6)}${sv.heading != null ? `&heading=${Math.round(sv.heading)}&pitch=0&fov=80` : ''}`;
   $('#gBtns').innerHTML = `<a class="gbtn" target="_blank" rel="noopener" href="${svHref}">Street View ↗</a><a class="gbtn" target="_blank" rel="noopener" href="https://www.openstreetmap.org/?mlat=${la}&mlon=${lo}#map=18/${la}/${lo}">OpenStreetMap ↗</a><a class="gbtn" target="_blank" rel="noopener" href="https://www.google.com/maps/search/?api=1&query=${q}">Google Maps ↗</a>`;
+
+  let heroBase = 'satellite';
+  let heroBaseLyr = null;
+  window.OpenEstateMapExpand.register('hero', {
+    kind: 'hero',
+    mapId: 'hero',
+    defaultZoom: satHero.isHighRes ? 19 : 18,
+    getMap: () => m1,
+    getBase: () => heroBase,
+    setBase: (nb) => {
+      if (!BASE[nb] || !m1) return;
+      heroBase = nb;
+      if (heroBaseLyr) { try { m1.removeLayer(heroBaseLyr); } catch {} }
+      heroBaseLyr = BASE[nb]().addTo(m1);
+      window.OpenEstateMapExpand.bringLayerBack(heroBaseLyr);
+    },
+    getMode: () => (document.querySelector('#gMode button.on')?.dataset?.v === '3d' ? '3d' : '2d'),
+    get3dCamera: () => {
+      const m3d = view3d?.map;
+      if (!m3d) return null;
+      const c = m3d.getCenter();
+      return { center: [c.lng, c.lat], zoom: m3d.getZoom(), pitch: m3d.getPitch(), bearing: m3d.getBearing() };
+    },
+    hasOutlines: true,
+    hasHome: true,
+    layers: [],
+  });
+  window.OpenEstateMapExpand.register('gStreet', {
+    kind: 'street',
+    mapId: 'gStreet',
+    defaultZoom: 17,
+    getMap: () => m2,
+    getBase: () => gStreetEl._baseKey || 'streets',
+    setBase: (nb) => {
+      if (!BASE[nb] || !m2) return;
+      gStreetEl._baseKey = nb;
+      if (gStreetEl._baseLyr) { try { m2.removeLayer(gStreetEl._baseLyr); } catch {} }
+      gStreetEl._baseLyr = BASE[nb]().addTo(m2);
+      window.OpenEstateMapExpand.bringLayerBack(gStreetEl._baseLyr);
+    },
+    hasOutlines: true,
+    hasHome: true,
+    layers: [],
+  });
+  window.OpenEstateMapExpand.register('gTerrain', {
+    kind: 'terrain',
+    mapId: 'gTerrain',
+    defaultZoom: 13,
+    getMap: () => m3,
+    getBase: () => gTerrainEl._baseKey || 'terrain',
+    setBase: (nb) => {
+      if (!BASE[nb] || !m3) return;
+      gTerrainEl._baseKey = nb;
+      if (gTerrainEl._baseLyr) { try { m3.removeLayer(gTerrainEl._baseLyr); } catch {} }
+      gTerrainEl._baseLyr = BASE[nb]().addTo(m3);
+      window.OpenEstateMapExpand.bringLayerBack(gTerrainEl._baseLyr);
+    },
+    hasOutlines: false,
+    hasHome: true,
+    layers: [],
+  });
+  document.querySelectorAll('.gallery .map-expand-btn[data-map-expand]').forEach((btn) => {
+    btn.onclick = (ev) => {
+      ev.stopPropagation();
+      window.OpenEstateMapExpand.open(btn.getAttribute('data-map-expand'), btn);
+    };
+  });
+  window.OpenEstateMapExpand.localizeAll();
   setupGalleryModes(m1, sv);
 }
 
@@ -3316,6 +4331,7 @@ function streetViewpoint() {
 let view3d = null;
 function setupGalleryModes(m2d, sv) {
   const modeEl = document.getElementById('gMode'), el2d = document.getElementById('gMain'), el3d = document.getElementById('gMain3d'), elSv = document.getElementById('gSv');
+  const expHeroBtn = document.getElementById('expBtnHero');
   if (!modeEl || !el2d || !el3d || typeof modeEl.querySelectorAll !== 'function') return;
   if (view3d) { try { view3d.destroy(); } catch {} view3d = null; }
   const btns = [...modeEl.querySelectorAll('button')];
@@ -3327,6 +4343,7 @@ function setupGalleryModes(m2d, sv) {
     el2d.style.visibility = v === '2d' ? '' : 'hidden';
     el3d.hidden = v !== '3d';
     if (elSv) elSv.hidden = v !== 'sv';
+    if (expHeroBtn) expHeroBtn.hidden = v === 'sv';
     if (v === '2d') { try { m2d?.invalidateSize?.({ pan: false }); } catch {} }
     if (v === '3d') open3dView(el3d);
     else if (view3d) view3d.pause();
@@ -3489,14 +4506,14 @@ function open3dView(el) {
     .catch(() => note(tr3('The 3D view could not be loaded in this browser.', '当前浏览器无法加载三维视图。', 'No se pudo cargar la vista 3D en este navegador.')))
     .finally(() => { el._busy = false; });
 }
-function build3dView(ml, el) {
+function build3dView(ml, el, opts = {}) {
   const fs = D('fengshui'), facing = isNum(fs?.orientation?.facingTrue) ? fs.orientation.facingTrue : null;
   const initScene = (window.OpenEstateHouse3D?._state?.scene?.quality === 'lidar') ? window.OpenEstateHouse3D._state.scene : null;
   const scene = scene3d(initScene);
   const holder = document.createElement('div');
   holder.style.cssText = 'position:absolute;inset:0';
   el.appendChild(holder);
-  const streetCam = { center: [HOME[1], HOME[0]], zoom: 18.85, pitch: 73, bearing: facing != null ? (facing + 158) % 360 : 22 };
+  const streetCam = opts.camera || { center: [HOME[1], HOME[0]], zoom: 18.85, pitch: 73, bearing: facing != null ? (facing + 158) % 360 : 22 };
   const satSpec = resolveSatelliteConfig();
   const mlSources = {
     'sat-base': { type: 'raster', tiles: [satSpec.fallbackTileUrl], tileSize: 256, maxzoom: satSpec.fallbackMaxNativeZoom, attribution: satSpec.fallbackAttribution },
@@ -3508,7 +4525,7 @@ function build3dView(ml, el) {
     { id: 'sat-base', type: 'raster', source: 'sat-base', paint: { 'raster-contrast': 0.05, 'raster-saturation': 0.06 } },
   ];
   if (satSpec.hasOverlay) {
-    const satOv = { type: 'raster', tiles: [satSpec.tileUrl], tileSize: satSpec.tileSize, maxzoom: satSpec.maxNativeZoom, attribution: satSpec.attribution };
+    const satOv = { type: 'raster', tiles: [satSpec.tileUrl], tileSize: satSpec.use512Offset ? 512 : 256, maxzoom: satSpec.maxNativeZoom, attribution: satSpec.attribution };
     if (satSpec.bounds) satOv.bounds = [satSpec.bounds[1], satSpec.bounds[0], satSpec.bounds[3], satSpec.bounds[2]];
     mlSources.sat = satOv;
     mlLayers.push({ id: 'sat', type: 'raster', source: 'sat', paint: { 'raster-contrast': 0.05, 'raster-saturation': 0.06 } });
@@ -3530,8 +4547,8 @@ function build3dView(ml, el) {
       terrain: { source: 'dem', exaggeration: 1 },
     },
     ...streetCam,
-    minZoom: 13, maxZoom: 20.5, maxPitch: 80,
-    pixelRatio: Math.min(window.devicePixelRatio || 1, 2),
+    minZoom: 13, maxZoom: 21.5, maxPitch: 80,
+    pixelRatio: Math.min(window.devicePixelRatio || 1, 2.5),
     fadeDuration: 0, renderWorldCopies: false, attributionControl: { compact: true },
   });
   map.addControl(new ml.NavigationControl({ visualizePitch: true }), 'top-left');
@@ -3944,6 +4961,7 @@ function renderOverview() {
       <div class="city">${esc(rest.join(',').trim())}${f.neighborhood ? ' · ' + esc(f.neighborhood.split('·')[0].trim()) : ''}${g.tractName ? ' · ' + esc(g.tractName) : ''}${factSourceLink(resolveFactOrRecordUrl('fact', 'censusGeocode'), 'Census ↗', null, { cls: 'sm' })}</div>
     </div>
     ${mlsHtml}
+    <div id="mlsBboPaywallAnchor" data-paywall-section="mlsBboRemarks"></div>
     <div class="keys">
       ${f.beds != null ? `<div><b>${f.beds}</b><span>${txk('overview.beds')}${factSourceLink(resolveFactOrRecordUrl('fact', 'beds'), '↗', null, { cls: 'sm' })}</span></div>` : ''}
       ${f.baths != null ? `<div><b>${f.baths}</b><span>${txk('overview.baths')}${factSourceLink(resolveFactOrRecordUrl('fact', 'baths'), '↗', null, { cls: 'sm' })}</span></div>` : ''}
@@ -5844,7 +6862,17 @@ function renderComps() {
   const comps = (v?.comps || []).filter((c) => !isSynthComp(c) && c?.soldDate).slice().sort((a, b) => b.weight - a.weight);
   const soon = f.nearbyListings || [];
   const rs = v?.rentalSummary || {}, rComps = v?.rentalComps || [], actSale = v?.activeNearby?.forSale || soon, actRent = v?.activeNearby?.forRent || [];
-  const rr = v?.rentResearch || null, hasRentResearch = Boolean(rr?.examples?.length);
+  const rr = v?.rentResearch || R?.rentResearch || v?.ownership?.rentalResearch || null;
+  const hasRentResearch = Boolean(
+    rr?.examples?.length ||
+    rr?.comps?.length ||
+    isNum(rr?.wholeHomeMonthly) ||
+    isNum(rr?.roomMonthly) ||
+    isNum(rr?.aduMonthly) ||
+    window.OpenEstateLazy?.isPaywallLockStub(rr) ||
+    R?.paywallLocks?.rentResearch ||
+    R?.lazySections?.rentResearch
+  );
   const bRows = rs.bedroomBenchmarks || [], hm = rs.hudMeta || null, zipStr = R.geo?.zip || '';
   if (!comps.length && !bRows.length && !rComps.length && !hasRentResearch && !actSale.length && !actRent.length) {
     $('#comps').innerHTML = head('Comparables', 'Nearby recently sold homes') + `<div class="empty">${tr3('No comparable sales supplied.', '暂无周边成交可比房源数据。', 'No se proporcionaron ventas comparables.')}</div>`;
@@ -6058,7 +7086,7 @@ function renderComps() {
   sectionMap('compMap', 'compChips', {
     base: 'light', zoom: 16,
     layers: [
-      { label: 'Sold comps', color: C.teal, count: comps.filter((c) => c.lat).length, make: () => L.layerGroup(comps.filter((c) => c.lat).map((c) => { const cRef = resolveFactOrRecordUrl('comp', { ...c, mlsId: c.mlsNumber || c.mlsId }); const m = L.marker([c.lat, c.lon], { icon: mkPin('', fmt.usdK(c.price)), riseOnHover: true }).bindPopup(`<b>${esc(c.address)}</b><br>Sold ${fmt.date(c.soldDate)} · <b>${fmt.usd(c.price)}</b>${c.listPrice ? ` (List ${fmt.usd(c.listPrice)} · ${c.saleToListPct}%)` : ''}<br>${c.beds ?? '—'} bd · ${c.baths ?? '—'} ba · ${fmt.num(c.sqft)} sf · ${fmt.usd(c.pricePerSqft)}/sf<br>vs Subject: ${esc(c.vsSubject || '—')}<br>Adjusted to subject: <b>${fmt.usd(c.adjusted)}</b>${cRef?.url ? `<br><a href="${esc(cRef.url)}" target="_blank" rel="noopener noreferrer">Verify record ↗</a>` : ''}`); pins[comps.indexOf(c)] = m; return m; })) },
+      { label: 'Sold comps', color: C.teal, count: comps.filter((c) => c.lat).length, make: (mOpts) => L.layerGroup(comps.filter((c) => c.lat).map((c) => { const cRef = resolveFactOrRecordUrl('comp', { ...c, mlsId: c.mlsNumber || c.mlsId }); const m = L.marker([c.lat, c.lon], { icon: mkPin('', fmt.usdK(c.price)), riseOnHover: true }).bindPopup(`<b>${esc(c.address)}</b><br>Sold ${fmt.date(c.soldDate)} · <b>${fmt.usd(c.price)}</b>${c.listPrice ? ` (List ${fmt.usd(c.listPrice)} · ${c.saleToListPct}%)` : ''}<br>${c.beds ?? '—'} bd · ${c.baths ?? '—'} ba · ${fmt.num(c.sqft)} sf · ${fmt.usd(c.pricePerSqft)}/sf<br>vs Subject: ${esc(c.vsSubject || '—')}<br>Adjusted to subject: <b>${fmt.usd(c.adjusted)}</b>${cRef?.url ? `<br><a href="${esc(cRef.url)}" target="_blank" rel="noopener noreferrer">Verify record ↗</a>` : ''}`); if (!mOpts?.forModal) pins[comps.indexOf(c)] = m; return m; })) },
       ...(mappedAct.length ? [{ label: 'Active / soon', color: '#ea580c', count: mappedAct.length, make: () => L.layerGroup(mappedAct.map((a) => L.marker([a.lat, a.lon], { icon: mkPin('soon', fmt.usdK(a.price)), riseOnHover: true }).bindPopup(`<b>${esc(a.address)}</b><br>${esc(a.status || 'Active')} · <b>${fmt.usd(a.price)}</b><br>${a.beds ?? '—'} bd · ${a.baths ?? '—'} ba · ${a.sqft ? fmt.num(a.sqft) + ' sf' : '—'}${a.pricePerSqft ? ` · ${fmt.usd(a.pricePerSqft)}/sf` : ''}${a.mlsNumber ? `<br>MLS #${esc(a.mlsNumber)}` : ''}${a.url && /^https?:\/\//i.test(String(a.url)) && !PORTAL_HOST_RE.test(String(a.url)) ? `<br><a href="${esc(a.url)}" target="_blank" rel="noopener">View listing ↗</a>` : ''}`))) }] : []),
       { label: 'Subject', color: C.red, make: () => L.marker(HOME, { icon: mkPin('subj', `This home · ${fmt.usdK(e?.value)}`), zIndexOffset: 2000 }) },
       { label: '¼ & ½ mile', color: '#94a3b8', make: () => L.layerGroup([0.25, 0.5].map((mi) => L.circle(HOME, { radius: mi * 1609.344, color: '#64748b', weight: 1, dashArray: '4 5', fill: false, interactive: false }))) },
@@ -6240,7 +7268,7 @@ function renderOutlook() {
 /* ---------- payment & cost of ownership ---------- */
 function renderPayment() {
   const v = D('valuation'), o = v?.ownership, cs = o?.closingAndSupplemental || {};
-  if (!o) { $('#payment').innerHTML = head('Affordability', 'Monthly payment & ownership math') + `<div class="empty">${tr3('Ownership math unavailable.', '暂无持有成本测算数据。', 'Cálculo de costos no disponible.')}</div>`; return; }
+  if (!o) { $('#payment').innerHTML = head('Affordability', 'Monthly payment & ownership math') + `<div class="empty">${tr3('Ownership math unavailable.', '暂无持有成本测算数据。', 'Cálculo de costos no disponible.')}</div><div id="rentResearch"><div id="rentResearchCostMount"></div></div>`; return; }
   const m0 = o.monthly || {}, lp = v?.loanPrograms || {};
   const basePrice = isNum(o.price) && o.price > 0 ? Math.round(o.price) : 500000;
   const confLimit = isNum(lp.countyConformingLimit) ? lp.countyConformingLimit : 832750;
@@ -6970,7 +7998,7 @@ function renderDiligence() {
   const bd = R.buyerDiligence || D('buyerDiligence');
   if (!hoa && !bd) {
     const _off = resolveOfficialPortalUrls();
-    el.innerHTML = head('Buyer diligence', 'HOA, taxes, utilities & exit plan') + '<div class="empty">' + txk('common.unavailable') + '</div>' + sectionSourcesBar(['buyerDiligence'], [
+    el.innerHTML = head('Buyer diligence', 'HOA, taxes, utilities & exit plan') + '<div id="sonicPaywallAnchor" data-paywall-section="sonicAvailability"></div><div class="empty">' + txk('common.unavailable') + '</div>' + sectionSourcesBar(['buyerDiligence'], [
       { label: _off.taxCollectorName, url: _off.taxCollectorUrl },
       { label: _off.recorderName, url: _off.recorderUrl },
       { label: _off.permitPortalName, url: _off.permitPortalUrl },
@@ -7136,7 +8164,8 @@ function renderDiligence() {
     const og = (bd && bd.ongoingCosts) || {}, ut = og.monthlyUtilities || {};
     const ec = ut.electricCarrier || null, gc = ut.gasCarrier || null, wst = ut.waterSewerTrash || null;
     const cn = (bd && bd.connectivity) || {}, cat = cn.broadbandCatalog || null;
-    if (!ec && !cat) return '';
+    const sonicLocked = Boolean(window.OpenEstateLazy?.isPaywallLockStub(cn.sonic) || R?.paywallLocks?.sonicAvailability);
+    if (!ec && !cat && !sonicLocked) return '';
 
     const fmtMbpsShort = (n) => {
       if (!isNum(n) || n <= 0) return '—';
@@ -7235,7 +8264,7 @@ function renderDiligence() {
         ...(cat.cableCarriers || []),
         ...(cat.wirelessCarriers || []),
       ];
-      const isAddrVerified = cat.fiberConfirmedFcc === true || cn.fiberConfirmedAddress === true || Boolean(cn.sonic?.available === true) || ['address_verified', 'fcc_location_verified', 'fiber_confirmed', 'confirmed_fcc', 'confirmed_address'].includes(cat.verificationStatus) || ['address_verified', 'fcc_location_verified', 'fiber_confirmed', 'confirmed_fcc', 'confirmed_address'].includes(cn.verificationStatus);
+      const isAddrVerified = cat.fiberConfirmedFcc === true || cn.fiberConfirmedAddress === true || (!sonicLocked && cn.sonic?.available === true) || ['address_verified', 'fcc_location_verified', 'fiber_confirmed', 'confirmed_fcc', 'confirmed_address'].includes(cat.verificationStatus) || ['address_verified', 'fcc_location_verified', 'fiber_confirmed', 'confirmed_fcc', 'confirmed_address'].includes(cn.verificationStatus);
       const fiberConfirmed = Boolean(isAddrVerified && cat.fiberAvailable);
       const barTone = fiberConfirmed ? 'fiber' : (cat.highSpeedAvailable ? 'cable' : 'warn');
       const fccHref = safeHttpUrl(cat.fccMapUrl || cn.fccLookupUrl) || 'https://broadbandmap.fcc.gov/home';
@@ -7256,7 +8285,7 @@ function renderDiligence() {
               ${isNum(cn.tractBroadbandPct) ? `<span class="small">· ${tr3('Tract broadband adoption:', '街区宽带普及率：', 'Adopción local:')} <b>${cn.tractBroadbandPct}%</b></span>` : ''}
             </div>
             <div style="font-size:12.8px;color:var(--ink2)">${esc(fiberConfirmed ? (cat.headlineVerdict || '') : (cat.headlineVerdict && !/fiber.*territory|sonic.*available|10g\s*fiber/i.test(cat.headlineVerdict) ? cat.headlineVerdict : tr3('Live address-level fiber check pending or unavailable — click carrier Check Address links or FCC Broadband Map to confirm serviceability.', '尚未完成精确门牌级光纤实测核验——请点击下方运营商查地址链接或 FCC 宽带地图核实。', 'Verificación de fibra pendiente en dirección — consulte los enlaces o el mapa FCC.')))}</div>
-            ${cn.sonic && !cn.sonic.available ? `<div class="small" style="margin-top:4px">${cn.sonic.status === 'not_available' ? tr3('Sonic Fiber check: Not available at this address', 'Sonic 光纤实测：该地址暂不支持覆盖', 'Sonic Fiber: no disponible en esta dirección') : cn.sonic.preorder ? tr3('Sonic Fiber check: Preorder / construction area only (not active)', 'Sonic 光纤实测：仅开放预登记（尚未开通）', 'Sonic Fiber: solo preventa') : tr3('Sonic Fiber check: Unverified — check street address', 'Sonic 光纤实测：尚未核实门牌地址', 'Sonic Fiber: sin verificar')}${safeHttpUrl(cn.sonic.checkUrl) ? ` · <a target="_blank" rel="noopener noreferrer" href="${esc(cn.sonic.checkUrl)}">${tr3('Check Sonic ↗', '查 Sonic 官网 ↗', 'Consultar Sonic ↗')}</a>` : ''}</div>` : ''}
+            ${cn.sonic && !sonicLocked && !cn.sonic.available ? `<div class="small" style="margin-top:4px">${cn.sonic.status === 'not_available' ? tr3('Sonic Fiber check: Not available at this address', 'Sonic 光纤实测：该地址暂不支持覆盖', 'Sonic Fiber: no disponible en esta dirección') : cn.sonic.preorder ? tr3('Sonic Fiber check: Preorder / construction area only (not active)', 'Sonic 光纤实测：仅开放预登记（尚未开通）', 'Sonic Fiber: solo preventa') : tr3('Sonic Fiber check: Unverified — check street address', 'Sonic 光纤实测：尚未核实门牌地址', 'Sonic Fiber: sin verificar')}${safeHttpUrl(cn.sonic.checkUrl) ? ` · <a target="_blank" rel="noopener noreferrer" href="${esc(cn.sonic.checkUrl)}">${tr3('Check Sonic ↗', '查 Sonic 官网 ↗', 'Consultar Sonic ↗')}</a>` : ''}</div>` : ''}<div id="sonicPaywallAnchor" data-paywall-section="sonicAvailability"></div>
           </div>
           <div style="font-size:12px;color:var(--muted);text-align:right">
             ${tr3('Est. plan:', '参考月费：', 'Plan est.:')} <b style="color:var(--ink);font-size:14px">${isAddrVerified && cat.estMonthlyInternetUsd > 0 ? `~${fmt.usd(cat.estMonthlyInternetUsd)}${tr3('/mo', '/月', '/mes')}` : tr3('Check address', '待查地址', 'Consultar')}</b>
@@ -7302,7 +8331,7 @@ function renderDiligence() {
         <span class="small">${tr3('Published utility tariffs, EPA SDWIS & FCC broadband intelligence', '基于公用事业官方费率表、EPA 饮用水库及 FCC 宽带档案', 'Tarifas públicas oficiales, EPA SDWIS y mapa FCC')}</span>
       </div>
       <div class="util-rate-grid">${elecCard}${gasCard}${waterCard}${trashCard}</div>
-      ${internetSection}
+      ${internetSection || (sonicLocked ? '<div id="sonicPaywallAnchor" data-paywall-section="sonicAvailability"></div>' : '')}
     </div>`;
   })();
 
@@ -7343,7 +8372,7 @@ function renderDiligence() {
       </div>
       <div id="dilPaneConn" style="display:none;margin-top:10px">
         <div class="tiles">
-          ${(() => { const catBb = cn.broadbandCatalog || {}; const fiberConf = catBb.fiberConfirmedFcc === true || cn.fiberConfirmedAddress === true || Boolean(cn.sonic?.available === true) || ['address_verified', 'fcc_location_verified', 'fiber_confirmed', 'confirmed_fcc', 'confirmed_address'].includes(catBb.verificationStatus) || ['address_verified', 'fcc_location_verified', 'fiber_confirmed', 'confirmed_fcc', 'confirmed_address'].includes(cn.verificationStatus); return tileBi(`${esc(TKEY('diligence.remoteWorkTier'))} ${factSourceLink({ url: safeHttpUrl(cn.fccLookupUrl) || 'https://broadbandmap.fcc.gov/home', name: 'FCC National Broadband Map' })}`, esc(cn.remoteWorkReadinessTier || '—'), (fiberConf && (catBb.fiberAvailable || cn.sonic?.available === true)) ? tr3('Fiber confirmed', '已核实光纤覆盖', 'Fibra confirmada') : tr3('Broadband unverified · Check address', '宽带未地址核实 · 请查地址', 'Banda ancha sin verificar · Consultar')); })()}
+          ${(() => { const catBb = cn.broadbandCatalog || {}; const isSonicLocked = Boolean(window.OpenEstateLazy?.isPaywallLockStub(cn.sonic) || R?.paywallLocks?.sonicAvailability); const fiberConf = catBb.fiberConfirmedFcc === true || cn.fiberConfirmedAddress === true || (!isSonicLocked && cn.sonic?.available === true) || ['address_verified', 'fcc_location_verified', 'fiber_confirmed', 'confirmed_fcc', 'confirmed_address'].includes(catBb.verificationStatus) || ['address_verified', 'fcc_location_verified', 'fiber_confirmed', 'confirmed_fcc', 'confirmed_address'].includes(cn.verificationStatus); return tileBi(`${esc(TKEY('diligence.remoteWorkTier'))} ${factSourceLink({ url: safeHttpUrl(cn.fccLookupUrl) || 'https://broadbandmap.fcc.gov/home', name: 'FCC National Broadband Map' })}`, esc(cn.remoteWorkReadinessTier || '—'), (fiberConf && (catBb.fiberAvailable || (!isSonicLocked && cn.sonic?.available === true))) ? tr3('Fiber confirmed', '已核实光纤覆盖', 'Fibra confirmada') : tr3('Broadband unverified · Check address', '宽带未地址核实 · 请查地址', 'Banda ancha sin verificar · Consultar')); })()}
           ${tileBi(`${esc(TKEY('diligence.broadbandPct'))} ${factSourceLink(censusReporterTractUrl('economics', cn.tractBroadbandPct != null ? cn.tractBroadbandPct + '%' : 'Broadband'))}`, `${cn.tractBroadbandPct ?? '—'}%`, `ZIP ${cn.zipBroadbandPct ?? '—'}%`)}
           ${tileBi(`${esc(TKEY('diligence.wfhPct'))} ${factSourceLink(censusReporterTractUrl('commute', cn.workFromHomePct != null ? cn.workFromHomePct + '%' : 'Worked at home'))}`, `${cn.workFromHomePct ?? '—'}%`, `${TKEY('diligence.commuteMin')}: ${cn.meanCommuteMin ?? '—'} min`)}
         </div>
@@ -7919,10 +8948,13 @@ function renderRemodel() {
   };
 
   const resolveActiveInspectionItems = () => {
+    const _isLockedStub = (x, key) => Boolean(window.OpenEstateLazy?.isPaywallLockStub(x) || (key && R.paywallLocks?.[key]));
     let ins = R.inspection || resolvePublicResearch()?.apiFetchedReviews?.inspection || null;
-    if (!ins && R.meta?.slug) {
+    if (_isLockedStub(ins, 'inspection')) ins = null;
+    if (!ins && !_isLockedStub(R.inspection, 'inspection') && R.meta?.slug) {
       try { ins = JSON.parse(localStorage.getItem('openestate:inspection:' + R.meta.slug) || 'null'); } catch {}
     }
+    if (_isLockedStub(ins, 'inspection')) ins = null;
     if (ins && Array.isArray(ins.moveInCost?.inspectionItems) && ins.moveInCost.inspectionItems.length) {
       return { items: ins.moveInCost.inspectionItems, creditAsk: Number(ins.repairTotals?.recommendedCreditAsk || ins.moveInCost?.totals?.recommendedSellerCreditUsd || 0), sourceLabel: 'inspection' };
     }
@@ -7952,9 +8984,11 @@ function renderRemodel() {
       return { items: mapped, creditAsk: Number(ins.repairTotals?.recommendedCreditAsk || 0), sourceLabel: 'inspection' };
     }
     let pk = R.packetReview || resolvePublicResearch()?.apiFetchedReviews?.packetReview || null;
-    if (!pk && R.meta?.slug) {
+    if (_isLockedStub(pk, 'packetReview')) pk = null;
+    if (!pk && !_isLockedStub(R.packetReview, 'packetReview') && R.meta?.slug) {
       try { pk = JSON.parse(localStorage.getItem('openestate:packet:' + R.meta.slug) || 'null'); } catch {}
     }
+    if (_isLockedStub(pk, 'packetReview')) pk = null;
     if (pk && Array.isArray(pk.moveInCost?.inspectionItems) && pk.moveInCost.inspectionItems.length) {
       return { items: pk.moveInCost.inspectionItems, creditAsk: Number(pk.moveInCost?.totals?.recommendedSellerCreditUsd || 0), sourceLabel: 'packet' };
     }
@@ -9184,16 +10218,17 @@ function renderInspection() {
   const pr = resolvePublicResearch();
   const apiRev = pr.apiFetchedReviews || {};
   const apiDocs = pr.discoveredDocuments || [];
-  if (!R.inspection && apiRev.inspection) R.inspection = apiRev.inspection;
-  if (!R.titleReview && apiRev.titleReview) R.titleReview = apiRev.titleReview;
-  if (!R.hoaReview && apiRev.hoaReview) R.hoaReview = apiRev.hoaReview;
-  if (!R.packetReview && apiRev.packetReview) R.packetReview = apiRev.packetReview;
+  const _isLocked = (val, key) => Boolean(window.OpenEstateLazy?.isPaywallLockStub(val) || (key && R.paywallLocks?.[key]));
+  if (!R.inspection && apiRev.inspection && !_isLocked(apiRev.inspection, 'inspection')) R.inspection = apiRev.inspection;
+  if (!R.titleReview && apiRev.titleReview && !_isLocked(apiRev.titleReview, 'titleReview')) R.titleReview = apiRev.titleReview;
+  if (!R.hoaReview && apiRev.hoaReview && !_isLocked(apiRev.hoaReview, 'hoaReview')) R.hoaReview = apiRev.hoaReview;
+  if (!R.packetReview && apiRev.packetReview && !_isLocked(apiRev.packetReview, 'packetReview')) R.packetReview = apiRev.packetReview;
 
   const hasApiForTab = (tab) => (
-    tab === 'insp' ? Boolean(apiRev.inspection)
-      : tab === 'title' ? Boolean(apiRev.titleReview)
-      : tab === 'hoa' ? Boolean(apiRev.hoaReview)
-      : tab === 'packet' ? Boolean(apiRev.packetReview)
+    tab === 'insp' ? Boolean(apiRev.inspection && !_isLocked(apiRev.inspection, 'inspection'))
+      : tab === 'title' ? Boolean(apiRev.titleReview && !_isLocked(apiRev.titleReview, 'titleReview'))
+      : tab === 'hoa' ? Boolean(apiRev.hoaReview && !_isLocked(apiRev.hoaReview, 'hoaReview'))
+      : tab === 'packet' ? Boolean(apiRev.packetReview && !_isLocked(apiRev.packetReview, 'packetReview'))
       : true
   );
   const wrapDocPaneBody = (tabKey, resultsId, uploadHtml) => {
@@ -9216,7 +10251,7 @@ function renderInspection() {
   const drawResults = (ins) => {
     const out = $('#inspResults');
     if (!out) return;
-    if (!ins) { out.innerHTML = ''; return; }
+    if (!ins || _isLocked(ins, 'inspection')) { out.innerHTML = ''; return; }
     const rt = ins.repairTotals || {}, ds = ins.docSummary || {}, mic = ins.moveInCost?.totals || {};
     const sevCls = { critical: 'bad', major: 'watch', moderate: 'info', minor: 'mute' };
     const sevCol = { critical: C.red, major: C.amber, moderate: C.blue, minor: C.gray };
@@ -9362,7 +10397,10 @@ function renderInspection() {
     : 'Upload & cross-check';
 
   el.innerHTML = head(secEyebrow, 'Inspection, title, HOA, packet & addendum', null, tr3('Inspection · Prelim Title · HOA Reserve · Multi-Doc .ZIP Packet · Repair Addendum', '验房报告 · 初步产权书 · 物业储备金 · 披露包 .ZIP · 维修抵扣协议', 'Inspección · Título preliminar · HOA · Paquete .ZIP · Adenda')) +
-    `<div class="sub" style="margin-top:0">${seg('docModeSeg', [
+    `<div id="disclosuresAndInspectionsMount" data-paywall-section="disclosuresAndInspections"></div>
+    <div id="inspLazyMount" data-paywall-section="inspection"></div>
+    <div id="packetLazyMount" data-paywall-section="packetReview"></div>
+    <div class="sub" style="margin-top:0">${seg('docModeSeg', [
       ['insp', TKEY('docs.tabInspection')],
       ['title', TKEY('docs.tabTitle')],
       ['hoa', TKEY('docs.tabHoa')],
@@ -9413,9 +10451,11 @@ function renderInspection() {
       ${wrapDocPaneBody('insp', 'inspResults', inspUploadMarkup)}
     </div>
     <div id="docPaneTitle" style="display:none">
+      <div id="titlePaywallMount" data-paywall-section="titleReview"></div>
       ${wrapDocPaneBody('title', 'titleResults', titleUploadMarkup)}
     </div>
     <div id="docPaneHoa" style="display:none">
+      <div id="hoaPaywallMount" data-paywall-section="hoaReview"></div>
       ${wrapDocPaneBody('hoa', 'hoaResults', hoaUploadMarkup)}
     </div>
     <div id="docPanePacket" style="display:none">
@@ -9484,7 +10524,8 @@ function renderInspection() {
   };
   const drawTitleResults = (tr) => {
     const out = $('#titleResults');
-    if (!out || !tr) return;
+    if (!out) return;
+    if (!tr || _isLocked(tr, 'titleReview')) { out.innerHTML = ''; return; }
     const c = tr.counts || {}, cxCls = { confirmed: 'good', conflict: 'bad', watchout: 'watch' };
     out.innerHTML = `
       <div class="ai" style="margin-top:14px"><span class="spark">📜</span><div><b>${esc(tr.aiHeadline || tr.overallStatus || 'Preliminary Title Summary')}</b> <span class="pill good" style="margin-left:6px">🔒 ${tr.piiRedactedCount ?? 0} PII item(s) masked</span>${tr.aiHeadline ? ` <span class="pill ai">${tx('AI Title Review', 'AI 产权审阅')}</span>` : ''}<div class="small" style="margin-top:4px">${esc([tr.titleCompany, tr.effectiveDate ? 'Effective ' + tr.effectiveDate : null, tr.apn ? 'APN ' + tr.apn : null].filter(Boolean).join(' · '))}</div></div></div>
@@ -9721,7 +10762,8 @@ function renderInspection() {
   let hoaQueued = [];
   const drawHoaResults = (hr) => {
     const out = $('#hoaResults');
-    if (!out || !hr) return;
+    if (!out) return;
+    if (!hr || _isLocked(hr, 'hoaReview')) { out.innerHTML = ''; return; }
     const fh = hr.financialHealth || {}, wr = hr.warrantability || {}, gov = hr.governanceAndLifestyleRules || {};
     out.innerHTML = `<div class="ai" style="margin-top:12px"><span class="spark">🏢</span><div><b>${esc(hr.headline || 'HOA Analysis Complete')}</b> <span class="pill good">🔒 ${hr.piiRedactedCount ?? 0} PII masked</span></div></div>
       <div class="tiles">
@@ -9783,7 +10825,8 @@ function renderInspection() {
   let packetQueued = [];
   const drawPacketResults = (pk) => {
     const out = $('#packetResults');
-    if (!out || !pk) return;
+    if (!out) return;
+    if (!pk || _isLocked(pk, 'packetReview')) { out.innerHTML = ''; return; }
     const exp = pk.totalExposureUsd || {}, tri = pk.dealBreakerTriage || {}, counts = tri.counts || {};
     const cx = pk.contradictions || [];
     out.innerHTML = `<div class="ai" style="margin-top:12px"><span class="spark">📂</span><div><b>${esc(pk.headline || 'Disclosure Packet Reviewed')}</b> <span class="pill ${tri.overallLevel === 'Critical' ? 'bad' : 'info'}">${esc(tri.overallLevel || 'Review')}</span> · ${pk.packetDocumentCount ?? 0} docs · 🔒 ${pk.piiRedactedCount ?? 0} PII masked${pk.executiveSummary ? `<div style="margin-top:4px">${esc(pk.executiveSummary)}</div>` : ''}</div></div>
@@ -9840,7 +10883,8 @@ function renderInspection() {
   // --- Repair & Seller Credit Addendum Generator (/api/repair-addendum) ---
   const drawAddendumResults = (ad) => {
     const out = $('#addendumResults');
-    if (!out || !ad) return;
+    if (!out) return;
+    if (!ad || _isLocked(ad, 'repairAddendum')) { out.innerHTML = ''; return; }
     const tot = ad.totalsUsd || {}, sr = ad.strategyRecommendation || {};
     out.innerHTML = `<div class="tiles" style="margin-top:12px">
         ${tile('Selected Defects', String(ad.selectedDefectCount ?? 0), esc(ad.regionalLabel || ''))}
@@ -10903,7 +11947,7 @@ function renderCre() {
   ];
 
   const drawBody = () => {
-    const rev = R.creReview;
+    const rev = (R.creReview && !window.OpenEstateLazy?.isPaywallLockStub(R.creReview) && !R.paywallLocks?.creReview) ? R.creReview : null;
     const revHtml = rev ? (() => {
       const rec = rev.reconciliation || {};
       const leases = rev.leaseAbstracts || [];
@@ -10953,6 +11997,7 @@ function renderCre() {
   };
 
   el.innerHTML = head('Commercial underwriting', 'CRE debt sizing & 10-year DCF', null, enabled ? esc(cre.classification?.assetClassLabel || 'CRE Enabled') : tr3('Optional Institutional CRE & Store Profit Mode', '可选商业地产、土地农田与开店盈利测算', 'Modo CRE, terreno agrícola y rentabilidad comercial')) +
+    '<div id="crePaywallAnchor" data-paywall-section="creReview"></div>' +
     (enabled ? drawBody() : more(TKEY('cre.enableBtn'), drawBody()));
 
   const runBusinessEvalApi = async (evalMode, statusElId, btnEl) => {
@@ -11162,7 +12207,12 @@ function updateRefreshButton() {
 
 /* ---------- floating Open Estate property & real-estate assistant ---------- */
 const DB_CHAT_SVG = `<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 10.5L12 3l9 7.5"/><path d="M5 9.5V20h14V9.5"/><path d="M12 11l1.1 2.4L15.5 14.5l-2.4 1.1L12 18l-1.1-2.4-2.4-1.1 2.4-1.1L12 11z"/></svg>`;
+const _CHAT_CLEAR_SVG = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>`;
+const _CHAT_MAX_SVG = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 3h6v6"/><path d="M9 21H3v-6"/><path d="M21 3l-7 7"/><path d="M3 21l7-7"/></svg>`;
+const _CHAT_RESTORE_SVG = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 14h6v6"/><path d="M20 10h-6V4"/><path d="M10 14l-7 7"/><path d="M14 10l7-7"/></svg>`;
+const _CHAT_MIN_SVG = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true"><path d="M5 12h14"/></svg>`;
 let _dbChatOpen = false;
+let _dbChatMaximized = false;
 let _dbSendFn = null;
 
 function loadOpenEstateSession() {
@@ -11209,6 +12259,15 @@ function clampOpenEstateDrawer() {
     fab.style.maxWidth = '';
   }
   if (!dr || !_dbChatOpen) return;
+  if (_dbChatMaximized || dr.classList.contains('maximized')) {
+    dr.style.left = '';
+    dr.style.right = '';
+    dr.style.top = '';
+    dr.style.bottom = '';
+    dr.style.width = '';
+    dr.style.maxHeight = '';
+    return;
+  }
   const pad = 10;
   if (vw <= 600) {
     dr.style.left = pad + 'px';
@@ -11242,11 +12301,12 @@ function renderOpenEstateWidget() {
   const pr = resolvePublicResearch();
   const permitCnt = pr.permitsAndViolations?.permitCount ?? 0;
   const hoaCnt = (pr.hoaIssues?.issueCount ?? 0) + (pr.hoaIssues?.nonprofit990Filings?.length ?? 0);
-  const docCnt = (pr.discoveredDocuments?.length ?? 0) + (R.inspection ? 1 : 0);
+  const docCnt = (pr.discoveredDocuments?.length ?? 0) + (R.inspection && !window.OpenEstateLazy?.isPaywallLockStub(R.inspection) && !R.paywallLocks?.inspection ? 1 : 0);
   const shortAddr = (R.meta?.displayAddress || R.facts?.address || 'This Property').split(',')[0];
 
-  fab.innerHTML = `<span class="db-fab-ico">${DB_CHAT_SVG}</span><span class="db-fab-txt"><span class="db-fab-short">${esc(tr3('Ask AI', '问 AI', 'Chat IA'))}</span><span class="db-fab-full">${esc(TKEY('openEstate.fabLabel'))}</span><span class="db-fab-sub">${esc(TKEY('openEstate.fabHint'))}</span></span>`;
-  fab.title = `${TKEY('openEstate.fabLabel')} — ${TKEY('openEstate.fabHint')}`;
+  const bNameChat = brandInfo().name;
+  fab.innerHTML = `<span class="db-fab-ico">${DB_CHAT_SVG}</span><span class="db-fab-txt"><span class="db-fab-short">${esc(bNameChat)}</span><span class="db-fab-full">${esc(bNameChat)}</span><span class="db-fab-sub">${esc(TKEY('openEstate.fabHint'))}</span></span>`;
+  fab.title = `${bNameChat} — ${TKEY('openEstate.fabHint')}`;
   fab.setAttribute('aria-expanded', _dbChatOpen ? 'true' : 'false');
 
   const starters = LANG === 'zh'
@@ -11273,13 +12333,15 @@ function renderOpenEstateWidget() {
           'How does Prop 13 / property tax reassessment work?',
         ];
 
+  const maxTitle = _dbChatMaximized ? tr3('Restore size', '还原窗口', 'Restaurar tamaño') : tr3('Maximize', '最大化', 'Maximizar');
   dr.innerHTML = `
     <div class="db-dhdr">
       <div class="db-dhdr-top">
-        <div class="db-dtitle">${DB_CHAT_SVG} <span>${esc(TKEY('openEstate.fabLabel'))}</span></div>
+        <div class="db-dtitle">${DB_CHAT_SVG} <span>${esc(bNameChat)}</span></div>
         <div class="db-dacts">
-          <button type="button" class="db-dbtn" id="dbClearBtn">${esc(TKEY('openEstate.clearChat'))}</button>
-          <button type="button" class="db-dbtn" id="dbCloseBtn" aria-label="Minimize">✕ ${esc(TKEY('openEstate.minimizeChat'))}</button>
+          <button type="button" class="db-dbtn" id="dbClearBtn" title="${esc(TKEY('openEstate.clearChat'))}" aria-label="${esc(TKEY('openEstate.clearChat'))}">${_CHAT_CLEAR_SVG}</button>
+          <button type="button" class="db-dbtn" id="dbMaxBtn" title="${esc(maxTitle)}" aria-label="${esc(maxTitle)}" aria-pressed="${_dbChatMaximized ? 'true' : 'false'}">${_dbChatMaximized ? _CHAT_RESTORE_SVG : _CHAT_MAX_SVG}</button>
+          <button type="button" class="db-dbtn" id="dbCloseBtn" title="${esc(TKEY('openEstate.minimizeChat'))}" aria-label="${esc(TKEY('openEstate.minimizeChat'))}">${_CHAT_MIN_SVG}</button>
         </div>
       </div>
       <div class="db-dmeta">
@@ -11299,7 +12361,9 @@ function renderOpenEstateWidget() {
     </div>`;
 
   dr.classList.toggle('open', _dbChatOpen);
+  dr.classList.toggle('maximized', _dbChatMaximized);
   dr.setAttribute('aria-hidden', _dbChatOpen ? 'false' : 'true');
+  dr.setAttribute('aria-label', `${bNameChat} Property Assistant`);
 
   const logEl = dr.querySelector('#chatLog');
   const inEl = dr.querySelector('#chatIn');
@@ -11369,7 +12433,7 @@ function renderOpenEstateWidget() {
     appendEntryDom(userEntry);
     const wait = document.createElement('div');
     wait.className = 'msg a';
-    wait.textContent = tr3(`Thinking with ${brandInfo().name} AI…`, `${brandInfo().name} AI 正在核查档案…`, 'Consultando registros verificados…');
+    wait.textContent = tr3(`Thinking with ${brandInfo().name}…`, `${brandInfo().name} 正在核查档案…`, 'Consultando registros verificados…');
     logEl.appendChild(wait);
     logEl.scrollTop = logEl.scrollHeight;
     try {
@@ -11408,6 +12472,19 @@ function renderOpenEstateWidget() {
   _dbSendFn = sendQ;
   dr.querySelector('#chatForm')?.addEventListener('submit', (ev) => { ev.preventDefault(); sendQ(inEl.value); });
   dr.querySelectorAll('#chatQs button').forEach((b) => b.addEventListener('click', () => sendQ(b.textContent)));
+  dr.querySelector('#dbMaxBtn')?.addEventListener('click', () => {
+    _dbChatMaximized = !_dbChatMaximized;
+    dr.classList.toggle('maximized', _dbChatMaximized);
+    const maxBtn = dr.querySelector('#dbMaxBtn');
+    if (maxBtn) {
+      const mTitle = _dbChatMaximized ? tr3('Restore size', '还原窗口', 'Restaurar tamaño') : tr3('Maximize', '最大化', 'Maximizar');
+      maxBtn.innerHTML = _dbChatMaximized ? _CHAT_RESTORE_SVG : _CHAT_MAX_SVG;
+      maxBtn.title = mTitle;
+      maxBtn.setAttribute('aria-label', mTitle);
+      maxBtn.setAttribute('aria-pressed', _dbChatMaximized ? 'true' : 'false');
+    }
+    clampOpenEstateDrawer();
+  });
   dr.querySelector('#dbCloseBtn')?.addEventListener('click', () => window.closeOpenEstateChat());
   dr.querySelector('#dbClearBtn')?.addEventListener('click', () => {
     entries = [];
@@ -11468,6 +12545,10 @@ for (const [id, fn] of RENDERERS) {
 }
 initLotHoverPopover();
 try { renderOpenEstateWidget(); } catch (e) { console.error('openEstate widget init failed:', e); }
+try {
+  window.OpenEstateLazy?.renderAllLazyAndPaywallAnchors();
+  window.OpenEstateLazy?.startLazyStatusPolling();
+} catch (e) { console.error('lazy/paywall init failed:', e); }
 
 // Ensure direct URL hash navigation (e.g. /r/<slug>/#history or #disclosures) lands directly on the target section after client-side rendering expands the DOM
 const snapToInitialHash = () => {
@@ -11482,7 +12563,19 @@ const snapToInitialHash = () => {
     document.getElementById('history')?.scrollIntoView({ block: 'start', behavior: 'instant' });
     return;
   }
-  const hashTarget = document.getElementById(rawHash);
+  if (rawHash === 'packetReview') {
+    document.querySelector('#docModeSeg button[data-k="packet"]')?.click();
+    (document.getElementById('packetLazyMount') || document.getElementById('inspection'))?.scrollIntoView({ block: 'start', behavior: 'instant' });
+    return;
+  }
+  const hashAliasMap = {
+    disclosuresAndInspections: 'disclosuresAndInspectionsMount',
+    rentResearch: 'rentResearchCostMount',
+    creReview: 'crePaywallAnchor',
+    sonicAvailability: 'sonicPaywallAnchor',
+    mlsBboRemarks: 'mlsBboPaywallAnchor',
+  };
+  const hashTarget = document.getElementById(rawHash) || document.getElementById(hashAliasMap[rawHash] || '');
   if (hashTarget) hashTarget.scrollIntoView({ block: 'start', behavior: 'instant' });
 };
 requestAnimationFrame(snapToInitialHash);
@@ -11516,9 +12609,12 @@ function refreshDynamicLanguageViews() {
   if (typeof renderYourMatchCard === 'function') {
     try { renderYourMatchCard(); } catch {}
   }
+  try { window.OpenEstateLazy?.renderAllLazyAndPaywallAnchors({ skipRent: Boolean(window.OpenEstateWorkspace?.refreshAll) }); } catch {}
   if (window.OpenEstateWorkspace?.refreshAll) {
     try { window.OpenEstateWorkspace.refreshAll(); } catch {}
   }
+  try { window.OpenEstateCommercialWorkspace?.renderPaywallPlaceholders?.(); } catch {}
+  try { window.OpenEstateMapExpand?.localizeAll?.(); } catch {}
   try { renderOpenEstateWidget(); } catch {}
 }
 window.refreshDynamicLanguageViews = refreshDynamicLanguageViews;

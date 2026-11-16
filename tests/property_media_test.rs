@@ -648,7 +648,10 @@ fn satellite_resolution_hierarchy_regional_ortho_and_zero_secret_leak() {
 
         let items = rep["propertyMedia"]["items"].as_array().unwrap();
         let rooftop = items.iter().find(|i| i["id"] == expected_id_prefix).expect("rotated commercial rooftop card");
-        assert!(rooftop["url"].as_str().unwrap().starts_with("/api/media/satellite/export?"));
+        let rooftop_url = rooftop["url"].as_str().unwrap();
+        assert!(rooftop_url.starts_with("/api/media/satellite/export?"));
+        assert!(rooftop_url.contains("w=1600&h=1080"));
+        assert!(rooftop["thumbUrl"].as_str().unwrap().contains("w=960&h=648"));
         let full_text = serde_json::to_string(&rep).unwrap();
         assert!(!full_text.contains(secret_val), "secret `{env_key}` must never appear in report JSON");
         assert!(!full_text.contains("server.arcgisonline.com"));

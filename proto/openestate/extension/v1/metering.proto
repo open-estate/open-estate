@@ -1,0 +1,123 @@
+syntax = "proto3";
+
+package openestate.extension.v1;
+
+import "openestate/extension/v1/extension.proto";
+
+// Origin trigger of an extension invocation (`open_estate::metering::InvocationTrigger`).
+enum InvocationTrigger {
+  INVOCATION_TRIGGER_UNSPECIFIED = 0;
+  INVOCATION_TRIGGER_USER_REQUEST = 1;
+  INVOCATION_TRIGGER_PERIODIC_SCAN = 2;
+  INVOCATION_TRIGGER_LAZY_JOB = 3;
+  INVOCATION_TRIGGER_ADMIN_TEST = 4;
+  INVOCATION_TRIGGER_DEPENDENCY = 5;
+}
+
+// Final execution outcome of an extension invocation (`open_estate::metering::InvocationOutcome`).
+enum InvocationOutcome {
+  INVOCATION_OUTCOME_UNSPECIFIED = 0;
+  INVOCATION_OUTCOME_OK = 1;
+  INVOCATION_OUTCOME_FAILED = 2;
+  INVOCATION_OUTCOME_CACHED = 3;
+  INVOCATION_OUTCOME_DENIED = 4;
+}
+
+// Multi-dimensional resource & outcome counters captured per invocation (1:1 with `UsageDimensions`).
+message UsageDimensionsProto {
+  uint64 invocations = 1;
+  uint64 invocations_ok = 2;
+  uint64 invocations_failed = 3;
+  uint64 invocations_cached = 4;
+  uint64 invocations_denied = 5;
+  uint64 wall_time_ms = 6;
+  uint64 llm_input_tokens = 7;
+  uint64 llm_cached_input_tokens = 8;
+  uint64 llm_cache_write_tokens = 9;
+  uint64 llm_output_tokens = 10;
+  uint64 llm_reasoning_tokens = 11;
+  uint64 llm_cost_micros = 12;
+  uint64 browser_session_ms = 13;
+  uint64 browser_page_loads = 14;
+  uint64 emails_sent = 15;
+  uint64 emails_ingested = 16;
+  uint64 documents_ingested = 17;
+  uint64 pages_ocr = 18;
+  uint64 bytes_downloaded = 19;
+  uint64 bytes_stored = 20;
+  uint64 external_api_calls = 21;
+  uint64 external_api_cost_micros = 22;
+}
+
+// Individual LLM call usage & resolved model/effort recorded on `ExtensionUsageEventProto`.
+message LlmUsageRecordProto {
+  string model = 1;
+  optional string effort = 2;
+  optional string profile = 3;
+  optional string task = 4;
+  uint64 input_tokens = 5;
+  uint64 cached_input_tokens = 6;
+  uint64 cache_write_tokens = 7;
+  uint64 output_tokens = 8;
+  uint64 reasoning_tokens = 9;
+  uint64 cost_micros = 10;
+}
+
+// Input metadata describing an invocation wrapped by `MeterScope` (`open_estate::metering::InvocationContext`).
+message InvocationContextProto {
+  optional string invocation_id = 1;
+  optional string parent_invocation_id = 2;
+  string extension_id = 3;
+  string version = 4;
+  ExtensionTier tier = 5;
+  InvocationTrigger trigger = 6;
+  optional string actor_user_id = 7;
+  optional string org_id = 8;
+  optional string slug = 9;
+  optional bool billable = 10;
+  optional LlmSpecProto llm_spec = 11;
+}
+
+// Structured usage event emitted when a `MeterScope` finishes (`open_estate::metering::ExtensionUsageEvent`).
+message ExtensionUsageEventProto {
+  string invocation_id = 1;
+  optional string parent_invocation_id = 2;
+  string extension_id = 3;
+  string version = 4;
+  ExtensionTier tier = 5;
+  InvocationTrigger trigger = 6;
+  optional string actor_user_id = 7;
+  optional string org_id = 8;
+  optional string slug = 9;
+  string started_at = 10;
+  string finished_at = 11;
+  InvocationOutcome outcome = 12;
+  UsageDimensionsProto dims = 13;
+  bool billable = 14;
+  optional string llm_model = 15;
+  optional string llm_effort = 16;
+  repeated LlmUsageRecordProto llm_calls = 17;
+}
+
+// Allow branch of `InvocationDecisionProto`.
+message InvocationAllowProto {}
+
+// Deny branch of `InvocationDecisionProto`.
+message InvocationDenyProto {
+  string reason = 1;
+  string required_tier = 2;
+}
+
+// Require-approval branch of `InvocationDecisionProto`.
+message InvocationRequireApprovalProto {
+  string reason = 1;
+}
+
+// Pre-execution authorization decision (`open_estate::metering::InvocationDecision`).
+message InvocationDecisionProto {
+  oneof decision {
+    InvocationAllowProto allow = 1;
+    InvocationDenyProto deny = 2;
+    InvocationRequireApprovalProto require_approval = 3;
+  }
+}

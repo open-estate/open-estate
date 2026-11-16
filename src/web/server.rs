@@ -73,7 +73,7 @@ use crate::web::{
         NoopExtensionHooks, ServerExtensionHooks,
     },
     house3d_api::handle_house3d_get,
-    i18n::{resolve_lang, t, t_brand},
+    i18n::{resolve_lang, t},
     internal_auth::{
         attach_optional_set_cookie, has_valid_batch_or_internal_key,
         has_valid_cron_or_internal_key, has_valid_internal_api_key,
@@ -95,8 +95,7 @@ use crate::web::{
     },
     profile_api::{handle_get_my_profile, handle_post_match_feedback, handle_put_my_profile},
     render::{
-        apply_runtime_module_filter, localize_i18n_json_for_brand,
-        localize_report_value_for_brand, normalize_stored_report, render_report_html_with_brand,
+        apply_runtime_module_filter, normalize_stored_report, render_report_html_with_brand,
         I18NEXT_JS, I18N_EN_JSON, I18N_ES_JSON, I18N_ZH_JSON,
     },
     ui::{
@@ -369,6 +368,51 @@ impl crate::web::admin_console::AdminExtensionBridge for HubAdminExtensionBridge
     }
 }
 
+struct HubLazyScanHook {
+    db: DbStore,
+    hub: std::sync::Weak<crate::extensions::ExtensionHub>,
+    env: EnvConfig,
+}
+
+impl crate::scanner::lazy_hook::PeriodicLazyEnqueueHook for HubLazyScanHook {
+    fn on_batch_flushed<'a>(
+        &'a self,
+        outcomes: &'a [crate::scanner::engine::ScanItemOutcome],
+    ) -> crate::scanner::engine::BoxFuture<'a, ()> {
+        Box::pin(async move {
+            let Some(hub) = self.hub.upgrade() else {
+                return;
+            };
+            let specs = crate::scanner::lazy_hook::PeriodicLazyExtensionSpec::discover_from_hub(
+                &hub,
+                Some(&self.env),
+            );
+            if specs.is_empty() || outcomes.is_empty() {
+                return;
+            }
+            let targets: Vec<crate::scanner::lazy_hook::LazyScanTarget> = outcomes
+                .iter()
+                .filter(|o| !o.slug.trim().is_empty())
+                .map(crate::scanner::lazy_hook::LazyScanTarget::from)
+                .collect();
+            if targets.is_empty() {
+                return;
+            }
+            if let Err(err) = crate::scanner::lazy_hook::enqueue_periodic_scan_lazy_jobs(
+                &self.db,
+                Some(&hub),
+                &targets,
+                &specs,
+                "periodic_scan",
+            )
+            .await
+            {
+                tracing::warn!(error = %err, "Periodic lazy scan enqueue hook error");
+            }
+        })
+    }
+}
+
 #[derive(Clone)]
 pub struct AppState {
     pub env: EnvConfig,
@@ -385,6 +429,8 @@ pub struct AppState {
     pub area_forsale_cache: moka::future::Cache<String, Value>,
     pub osrm_recovery: Arc<OsrmRecoveryCoordinator>,
     pub hooks: Arc<dyn ServerExtensionHooks>,
+    pub lazy_worker: Arc<tokio::sync::Mutex<Option<crate::lazy::LazyWorkerHandle>>>,
+    pub scheduler_handle: Arc<tokio::sync::Mutex<Option<crate::scheduler::SchedulerHandle>>>,
 }
 
 impl AppState {
@@ -430,7 +476,13 @@ impl AppState {
         };
         let scan_cfg = ScanEngineConfig::from_env(&env);
         let tile_cache = Arc::new(SpatialTileCache::default());
-        let scan_engine = Arc::new(ScanEngine::new_dyn(scan_cfg, tile_cache, runner));
+        let lazy_scan_hook = Arc::new(HubLazyScanHook {
+            db: db.clone(),
+            hub: Arc::downgrade(&extension_hub),
+            env: env.clone(),
+        });
+        let scan_engine =
+            Arc::new(ScanEngine::new_dyn(scan_cfg, tile_cache, runner).with_lazy_hook(lazy_scan_hook));
         // [feat/deed-title-marketplace]
         let marketplace_clicks =
             Arc::new(crate::modules::deed_title_marketplace::MarketplaceClickStore::default());
@@ -439,7 +491,7 @@ impl AppState {
             .time_to_live(Duration::from_secs(600))
             .build();
         let osrm_recovery = Arc::new(OsrmRecoveryCoordinator::new());
-        Self {
+        let st = Self {
             env,
             http,
             db,
@@ -454,11 +506,70 @@ impl AppState {
             area_forsale_cache,
             osrm_recovery,
             hooks: Arc::new(NoopExtensionHooks),
-        }
+            lazy_worker: Arc::new(tokio::sync::Mutex::new(None)),
+            scheduler_handle: Arc::new(tokio::sync::Mutex::new(None)),
+        };
+        st.extension_hub
+            .attach_hook_state_builder(st.hook_state_builder());
+        st
+    }
+
+    fn hook_state_builder(&self) -> crate::extensions::registry::HookStateBuilder {
+        let env = self.env.clone();
+        let http = self.http.clone();
+        let db = self.db.clone();
+        let shield = self.shield.clone();
+        let job_mgr = self.job_mgr.clone();
+        let scan_engine = Arc::clone(&self.scan_engine);
+        let reports_dir = self.reports_dir.clone();
+        let data_dir = self.data_dir.clone();
+        let marketplace_clicks = Arc::clone(&self.marketplace_clicks);
+        let area_forsale_cache = self.area_forsale_cache.clone();
+        let osrm_recovery = Arc::clone(&self.osrm_recovery);
+        let hooks = Arc::clone(&self.hooks);
+        Arc::new(move |hub: &Arc<crate::extensions::ExtensionHub>| Self {
+            env: env.clone(),
+            http: http.clone(),
+            db: db.clone(),
+            shield: shield.clone(),
+            job_mgr: job_mgr.clone(),
+            scan_engine: Arc::clone(&scan_engine),
+            extension_hub: Arc::clone(hub),
+            reports_dir: reports_dir.clone(),
+            data_dir: data_dir.clone(),
+            marketplace_clicks: Arc::clone(&marketplace_clicks),
+            area_forsale_cache: area_forsale_cache.clone(),
+            osrm_recovery: Arc::clone(&osrm_recovery),
+            hooks: Arc::clone(&hooks),
+            lazy_worker: Arc::new(tokio::sync::Mutex::new(None)),
+            scheduler_handle: Arc::new(tokio::sync::Mutex::new(None)),
+        })
     }
 
     pub fn with_extension_hooks(mut self, hooks: Arc<dyn ServerExtensionHooks>) -> Self {
+        let extra_adapters = hooks.extra_extension_adapters();
         self.hooks = hooks;
+        if !extra_adapters.is_empty() {
+            self.extension_hub.register_hook_adapters(extra_adapters);
+        }
+        self.extension_hub
+            .attach_hook_state_builder(self.hook_state_builder());
+        self
+    }
+
+    /// Replaces this `AppState`'s hub with an isolated fresh `ExtensionHub` instance
+    /// (for tests registering custom adapters/hooks without mutating `ExtensionHub::global()`).
+    pub fn with_isolated_extension_hub(
+        mut self,
+        hub: Arc<crate::extensions::ExtensionHub>,
+    ) -> Self {
+        let extra_adapters = self.hooks.extra_extension_adapters();
+        if !extra_adapters.is_empty() {
+            hub.register_hook_adapters(extra_adapters);
+        }
+        self.extension_hub = hub;
+        self.extension_hub
+            .attach_hook_state_builder(self.hook_state_builder());
         self
     }
 }
@@ -571,7 +682,7 @@ async fn edge_defense_middleware(
             Json(json!({
                 "ok": false,
                 "code": "DIRECT_LLM_BLOCKED",
-                "error": t_brand(&lang, "api-direct-llm-blocked", &state.env.brand_name()),
+                "error": t(&lang, "api-direct-llm-blocked"),
             })),
         )
             .into_response();
@@ -724,6 +835,10 @@ pub fn build_router(state: AppState) -> Router {
             get(crate::web::media_api::handle_satellite_export_get),
         )
         .route(
+            "/api/satellite-export",
+            get(crate::web::media_api::handle_satellite_export_get),
+        )
+        .route(
             "/api/media/:slug/hotspots",
             post(handle_media_hotspots_post),
         )
@@ -805,6 +920,8 @@ pub fn build_router(state: AppState) -> Router {
             "/api/agent-match/request",
             post(handle_agent_match_request_post),
         )
+        .merge(crate::lazy::lazy_routes())
+        .merge(crate::scheduler::routes::admin_scheduler_routes())
         .merge(extra_normal_routes)
         .layer(DefaultBodyLimit::max(64 * 1024));
 
@@ -902,6 +1019,54 @@ pub fn build_probe_router(state: AppState) -> Router {
         .with_state(state)
 }
 
+static WATCHED_ZIPS_HANDLER_ONCE: std::sync::Once = std::sync::Once::new();
+const WATCHED_ZIPS_SYNC_JOB_KIND: &str = "watched_zips_sync";
+
+fn register_watched_zips_sync_scheduler_handler() {
+    WATCHED_ZIPS_HANDLER_ONCE.call_once(|| {
+        crate::scheduler::register_job_kind_fn(WATCHED_ZIPS_SYNC_JOB_KIND, |ctx| {
+            Box::pin(async move {
+                let base_origin = ctx
+                    .param_str("baseOrigin")
+                    .or_else(|| {
+                        ctx.env
+                            .get("PUBLIC_BASE_URL")
+                            .map(|s| s.trim().to_string())
+                            .filter(|s| !s.is_empty())
+                    })
+                    .unwrap_or_else(|| "http://127.0.0.1:8080".to_string());
+                let max_zips = ctx
+                    .param_u64("maxZips")
+                    .or_else(|| {
+                        ctx.env
+                            .get("SYNC_MAX_ZIPS_PER_TICK")
+                            .and_then(|s| s.trim().parse::<u64>().ok())
+                    })
+                    .unwrap_or(5)
+                    .clamp(1, 500) as usize;
+                let provider = ctx
+                    .app_state
+                    .as_ref()
+                    .map(|s| s as &dyn LiveZipListingProvider);
+                let out = run_background_sync_cycle_with_provider(
+                    &ctx.db,
+                    &ctx.http,
+                    &ctx.env,
+                    &base_origin,
+                    None,
+                    max_zips,
+                    provider,
+                )
+                .await?;
+                Ok(crate::scheduler::JobRunOutput::ok(
+                    "Completed watched ZIPs sync cycle",
+                    out,
+                ))
+            })
+        });
+    });
+}
+
 pub fn spawn_startup_background_tasks(state: &AppState, default_port: u16) {
     let run_mode = RunMode::from_env(&state.env).unwrap_or(RunMode::All);
     if let Some(pool) = state.http.proxy_pool().cloned() {
@@ -985,52 +1150,21 @@ pub fn spawn_startup_background_tasks(state: &AppState, default_port: u16) {
         );
     }
 
-    // Periodic OSRM region health watcher & post-outage cached-report recovery (`all` or `web` mode).
-    if run_mode != RunMode::Scanner {
-        let osrm_cfg = crate::modules::commute::RoutingConfig::from_env(&state.env);
-        if osrm_cfg.is_enabled() {
-            let poll_secs: u64 = state
-                .env
-                .get("OSRM_HEALTH_POLL_SECS")
-                .and_then(|s| s.trim().parse::<u64>().ok())
-                .unwrap_or(60)
-                .min(3600);
-            if poll_secs > 0 {
-                let state_osrm = state.clone();
-                tokio::spawn(async move {
-                    let startup_delay = poll_secs.min(10);
-                    tokio::time::sleep(Duration::from_secs(startup_delay)).await;
-                    let mut interval = tokio::time::interval(Duration::from_secs(poll_secs));
-                    loop {
-                        interval.tick().await;
-                        if let Err(e) = state_osrm
-                            .osrm_recovery
-                            .background_poll_tick(
-                                &state_osrm.http,
-                                &state_osrm.env,
-                                &state_osrm.db,
-                            )
-                            .await
-                        {
-                            tracing::warn!(error = %e, "Background OSRM recovery watcher tick warning");
-                        }
-                    }
-                });
-            }
-        }
-    }
+    // Register DB-backed scheduler handlers (OSRM health checks, extension/shared refreshes,
+    // watched ZIPs sync, plus host extension jobs), idempotently seed initial defaults, and
+    // start the leased scheduler runner loop.
+    crate::scheduler::register_builtin_public_handlers();
+    crate::lazy::register_lazy_scheduled_jobs();
+    crate::extensions::shared_cache::register_shared_cache_scheduled_jobs();
+    register_watched_zips_sync_scheduler_handler();
 
-    // Report & house data refresh is manual-only by default unless `AUTO_SYNC_ENABLED=true`
-    // and `SYNC_INTERVAL_MIN > 0`. In `RUN_MODE=web`, periodic background ZIP sync cron is skipped
-    // so web replicas remain pure HTTP workers while `RUN_MODE=scanner` (or `all`) runs the cron.
-    if run_mode == RunMode::Web {
-        tracing::info!(
-            run_mode = run_mode.as_str(),
-            "Skipping periodic background ZIP sync cron in HTTP-only web mode"
-        );
-        return;
-    }
-
+    let sched_state = state.clone();
+    let sched_default_origin = state
+        .env
+        .get("PUBLIC_BASE_URL")
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| format!("http://127.0.0.1:{default_port}"));
     let auto_sync_enabled = match state.env.get("AUTO_SYNC_ENABLED") {
         Some(raw) => is_truthy_flag(raw),
         None => run_mode == RunMode::Scanner,
@@ -1040,57 +1174,97 @@ pub fn spawn_startup_background_tasks(state: &AppState, default_port: u16) {
         .get("SYNC_INTERVAL_MIN")
         .and_then(|s| s.trim().parse::<u64>().ok())
         .unwrap_or(if run_mode == RunMode::Scanner { 15 } else { 0 });
+    let max_zips: u64 = state
+        .env
+        .get("SYNC_MAX_ZIPS_PER_TICK")
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .unwrap_or(5);
 
-    if auto_sync_enabled && sync_min > 0 {
-        let state_sync = state.clone();
-        let base_origin = state
-            .env
-            .get("PUBLIC_BASE_URL")
-            .map(String::from)
-            .unwrap_or_else(|| format!("http://localhost:{default_port}"));
-        let max_zips = state
-            .env
-            .get("SYNC_MAX_ZIPS_PER_TICK")
-            .and_then(|s| s.trim().parse::<usize>().ok())
-            .unwrap_or(5);
-
-        tokio::spawn(async move {
-            // Run an initial check shortly after startup so pod restarts don't drop due ticks
-            tokio::time::sleep(Duration::from_secs(25)).await;
-            if let Err(e) = run_background_sync_cycle_with_provider(
-                &state_sync.db,
-                &state_sync.http,
-                &state_sync.env,
-                &base_origin,
-                None,
-                max_zips,
-                Some(&state_sync as &dyn LiveZipListingProvider),
+    tokio::spawn(async move {
+        if let Err(e) =
+            crate::scheduler::seed_public_default_jobs(&sched_state.db, &sched_state.env).await
+        {
+            tracing::warn!(error = %e, "Failed seeding built-in public scheduled jobs");
+        }
+        if let Err(e) =
+            crate::lazy::seed_lazy_default_jobs(&sched_state.db, &sched_state.env).await
+        {
+            tracing::warn!(error = %e, "Failed seeding built-in lazy scheduled jobs");
+        }
+        if let Err(e) = crate::extensions::shared_cache::seed_shared_cache_default_jobs(
+            &sched_state.db,
+            &sched_state.env,
+        )
+        .await
+        {
+            tracing::warn!(error = %e, "Failed seeding built-in shared cache scheduled jobs");
+        }
+        if run_mode != RunMode::Web {
+            let sync_seed = crate::scheduler::SeedJobSpec::new(
+                WATCHED_ZIPS_SYNC_JOB_KIND,
+                "default",
+                crate::scheduler::ScheduleSpec {
+                    kind: crate::scheduler::ScheduleKind::Interval,
+                    cron_expr: None,
+                    interval_secs: Some((sync_min.max(1) * 60).max(60)),
+                    run_at_unix: None,
+                    jitter_secs: 15,
+                    timezone: "UTC".to_string(),
+                },
             )
-            .await
-            {
-                tracing::warn!(error = %e, "Initial background ZIP sync cycle warning");
+            .with_enabled(auto_sync_enabled && sync_min > 0)
+            .with_initial_delay_secs(25)
+            .with_max_runtime_secs(600)
+            .with_params(json!({
+                "baseOrigin": sched_default_origin,
+                "maxZips": max_zips,
+            }));
+            if let Err(e) = crate::scheduler::seed_default_job(&sched_state.db, &sync_seed).await {
+                tracing::warn!(error = %e, "Failed seeding watched_zips_sync default schedule");
             }
+        }
+        if let Err(e) = sched_state.hooks.register_scheduled_jobs(&sched_state).await {
+            tracing::warn!(error = %e, "Failed registering host extension scheduled jobs");
+        }
+        let mut guard = sched_state.scheduler_handle.lock().await;
+        if guard.is_none() {
+            let runner = crate::scheduler::SchedulerRunner::from_app_state(&sched_state);
+            *guard = Some(crate::scheduler::spawn_scheduler_runner(runner));
+        }
+    });
 
-            let mut interval = tokio::time::interval(Duration::from_secs(sync_min * 60));
-            // Skip immediate t=0 tick since we just ran the startup check
-            interval.tick().await;
-            loop {
-                interval.tick().await;
-                if let Err(e) = run_background_sync_cycle_with_provider(
-                    &state_sync.db,
-                    &state_sync.http,
-                    &state_sync.env,
-                    &base_origin,
-                    None,
-                    max_zips,
-                    Some(&state_sync as &dyn LiveZipListingProvider),
-                )
-                .await
-                {
-                    tracing::warn!(error = %e, "Background ZIP sync cycle warning");
-                }
-            }
-        });
+    // Report & house data refresh is manual-only by default unless enabled in `scheduled_jobs`
+    // (seeded from `AUTO_SYNC_ENABLED` / `SYNC_INTERVAL_MIN`). In `RUN_MODE=web`, lazy background
+    // workers are skipped so web replicas remain pure HTTP workers.
+    if run_mode == RunMode::Web {
+        tracing::info!(
+            run_mode = run_mode.as_str(),
+            "Skipping lazy worker startup in HTTP-only web mode"
+        );
+        return;
+    }
+
+    let base_origin_lazy = state
+        .env
+        .get("PUBLIC_BASE_URL")
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| format!("http://127.0.0.1:{default_port}"));
+    if let Ok(mut guard) = state.lazy_worker.try_lock() {
+        if guard.is_none() {
+            let cfg = crate::lazy::LazyWorkerConfig::from_env(&state.env)
+                .with_notify_only(state.env.get("LAZY_WORKER_POLL_MS").is_none());
+            let exec = crate::lazy::LazyExecutor::new(
+                state.db.clone(),
+                state.http.clone(),
+                state.env.clone(),
+                Arc::clone(&state.extension_hub),
+            )
+            .with_hook_state(state.clone())
+            .with_base_origin(base_origin_lazy);
+            let worker = crate::lazy::LazyWorker::new(exec, cfg);
+            *guard = Some(crate::lazy::spawn_lazy_worker(worker));
+        }
     }
 }
 
@@ -1165,9 +1339,23 @@ fn hold_permit_until_job_done(
             notified.await;
         };
         if let Some(slug) = final_slug {
-            if static_mirror_config_from_env(&state.env).is_some() {
+            if !state.extension_hub.list_lazy_manifests().is_empty()
+                || static_mirror_config_from_env(&state.env).is_some()
+            {
                 if let Some(rec) = get_cached_or_disk_report(&state, &slug).await {
-                    if !report_ai_pending(&rec.report) {
+                    let _ = state
+                        .extension_hub
+                        .enqueue_lazy_for_report(
+                            &state.db,
+                            &rec.slug,
+                            &rec.report,
+                            "first_visit",
+                            None,
+                        )
+                        .await;
+                    if static_mirror_config_from_env(&state.env).is_some()
+                        && !report_ai_pending(&rec.report)
+                    {
                         let html = rec.rendered_html.unwrap_or_else(|| {
                             render_report_html_with_brand(
                                 &rec.report,
@@ -1716,27 +1904,19 @@ async fn handle_vendor_i18next() -> Response {
     resp
 }
 
-async fn handle_i18n_bundle(
-    State(state): State<AppState>,
-    AxumPath(raw_lang): AxumPath<String>,
-) -> Response {
+async fn handle_i18n_bundle(AxumPath(raw_lang): AxumPath<String>) -> Response {
     let clean_lang = raw_lang
         .strip_suffix(".json")
         .unwrap_or(&raw_lang)
         .trim()
         .to_ascii_lowercase();
-    let raw_body = if clean_lang.starts_with("zh") {
+    let body = if clean_lang.starts_with("zh") {
         I18N_ZH_JSON
     } else if clean_lang.starts_with("es") {
         I18N_ES_JSON
     } else {
         I18N_EN_JSON
     };
-    let body = localize_i18n_json_for_brand(
-        raw_body,
-        &state.env.brand_name(),
-        &state.env.brand_domain(),
-    );
     let mut resp = (StatusCode::OK, body).into_response();
     resp.headers_mut().insert(
         header::CONTENT_TYPE,
@@ -1928,8 +2108,7 @@ fn format_area_label(area: &AreaContext) -> String {
 }
 
 fn has_live_oss_listing_connector(env: &EnvConfig) -> bool {
-    env.get("RENTCAST_API_KEY").is_some()
-        || (env.get("RESO_API_URL").is_some() && env.get("RESO_BEARER_TOKEN").is_some())
+    (env.get("RESO_API_URL").is_some() && env.get("RESO_BEARER_TOKEN").is_some())
         || env.get("SIMPLYRETS_AUTH").is_some()
         || env.get("PUBLIC_LISTING_FEED_URL").is_some()
 }
@@ -2504,10 +2683,7 @@ async fn handle_report_enqueue(
         if is_automated_scraper_ua(&headers) {
             return Err(map_guardrail(GuardrailError::new(
                 "AUTOMATED_SCRAPER_BLOCKED",
-                format!(
-                    "Automated scripts and scrapers are prohibited on {} AI endpoints.",
-                    state.env.brand_name()
-                ),
+                "Automated scripts and scrapers are prohibited on Open Estate AI endpoints.",
                 403,
             )));
         }
@@ -2916,14 +3092,13 @@ async fn attach_live_report_ux_fields(
     let zip_opt = report.pointer("/geo/zip").and_then(Value::as_str);
     let facts_val = report.get("facts").cloned().unwrap_or_else(|| json!({}));
     let mkt_val = report.pointer("/modules/market/data").cloned();
-    let engagement = crate::modules::engagement::build_engagement_for_report_with_brand(
+    let engagement = crate::modules::engagement::build_engagement_for_report(
         db,
         slug,
         display_addr,
         zip_opt,
         &facts_val,
         mkt_val.as_ref(),
-        "Open Estate",
     )
     .await;
     if let Some(robj) = report.as_object_mut() {
@@ -3044,6 +3219,19 @@ async fn ensure_report_parcel_outlines(state: &AppState, slug: &str, report: &mu
     }
 }
 
+fn enforce_private_no_store_headers(headers: &mut HeaderMap) {
+    headers.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("private, no-store"),
+    );
+    headers.insert(
+        header::VARY,
+        HeaderValue::from_static("Cookie, Authorization"),
+    );
+    headers.remove(header::HeaderName::from_static("cdn-cache-control"));
+    headers.remove(header::ETAG);
+}
+
 async fn handle_rendered_report(
     State(state): State<AppState>,
     AxumPath(slug): AxumPath<String>,
@@ -3074,13 +3262,11 @@ async fn handle_rendered_report(
         ai_pending,
     );
     let internal_auth = internal_auth_required(&state.env);
-    if policy.public_cacheable && !internal_auth {
-        if let Some(ref etag) = policy.etag {
-            if if_none_match_matches(&headers, etag) {
-                return not_modified_response(&policy);
-            }
-        }
-    }
+    let _ = state
+        .extension_hub
+        .enqueue_lazy_for_report(&state.db, &auth.record.slug, &auth.record.report, "first_visit", None)
+        .await;
+    let _ = crate::lazy::merge_ready_artifacts_into_report(&state.db, &mut auth.record.report).await;
     let hint = auth.record.clone();
     attach_live_report_ux_fields(
         &state.db,
@@ -3092,6 +3278,25 @@ async fn handle_rendered_report(
     .await;
     ensure_report_parcel_outlines(&state, &auth.record.slug, &mut auth.record.report).await;
     apply_runtime_module_filter(&mut auth.record.report, &reg_snap);
+    let redaction = state
+        .hooks
+        .redact_report_for_viewer(
+            &state,
+            &headers,
+            raw_q_str,
+            &auth.record.slug,
+            &mut auth.record.report,
+        )
+        .await;
+    let force_private = internal_auth || redaction.redacted || redaction.private_cache;
+    let is_public_cache = policy.public_cacheable && !force_private;
+    if is_public_cache {
+        if let Some(ref etag) = policy.etag {
+            if if_none_match_matches(&headers, etag) {
+                return not_modified_response(&policy);
+            }
+        }
+    }
     let html = render_report_html_with_brand(
         &auth.record.report,
         &state.env.brand_name(),
@@ -3099,13 +3304,13 @@ async fn handle_rendered_report(
     );
     let html = inject_script_before_body_end(html, state.hooks.extra_client_script());
     let html = state.hooks.customize_report_html(&state, &auth, html).await;
-    let personalize_session = !policy.public_cacheable || internal_auth;
+    let personalize_session = !is_public_cache;
     let (html, oe_cookie) = if personalize_session {
         prepare_oe_session_for_html(&state.env, &headers, html)
     } else {
         (html, None)
     };
-    let new_vid = if policy.public_cacheable {
+    let new_vid = if is_public_cache {
         // Public CDN-cacheable responses must NOT emit `Set-Cookie` or edge caches bypass.
         let _ = record_search_for_request(
             &state,
@@ -3138,17 +3343,12 @@ async fn handle_rendered_report(
     apply_report_cache_headers(resp.headers_mut(), &policy);
     if personalize_session {
         attach_optional_set_cookie(&mut resp, oe_cookie);
-        if internal_auth {
-            resp.headers_mut().insert(
-                header::CACHE_CONTROL,
-                HeaderValue::from_static("private, no-store"),
-            );
-            resp.headers_mut().remove("cdn-cache-control");
-            resp.headers_mut().remove(header::ETAG);
-        }
+    }
+    if force_private {
+        enforce_private_no_store_headers(resp.headers_mut());
     }
     apply_security_headers(resp.headers_mut());
-    if !policy.public_cacheable {
+    if !is_public_cache {
         apply_visitor_cookie_if_needed(&mut resp, new_vid.as_deref());
     }
     resp
@@ -3185,29 +3385,37 @@ async fn handle_report_json(
         ai_pending,
     );
     let internal_auth = internal_auth_required(&state.env);
-    if policy.public_cacheable && !internal_auth {
+    let _ = state
+        .extension_hub
+        .enqueue_lazy_for_report(&state.db, &rec.slug, &rec.report, "first_visit", None)
+        .await;
+    let _ = crate::lazy::merge_ready_artifacts_into_report(&state.db, &mut rec.report).await;
+    let hint = rec.clone();
+    attach_live_report_ux_fields(&state.db, &state.env, &rec.slug, Some(&hint), &mut rec.report)
+        .await;
+    ensure_report_parcel_outlines(&state, &rec.slug, &mut rec.report).await;
+    apply_runtime_module_filter(&mut rec.report, &reg_snap);
+    let redaction = state
+        .hooks
+        .redact_report_for_viewer(&state, &headers, raw_q_str, &rec.slug, &mut rec.report)
+        .await;
+    let force_private = internal_auth || redaction.redacted || redaction.private_cache;
+    if policy.public_cacheable && !force_private {
         if let Some(ref etag) = policy.etag {
             if if_none_match_matches(&headers, etag) {
                 return not_modified_response(&policy);
             }
         }
     }
-    let hint = rec.clone();
-    attach_live_report_ux_fields(&state.db, &state.env, &rec.slug, Some(&hint), &mut rec.report)
-        .await;
-    ensure_report_parcel_outlines(&state, &rec.slug, &mut rec.report).await;
-    apply_runtime_module_filter(&mut rec.report, &reg_snap);
-    localize_report_value_for_brand(
-        &mut rec.report,
-        &state.env.brand_name(),
-        &state.env.brand_domain(),
-    );
     let mut resp = (StatusCode::OK, Json(rec.report)).into_response();
     resp.headers_mut().insert(
         header::HeaderName::from_static("x-openestate-cache"),
         HeaderValue::from_static("HIT"),
     );
     apply_report_cache_headers(resp.headers_mut(), &policy);
+    if force_private {
+        enforce_private_no_store_headers(resp.headers_mut());
+    }
     apply_security_headers(resp.headers_mut());
     resp
 }
@@ -3219,16 +3427,9 @@ async fn handle_buyer_diligence_get(
     RawQuery(raw_query): RawQuery,
     AxumPath(slug): AxumPath<String>,
 ) -> ApiResult {
+    let raw_q_str = raw_query.as_deref().unwrap_or("");
     let clean_slug = validate_slug_param(&slug).map_err(map_guardrail)?;
-    let rec = match authorize_cached_report(
-        &state,
-        &clean_slug,
-        &headers,
-        raw_query.as_deref().unwrap_or(""),
-        false,
-    )
-    .await
-    {
+    let rec = match authorize_cached_report(&state, &clean_slug, &headers, raw_q_str, false).await {
         Ok(auth) => auth.record,
         Err(resp) => return Ok(resp),
     };
@@ -3252,24 +3453,18 @@ async fn handle_buyer_diligence_get(
         (None, None)
     };
 
+    let mut report_view = rec.report.clone();
     let has_doc_overrides = saved_hoa.is_some() || saved_title.is_some();
-    let (hoa_profile, buyer_diligence) = if !has_doc_overrides
-        && rec
-            .report
+    if has_doc_overrides
+        || !report_view
             .get("hoaProfile")
             .map(|v| v.is_object())
             .unwrap_or(false)
-        && rec
-            .report
+        || !report_view
             .get("buyerDiligence")
             .map(|v| v.is_object())
             .unwrap_or(false)
     {
-        (
-            rec.report["hoaProfile"].clone(),
-            rec.report["buyerDiligence"].clone(),
-        )
-    } else {
         let mut rep = rec.report.clone();
         if let Some(hoa_doc) = saved_hoa {
             rep["hoaReview"] = hoa_doc;
@@ -3286,10 +3481,22 @@ async fn handle_buyer_diligence_get(
         {
             out.buyer_diligence["connectivity"] = existing_conn.clone();
         }
-        (out.hoa_profile, out.buyer_diligence)
-    };
+        report_view["hoaProfile"] = out.hoa_profile;
+        report_view["buyerDiligence"] = out.buyer_diligence;
+    }
 
-    Ok(json_response(
+    let _ = crate::lazy::merge_ready_artifacts_into_report(&state.db, &mut report_view).await;
+    let redaction = state
+        .hooks
+        .redact_report_for_viewer(&state, &headers, raw_q_str, &rec.slug, &mut report_view)
+        .await;
+    let hoa_profile = report_view.get("hoaProfile").cloned().unwrap_or(Value::Null);
+    let buyer_diligence = report_view
+        .get("buyerDiligence")
+        .cloned()
+        .unwrap_or(Value::Null);
+
+    let mut resp = json_response(
         StatusCode::OK,
         json!({
             "ok": true,
@@ -3297,7 +3504,11 @@ async fn handle_buyer_diligence_get(
             "hoaProfile": hoa_profile,
             "buyerDiligence": buyer_diligence,
         }),
-    ))
+    );
+    if internal_auth_required(&state.env) || redaction.redacted || redaction.private_cache {
+        enforce_private_no_store_headers(resp.headers_mut());
+    }
+    Ok(resp)
 }
 
 #[derive(Deserialize, Default)]
@@ -3620,6 +3831,11 @@ async fn execute_api_report(
         cre_flag,
     )
     .await;
+    let _ = state
+        .extension_hub
+        .enqueue_lazy_for_report(&state.db, &final_slug, &report, "first_visit", None)
+        .await;
+    let _ = crate::lazy::merge_ready_artifacts_into_report(&state.db, &mut report).await;
     attach_live_report_ux_fields(&state.db, &state.env, &final_slug, None, &mut report).await;
 
     if !lang.is_empty() && lang != "en" {
@@ -3672,6 +3888,11 @@ async fn execute_api_report(
         }
     }
 
+    let redaction = state
+        .hooks
+        .redact_report_for_viewer(state, headers, raw_query, &final_slug, &mut report)
+        .await;
+
     let raw_slug_opt = if !address.is_empty() {
         Some(slugify(&address))
     } else {
@@ -3688,22 +3909,16 @@ async fn execute_api_report(
             } else {
                 None
             }
-        })
-        .map(str::to_string);
+        });
     let new_vid = record_search_for_request(
         state,
         headers,
         true,
         &final_slug,
         raw_slug_opt.as_deref(),
-        disp_addr.as_deref(),
+        disp_addr,
     )
     .await;
-    localize_report_value_for_brand(
-        &mut report,
-        &state.env.brand_name(),
-        &state.env.brand_domain(),
-    );
     let mut resp = json_response_with_cache(
         StatusCode::OK,
         json!({
@@ -3714,6 +3929,9 @@ async fn execute_api_report(
         }),
         cache_hit,
     );
+    if internal_auth_required(&state.env) || redaction.redacted || redaction.private_cache {
+        enforce_private_no_store_headers(resp.headers_mut());
+    }
     apply_visitor_cookie_if_needed(&mut resp, new_vid.as_deref());
     Ok(resp)
 }
@@ -7005,14 +7223,13 @@ async fn build_live_engagement_for_slug(
     } else {
         (slug.to_string(), None, json!({}), None)
     };
-    Ok(crate::modules::engagement::build_engagement_for_report_with_brand(
+    Ok(crate::modules::engagement::build_engagement_for_report(
         &state.db,
         slug,
         &display_addr,
         zip_opt.as_deref(),
         &facts_val,
         mkt_val.as_ref(),
-        &state.env.brand_name(),
     )
     .await)
 }

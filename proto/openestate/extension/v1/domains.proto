@@ -461,3 +461,162 @@ message CodeEnforcementIntelProto {
   repeated PermitRecordProto cases = 4;
   string note = 5;
 }
+
+// Normalized residential rental property category for shared rental market indexing.
+enum RentalPropertyType {
+  RENTAL_PROPERTY_TYPE_UNSPECIFIED = 0;
+  RENTAL_PROPERTY_TYPE_APARTMENT = 1;
+  RENTAL_PROPERTY_TYPE_CONDO = 2;
+  RENTAL_PROPERTY_TYPE_TOWNHOUSE = 3;
+  RENTAL_PROPERTY_TYPE_SINGLE_FAMILY = 4;
+  RENTAL_PROPERTY_TYPE_ROOM = 5;
+  RENTAL_PROPERTY_TYPE_ADU = 6;
+}
+
+// Lifecycle state of an indexed rental listing.
+enum RentalListingStatus {
+  RENTAL_LISTING_STATUS_UNSPECIFIED = 0;
+  RENTAL_LISTING_STATUS_ACTIVE = 1;
+  RENTAL_LISTING_STATUS_RENTED = 2;
+  RENTAL_LISTING_STATUS_EXPIRED = 3;
+  RENTAL_LISTING_STATUS_REMOVED = 4;
+}
+
+// Canonical normalized rental listing persisted in the global shared rental market index.
+message RentalListingProto {
+  string source = 1;
+  string source_listing_id = 2;
+  string url = 3;
+  string title = 4;
+  optional string address = 5;
+  optional string unit = 6;
+  optional string neighborhood = 7;
+  optional double lat = 8;
+  optional double lon = 9;
+  optional string geohash6 = 10;
+  optional string geohash5 = 11;
+  optional string zip = 12;
+  optional string city = 13;
+  optional string state = 14;
+  optional double beds = 15;
+  optional double baths = 16;
+  optional int64 sqft = 17;
+  RentalPropertyType property_type = 18;
+  int64 rent_monthly = 19;
+  optional int64 deposit = 20;
+  optional string available_date = 21;
+  string first_seen_at = 22;
+  string last_seen_at = 23;
+  RentalListingStatus status = 24;
+  string content_hash = 25;
+}
+
+// Aggregated per-geography, per-segment rental market statistics cell.
+message RentalMarketCellProto {
+  // Geo selector key: geohash6, geohash5, `zip:XXXXX`, or `city:st:name`.
+  string geo_key = 1;
+  // Granularity tag: `geohash6`, `geohash5`, `zip`, or `city`.
+  string geo_kind = 2;
+  // Bedroom bucket: `all`, `studio`, `1`, `2`, `3`, `4+`, `room`, or `adu`.
+  string beds_bucket = 3;
+  // Property segment: `all` or canonical `RentalPropertyType` slug.
+  string property_type = 4;
+  int64 window_days = 5;
+  int64 sample_count = 6;
+  int64 p25_rent = 7;
+  int64 median_rent = 8;
+  int64 p75_rent = 9;
+  double mean_rent = 10;
+  optional double median_price_per_sqft = 11;
+  map<string, int64> sources_breakdown = 12;
+  optional string freshest_seen_at = 13;
+  string refreshed_at = 14;
+  double confidence = 15;
+}
+
+// Verification status for a disclosure packet record in storage.
+enum DisclosureVerificationStatus {
+  DISCLOSURE_VERIFICATION_STATUS_UNSPECIFIED = 0;
+  DISCLOSURE_VERIFICATION_STATUS_PENDING = 1;
+  DISCLOSURE_VERIFICATION_STATUS_VERIFIED = 2;
+  DISCLOSURE_VERIFICATION_STATUS_QUARANTINE = 3;
+  DISCLOSURE_VERIFICATION_STATUS_REJECTED = 4;
+}
+
+// Tri-state forensics gate verdict for a disclosure / inspection packet.
+enum ForensicsVerdictStatus {
+  FORENSICS_VERDICT_STATUS_UNSPECIFIED = 0;
+  FORENSICS_VERDICT_STATUS_VERIFIED = 1;
+  FORENSICS_VERDICT_STATUS_QUARANTINE_HUMAN_REVIEW = 2;
+  FORENSICS_VERDICT_STATUS_REJECTED_FAKE_OR_MISMATCH = 3;
+}
+
+// Encrypted/vaulted file entry belonging to a disclosure packet.
+message DisclosureFileProto {
+  string id = 1;
+  string packet_id = 2;
+  string filename = 3;
+  string sha256 = 4;
+  string mime = 5;
+  int64 bytes = 6;
+  string encrypted_path = 7;
+  string doc_class = 8;
+  int64 page_count = 9;
+  optional string requested_by_user_id = 10;
+  string created_at = 11;
+}
+
+// Anti-fake sanitization, identity check, and authenticity verdict for a disclosure packet.
+message DocumentForensicsVerdictProto {
+  ForensicsVerdictStatus status = 1;
+  double score = 2;
+  repeated string reasons = 3;
+  repeated string warnings = 4;
+  // Sanitization & prompt-injection metrics.
+  uint32 input_file_count = 5;
+  uint32 expanded_document_count = 6;
+  uint64 total_bytes_processed = 7;
+  uint32 total_pages = 8;
+  uint32 ocr_pages = 9;
+  uint32 scrubbed_injection_lines = 10;
+  uint32 hidden_text_stripped_files = 11;
+  bool prompt_injection_detected = 12;
+  uint32 pii_redacted_count = 13;
+  repeated string rejected_reasons = 14;
+  // Identity match summary (`matched`, `ambiguous`, `mismatch`, `unknown`).
+  string identity_status = 15;
+  double identity_score = 16;
+  string target_address = 17;
+  repeated string matched_addresses = 18;
+  repeated string matched_apns = 19;
+  repeated string matched_brokerages = 20;
+  repeated string mismatches = 21;
+  repeated string ambiguities = 22;
+  // Authenticity & tamper summary (`clean`, `advisory`, `suspicious`, `tampered`).
+  string tamper_severity = 23;
+  bool inspector_or_company_present = 24;
+  repeated string authenticity_flags = 25;
+  repeated string ground_truth_contradictions = 26;
+  bool llm_audited = 27;
+  repeated string sanitized_filenames = 28;
+}
+
+// Generic property disclosure & inspection packet contract.
+message DisclosurePacketProto {
+  string id = 1;
+  string slug = 2;
+  optional string apn = 3;
+  string source_kind = 4;
+  string source_ref = 5;
+  optional string outreach_request_id = 6;
+  optional string requested_by_user_id = 7;
+  DisclosureVerificationStatus verification_status = 8;
+  double authenticity_score = 9;
+  string required_tier = 10;
+  repeated DisclosureFileProto files = 11;
+  optional DocumentForensicsVerdictProto verdict = 12;
+  optional string analysis_json = 13;
+  string created_at = 14;
+  string updated_at = 15;
+  optional string verdict_json = 16;
+}
