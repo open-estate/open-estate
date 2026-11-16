@@ -1,0 +1,1987 @@
+{
+  "$defs": {
+    "AuthSpecProto": {
+      "additionalProperties": false,
+      "properties": {
+        "authType": {
+          "type": "string",
+          "x-alias-for": "auth_type"
+        },
+        "auth_type": {
+          "type": "string"
+        },
+        "envVar": {
+          "type": "string",
+          "x-alias-for": "env_var"
+        },
+        "env_var": {
+          "type": "string"
+        },
+        "headerName": {
+          "type": "string",
+          "x-alias-for": "header_name"
+        },
+        "headerPrefix": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-alias-for": "header_prefix"
+        },
+        "header_name": {
+          "type": "string"
+        },
+        "header_prefix": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "optionalKey": {
+          "type": "boolean",
+          "x-alias-for": "optional_key"
+        },
+        "optional_key": {
+          "type": "boolean"
+        },
+        "queryParam": {
+          "type": "string",
+          "x-alias-for": "query_param"
+        },
+        "query_param": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string",
+          "x-alias-for": "auth_type"
+        }
+      },
+      "type": "object",
+      "x-proto-message": "openestate.extension.v1.AuthSpecProto"
+    },
+    "BroadbandRuleProto": {
+      "additionalProperties": false,
+      "properties": {
+        "availabilityStatus": {
+          "type": "string",
+          "x-alias-for": "availability_status"
+        },
+        "availability_status": {
+          "type": "string"
+        },
+        "carrierName": {
+          "type": "string",
+          "x-alias-for": "carrier_name"
+        },
+        "carrier_name": {
+          "type": "string"
+        },
+        "checkUrl": {
+          "type": "string",
+          "x-alias-for": "check_url"
+        },
+        "check_url": {
+          "type": "string"
+        },
+        "excludeRural": {
+          "type": "boolean",
+          "x-alias-for": "exclude_rural"
+        },
+        "exclude_rural": {
+          "type": "boolean"
+        },
+        "geoScope": {
+          "$ref": "#/$defs/GeoScopeProto",
+          "x-alias-for": "geo_scope"
+        },
+        "geo_scope": {
+          "$ref": "#/$defs/GeoScopeProto"
+        },
+        "id": {
+          "type": "string"
+        },
+        "match_scope": {
+          "$ref": "#/$defs/GeoScopeProto",
+          "x-alias-for": "geo_scope"
+        },
+        "maxDownloadMbps": {
+          "type": "integer",
+          "x-alias-for": "max_download_mbps"
+        },
+        "maxUploadMbps": {
+          "type": "integer",
+          "x-alias-for": "max_upload_mbps"
+        },
+        "max_download_mbps": {
+          "type": "integer"
+        },
+        "max_upload_mbps": {
+          "type": "integer"
+        },
+        "onlyWhenCategoryEmpty": {
+          "type": "boolean",
+          "x-alias-for": "only_when_category_empty"
+        },
+        "only_when_category_empty": {
+          "type": "boolean"
+        },
+        "symmetrical": {
+          "type": "boolean"
+        },
+        "technology": {
+          "type": "string"
+        },
+        "tierCategory": {
+          "type": "string",
+          "x-alias-for": "tier_category"
+        },
+        "tier_category": {
+          "type": "string"
+        },
+        "typicalMonthlyUsd": {
+          "type": "string",
+          "x-alias-for": "typical_monthly_usd"
+        },
+        "typical_monthly_usd": {
+          "type": "string"
+        }
+      },
+      "type": "object",
+      "x-proto-message": "openestate.extension.v1.BroadbandRuleProto"
+    },
+    "CapabilityDomain": {
+      "enum": [
+        "geocode",
+        "property_facts",
+        "valuation",
+        "market_trends",
+        "electric_utility",
+        "gas_utility",
+        "water_sewer_trash",
+        "broadband",
+        "natural_hazards",
+        "environmental",
+        "livability",
+        "schools",
+        "crime",
+        "house_3d",
+        "listings_feed",
+        "insurance",
+        "tax_mandates",
+        "routing",
+        "permits",
+        "permit_intel"
+      ],
+      "type": "string",
+      "x-proto-enum": "openestate.extension.v1.CapabilityDomain"
+    },
+    "DeclarativeRequestProto": {
+      "additionalProperties": false,
+      "properties": {
+        "bodyTemplate": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-alias-for": "body_template"
+        },
+        "body_template": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "headers": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object"
+        },
+        "method": {
+          "type": "string"
+        },
+        "parameters": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object",
+          "x-alias-for": "query_params"
+        },
+        "queryParams": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object",
+          "x-alias-for": "query_params"
+        },
+        "query_params": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object"
+        },
+        "url": {
+          "type": "string"
+        }
+      },
+      "type": "object",
+      "x-proto-message": "openestate.extension.v1.DeclarativeRequestProto"
+    },
+    "DriverKind": {
+      "enum": [
+        "declarative_yaml",
+        "openapi_yaml",
+        "native_adapter"
+      ],
+      "type": "string",
+      "x-proto-enum": "openestate.extension.v1.DriverKind"
+    },
+    "ElectricRuleProto": {
+      "additionalProperties": false,
+      "properties": {
+        "carrierName": {
+          "type": "string",
+          "x-alias-for": "carrier_name"
+        },
+        "carrier_name": {
+          "type": "string"
+        },
+        "ccaProgram": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-alias-for": "cca_program"
+        },
+        "cca_program": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "geoScope": {
+          "$ref": "#/$defs/GeoScopeProto",
+          "x-alias-for": "geo_scope"
+        },
+        "geo_scope": {
+          "$ref": "#/$defs/GeoScopeProto"
+        },
+        "id": {
+          "type": "string"
+        },
+        "match_scope": {
+          "$ref": "#/$defs/GeoScopeProto",
+          "x-alias-for": "geo_scope"
+        },
+        "monthlyBaseFeeUsd": {
+          "type": "number",
+          "x-alias-for": "monthly_base_fee_usd"
+        },
+        "monthly_base_fee_usd": {
+          "type": "number"
+        },
+        "offPeakKwhUsd": {
+          "type": "number",
+          "x-alias-for": "off_peak_kwh_usd"
+        },
+        "off_peak_kwh_usd": {
+          "type": "number"
+        },
+        "peakKwhUsd": {
+          "type": "number",
+          "x-alias-for": "peak_kwh_usd"
+        },
+        "peak_kwh_usd": {
+          "type": "number"
+        },
+        "ratePerKwhUsd": {
+          "type": "number",
+          "x-alias-for": "rate_per_kwh_usd"
+        },
+        "rateSchedule": {
+          "type": "string",
+          "x-alias-for": "rate_schedule"
+        },
+        "rateSource": {
+          "type": "string",
+          "x-alias-for": "rate_source"
+        },
+        "rate_per_kwh_usd": {
+          "type": "number"
+        },
+        "rate_schedule": {
+          "type": "string"
+        },
+        "rate_source": {
+          "type": "string"
+        },
+        "shortName": {
+          "type": "string",
+          "x-alias-for": "short_name"
+        },
+        "short_name": {
+          "type": "string"
+        },
+        "solarNemPolicy": {
+          "type": "string",
+          "x-alias-for": "solar_nem_policy"
+        },
+        "solar_nem_policy": {
+          "type": "string"
+        },
+        "tariffUrl": {
+          "type": "string",
+          "x-alias-for": "tariff_url"
+        },
+        "tariff_url": {
+          "type": "string"
+        },
+        "utilityType": {
+          "type": "string",
+          "x-alias-for": "utility_type"
+        },
+        "utilityTypeLabel": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-alias-for": "utility_type_label"
+        },
+        "utility_type": {
+          "type": "string"
+        },
+        "utility_type_label": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object",
+      "x-proto-message": "openestate.extension.v1.ElectricRuleProto"
+    },
+    "ExecutionMode": {
+      "enum": [
+        "eager",
+        "lazy"
+      ],
+      "type": "string",
+      "x-proto-enum": "openestate.extension.v1.ExecutionMode"
+    },
+    "ExtensionManifestProto": {
+      "additionalProperties": false,
+      "anyOf": [
+        {
+          "required": [
+            "extension_id"
+          ]
+        },
+        {
+          "required": [
+            "id"
+          ]
+        },
+        {
+          "required": [
+            "extensionId"
+          ]
+        }
+      ],
+      "properties": {
+        "additionalDomains": {
+          "items": {
+            "$ref": "#/$defs/CapabilityDomain"
+          },
+          "type": "array",
+          "x-alias-for": "additional_domains"
+        },
+        "additional_domains": {
+          "items": {
+            "$ref": "#/$defs/CapabilityDomain"
+          },
+          "type": "array"
+        },
+        "attribution": {
+          "$ref": "#/$defs/ManifestSourceAttributionProto",
+          "x-alias-for": "source_attribution"
+        },
+        "auth": {
+          "$ref": "#/$defs/AuthSpecProto"
+        },
+        "builtin": {
+          "type": "boolean"
+        },
+        "cacheTtlSecs": {
+          "minimum": 0,
+          "type": "integer",
+          "x-alias-for": "cache_ttl_secs"
+        },
+        "cache_ttl_secs": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "codeowners": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "consumes_domains": {
+          "items": {
+            "$ref": "#/$defs/CapabilityDomain"
+          },
+          "type": "array",
+          "x-alias-for": "input_from_domains"
+        },
+        "defaultProvenance": {
+          "$ref": "#/$defs/ProvenanceTier",
+          "x-alias-for": "default_provenance"
+        },
+        "default_provenance": {
+          "$ref": "#/$defs/ProvenanceTier"
+        },
+        "dependencies": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "x-alias-for": "depends_on"
+        },
+        "dependsOn": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "x-alias-for": "depends_on"
+        },
+        "depends_on": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "description": {
+          "type": "string"
+        },
+        "documentationUrl": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-alias-for": "documentation_url"
+        },
+        "documentation_url": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "domain": {
+          "$ref": "#/$defs/CapabilityDomain"
+        },
+        "domains": {
+          "items": {
+            "$ref": "#/$defs/CapabilityDomain"
+          },
+          "type": "array",
+          "x-alias-for": "additional_domains"
+        },
+        "driver": {
+          "$ref": "#/$defs/DriverKind"
+        },
+        "driver_kind": {
+          "$ref": "#/$defs/DriverKind",
+          "x-alias-for": "driver"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "enabledByDefault": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "x-alias-for": "enabled_by_default"
+        },
+        "enabled_by_default": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "endpoint": {
+          "$ref": "#/$defs/DeclarativeRequestProto",
+          "x-alias-for": "request"
+        },
+        "executionMode": {
+          "$ref": "#/$defs/ExecutionMode",
+          "x-alias-for": "execution_mode"
+        },
+        "execution_mode": {
+          "$ref": "#/$defs/ExecutionMode"
+        },
+        "extensionId": {
+          "type": "string",
+          "x-alias-for": "extension_id"
+        },
+        "extension_id": {
+          "type": "string"
+        },
+        "footprintCatalog": {
+          "$ref": "#/$defs/FootprintCatalogProto",
+          "x-alias-for": "footprint_catalog"
+        },
+        "footprint_catalog": {
+          "$ref": "#/$defs/FootprintCatalogProto"
+        },
+        "geoRules": {
+          "items": {
+            "$ref": "#/$defs/GeoRuleProto"
+          },
+          "type": "array",
+          "x-alias-for": "geo_rules"
+        },
+        "geoScope": {
+          "$ref": "#/$defs/GeoScopeProto",
+          "x-alias-for": "geo_scope"
+        },
+        "geo_rules": {
+          "items": {
+            "$ref": "#/$defs/GeoRuleProto"
+          },
+          "type": "array"
+        },
+        "geo_scope": {
+          "$ref": "#/$defs/GeoScopeProto"
+        },
+        "homepageUrl": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-alias-for": "homepage_url"
+        },
+        "homepage_url": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "type": "string",
+          "x-alias-for": "extension_id"
+        },
+        "inputFromDomains": {
+          "items": {
+            "$ref": "#/$defs/CapabilityDomain"
+          },
+          "type": "array",
+          "x-alias-for": "input_from_domains"
+        },
+        "input_domains": {
+          "items": {
+            "$ref": "#/$defs/CapabilityDomain"
+          },
+          "type": "array",
+          "x-alias-for": "input_from_domains"
+        },
+        "input_from_domains": {
+          "items": {
+            "$ref": "#/$defs/CapabilityDomain"
+          },
+          "type": "array"
+        },
+        "licenseClass": {
+          "$ref": "#/$defs/LicenseClass",
+          "x-alias-for": "license_class"
+        },
+        "license_class": {
+          "$ref": "#/$defs/LicenseClass"
+        },
+        "llm": {
+          "$ref": "#/$defs/LlmSpecProto"
+        },
+        "metering": {
+          "$ref": "#/$defs/MeteringSpecProto"
+        },
+        "minPlanTier": {
+          "type": "string",
+          "x-alias-for": "min_plan_tier"
+        },
+        "min_plan_tier": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "openapi": {
+          "$ref": "#/$defs/OpenApiBindingProto"
+        },
+        "openapiSpecFile": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-alias-for": "openapi_spec_file"
+        },
+        "openapi_operation": {
+          "$ref": "#/$defs/OpenApiBindingProto",
+          "x-alias-for": "openapi"
+        },
+        "openapi_spec_file": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "priority": {
+          "maximum": 2147483647,
+          "minimum": -2147483648,
+          "type": "integer"
+        },
+        "protoMessageType": {
+          "type": "string",
+          "x-alias-for": "proto_message_type"
+        },
+        "proto_message_type": {
+          "type": "string"
+        },
+        "provenance": {
+          "$ref": "#/$defs/ProvenanceTier",
+          "x-alias-for": "default_provenance"
+        },
+        "rateLimit": {
+          "$ref": "#/$defs/RateLimitSpecProto",
+          "x-alias-for": "rate_limit"
+        },
+        "rate_limit": {
+          "$ref": "#/$defs/RateLimitSpecProto"
+        },
+        "report_section": {
+          "type": "string",
+          "x-alias-for": "section_id"
+        },
+        "request": {
+          "$ref": "#/$defs/DeclarativeRequestProto"
+        },
+        "requiresManualApproval": {
+          "type": "boolean",
+          "x-alias-for": "requires_manual_approval"
+        },
+        "requires_manual_approval": {
+          "type": "boolean"
+        },
+        "responseMapping": {
+          "$ref": "#/$defs/ResponseMappingProto",
+          "x-alias-for": "response_mapping"
+        },
+        "response_mapping": {
+          "$ref": "#/$defs/ResponseMappingProto"
+        },
+        "sectionId": {
+          "type": "string",
+          "x-alias-for": "section_id"
+        },
+        "section_id": {
+          "type": "string"
+        },
+        "sharing": {
+          "$ref": "#/$defs/SharingSpecProto"
+        },
+        "sourceAttribution": {
+          "$ref": "#/$defs/ManifestSourceAttributionProto",
+          "x-alias-for": "source_attribution"
+        },
+        "source_attribution": {
+          "$ref": "#/$defs/ManifestSourceAttributionProto"
+        },
+        "static_tariffs": {
+          "$ref": "#/$defs/TariffCatalogProto",
+          "x-alias-for": "tariff_catalog"
+        },
+        "tariffCatalog": {
+          "$ref": "#/$defs/TariffCatalogProto",
+          "x-alias-for": "tariff_catalog"
+        },
+        "tariff_catalog": {
+          "$ref": "#/$defs/TariffCatalogProto"
+        },
+        "tier": {
+          "$ref": "#/$defs/ExtensionTier"
+        },
+        "upstreamRequireMode": {
+          "type": "string",
+          "x-alias-for": "upstream_require_mode"
+        },
+        "upstream_require_mode": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "version",
+        "domain",
+        "driver"
+      ],
+      "type": "object",
+      "x-proto-message": "openestate.extension.v1.ExtensionManifestProto"
+    },
+    "ExtensionTier": {
+      "enum": [
+        "basic",
+        "premium"
+      ],
+      "type": "string",
+      "x-proto-enum": "openestate.extension.v1.ExtensionTier"
+    },
+    "FootprintCatalogProto": {
+      "additionalProperties": false,
+      "properties": {
+        "broadbandRules": {
+          "items": {
+            "$ref": "#/$defs/BroadbandRuleProto"
+          },
+          "type": "array",
+          "x-alias-for": "broadband_rules"
+        },
+        "broadband_rules": {
+          "items": {
+            "$ref": "#/$defs/BroadbandRuleProto"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object",
+      "x-proto-message": "openestate.extension.v1.FootprintCatalogProto"
+    },
+    "GasRuleProto": {
+      "additionalProperties": false,
+      "properties": {
+        "carrierName": {
+          "type": "string",
+          "x-alias-for": "carrier_name"
+        },
+        "carrier_name": {
+          "type": "string"
+        },
+        "geoScope": {
+          "$ref": "#/$defs/GeoScopeProto",
+          "x-alias-for": "geo_scope"
+        },
+        "geo_scope": {
+          "$ref": "#/$defs/GeoScopeProto"
+        },
+        "heatingFuelNorm": {
+          "type": "string",
+          "x-alias-for": "heating_fuel_norm"
+        },
+        "heating_fuel_norm": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "match_scope": {
+          "$ref": "#/$defs/GeoScopeProto",
+          "x-alias-for": "geo_scope"
+        },
+        "monthlyBaseFeeUsd": {
+          "type": "number",
+          "x-alias-for": "monthly_base_fee_usd"
+        },
+        "monthly_base_fee_usd": {
+          "type": "number"
+        },
+        "ratePerThermUsd": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "x-alias-for": "rate_per_therm_usd"
+        },
+        "rateSchedule": {
+          "type": "string",
+          "x-alias-for": "rate_schedule"
+        },
+        "rateSource": {
+          "type": "string",
+          "x-alias-for": "rate_source"
+        },
+        "rate_per_therm_usd": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "rate_schedule": {
+          "type": "string"
+        },
+        "rate_source": {
+          "type": "string"
+        },
+        "tariffUrl": {
+          "type": "string",
+          "x-alias-for": "tariff_url"
+        },
+        "tariff_url": {
+          "type": "string"
+        }
+      },
+      "type": "object",
+      "x-proto-message": "openestate.extension.v1.GasRuleProto"
+    },
+    "GeoRuleProto": {
+      "additionalProperties": false,
+      "properties": {
+        "broadbandOption": {
+          "$ref": "#/$defs/BroadbandRuleProto",
+          "x-alias-for": "broadband_option"
+        },
+        "broadband_option": {
+          "$ref": "#/$defs/BroadbandRuleProto"
+        },
+        "excludeRural": {
+          "type": "boolean",
+          "x-alias-for": "exclude_rural"
+        },
+        "exclude_rural": {
+          "type": "boolean"
+        },
+        "geo_scope": {
+          "$ref": "#/$defs/GeoScopeProto",
+          "x-alias-for": "match_scope"
+        },
+        "id": {
+          "type": "string"
+        },
+        "matchScope": {
+          "$ref": "#/$defs/GeoScopeProto",
+          "x-alias-for": "match_scope"
+        },
+        "match_scope": {
+          "$ref": "#/$defs/GeoScopeProto"
+        },
+        "staticTariff": {
+          "$ref": "#/$defs/StaticTariffRuleSpecProto",
+          "x-alias-for": "static_tariff"
+        },
+        "static_tariff": {
+          "$ref": "#/$defs/StaticTariffRuleSpecProto"
+        }
+      },
+      "type": "object",
+      "x-proto-message": "openestate.extension.v1.GeoRuleProto"
+    },
+    "GeoScopeProto": {
+      "additionalProperties": false,
+      "properties": {
+        "cities": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "counties": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "country": {
+          "type": "string"
+        },
+        "nationwide": {
+          "type": "boolean"
+        },
+        "specificityOverride": {
+          "maximum": 2147483647,
+          "minimum": -2147483648,
+          "type": [
+            "integer",
+            "null"
+          ],
+          "x-alias-for": "specificity_override"
+        },
+        "specificity_override": {
+          "maximum": 2147483647,
+          "minimum": -2147483648,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "states": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "zipCodes": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "x-alias-for": "zip_codes"
+        },
+        "zipPrefixes": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "x-alias-for": "zip_prefixes"
+        },
+        "zip_codes": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "zip_prefixes": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object",
+      "x-proto-message": "openestate.extension.v1.GeoScopeProto"
+    },
+    "LicenseClass": {
+      "enum": [
+        "public_open_data",
+        "byok_commercial_api",
+        "non_open_scrape",
+        "human_in_loop",
+        "llm_service"
+      ],
+      "type": "string",
+      "x-proto-enum": "openestate.extension.v1.LicenseClass"
+    },
+    "LlmSpecProto": {
+      "additionalProperties": false,
+      "properties": {
+        "effort": {
+          "$ref": "#/$defs/ReasoningEffort"
+        },
+        "maxOutputTokens": {
+          "maximum": 4294967295,
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ],
+          "x-alias-for": "max_output_tokens"
+        },
+        "max_output_tokens": {
+          "maximum": 4294967295,
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "model": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "profile": {
+          "type": "string"
+        },
+        "tasks": {
+          "description": "Per-task LLM overrides (sequence of LlmTaskSpecProto or mapping keyed by task name).",
+          "oneOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/LlmTaskSpecProto"
+              },
+              "type": "array"
+            },
+            {
+              "additionalProperties": {
+                "$ref": "#/$defs/LlmTaskSpecMapEntry"
+              },
+              "type": "object"
+            }
+          ]
+        }
+      },
+      "type": "object",
+      "x-proto-message": "openestate.extension.v1.LlmSpecProto"
+    },
+    "LlmTaskSpecMapEntry": {
+      "additionalProperties": false,
+      "properties": {
+        "effort": {
+          "$ref": "#/$defs/ReasoningEffort"
+        },
+        "max_output_tokens": {
+          "maximum": 4294967295,
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "model": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "profile": {
+          "type": "string"
+        },
+        "task": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "LlmTaskSpecProto": {
+      "additionalProperties": false,
+      "properties": {
+        "effort": {
+          "$ref": "#/$defs/ReasoningEffort"
+        },
+        "maxOutputTokens": {
+          "maximum": 4294967295,
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ],
+          "x-alias-for": "max_output_tokens"
+        },
+        "max_output_tokens": {
+          "maximum": 4294967295,
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "model": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "profile": {
+          "type": "string"
+        },
+        "task": {
+          "type": "string"
+        }
+      },
+      "type": "object",
+      "x-proto-message": "openestate.extension.v1.LlmTaskSpecProto"
+    },
+    "ManifestSourceAttributionProto": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "notes": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "scheduleOrVersion": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-alias-for": "schedule_or_version"
+        },
+        "schedule_or_version": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source_name": {
+          "type": "string",
+          "x-alias-for": "name"
+        },
+        "source_url": {
+          "type": "string",
+          "x-alias-for": "url"
+        },
+        "url": {
+          "type": "string"
+        }
+      },
+      "type": "object",
+      "x-proto-message": "openestate.extension.v1.ManifestSourceAttributionProto"
+    },
+    "MeteringSpecProto": {
+      "additionalProperties": false,
+      "properties": {
+        "dimensions": {
+          "items": {
+            "enum": [
+              "browser_page_loads",
+              "browser_session_ms",
+              "bytes_downloaded",
+              "bytes_stored",
+              "documents_ingested",
+              "emails_ingested",
+              "emails_sent",
+              "external_api_calls",
+              "external_api_cost_micros",
+              "invocations",
+              "invocations_cached",
+              "invocations_denied",
+              "invocations_failed",
+              "invocations_ok",
+              "llm_cache_write_tokens",
+              "llm_cached_input_tokens",
+              "llm_cost_micros",
+              "llm_input_tokens",
+              "llm_output_tokens",
+              "llm_reasoning_tokens",
+              "pages_ocr",
+              "wall_time_ms"
+            ],
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object",
+      "x-proto-message": "openestate.extension.v1.MeteringSpecProto"
+    },
+    "OpenApiBindingProto": {
+      "additionalProperties": false,
+      "properties": {
+        "bodyTemplate": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-alias-for": "body_template"
+        },
+        "body_template": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "headers": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object"
+        },
+        "method": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "operationId": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-alias-for": "operation_id"
+        },
+        "operation_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "parameters": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object",
+          "x-alias-for": "query_params"
+        },
+        "path": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "queryParams": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object",
+          "x-alias-for": "query_params"
+        },
+        "query_params": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object"
+        },
+        "specFile": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-alias-for": "spec_file"
+        },
+        "spec_file": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object",
+      "x-proto-message": "openestate.extension.v1.OpenApiBindingProto"
+    },
+    "ProvenanceTier": {
+      "enum": [
+        "live_verified",
+        "official_tariff",
+        "regional_footprint",
+        "unverified"
+      ],
+      "type": "string",
+      "x-proto-enum": "openestate.extension.v1.ProvenanceTier"
+    },
+    "RateLimitSpecProto": {
+      "additionalProperties": false,
+      "properties": {
+        "burst": {
+          "maximum": 4294967295,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "maxRetries": {
+          "maximum": 4294967295,
+          "minimum": 0,
+          "type": "integer",
+          "x-alias-for": "max_retries"
+        },
+        "max_retries": {
+          "maximum": 4294967295,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "requestsPerSecond": {
+          "maximum": 4294967295,
+          "minimum": 0,
+          "type": "integer",
+          "x-alias-for": "requests_per_second"
+        },
+        "requests_per_second": {
+          "maximum": 4294967295,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "timeoutMs": {
+          "maximum": 4294967295,
+          "minimum": 0,
+          "type": "integer",
+          "x-alias-for": "timeout_ms"
+        },
+        "timeout_ms": {
+          "maximum": 4294967295,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "type": "object",
+      "x-proto-message": "openestate.extension.v1.RateLimitSpecProto"
+    },
+    "ReasoningEffort": {
+      "enum": [
+        "none",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "type": "string",
+      "x-proto-enum": "openestate.extension.v1.ReasoningEffort"
+    },
+    "ResponseMappingProto": {
+      "additionalProperties": false,
+      "properties": {
+        "fields": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object"
+        },
+        "itemsPath": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-alias-for": "items_path"
+        },
+        "items_path": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "requireNonEmpty": {
+          "type": "boolean",
+          "x-alias-for": "require_non_empty"
+        },
+        "require_non_empty": {
+          "type": "boolean"
+        },
+        "rootPath": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-alias-for": "root_path"
+        },
+        "root_path": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object",
+      "x-proto-message": "openestate.extension.v1.ResponseMappingProto"
+    },
+    "ShareScope": {
+      "enum": [
+        "parcel",
+        "building",
+        "hoa",
+        "subdivision",
+        "geohash7",
+        "geohash6",
+        "geohash5",
+        "census_block_group",
+        "census_tract",
+        "zip",
+        "city",
+        "county",
+        "state",
+        "utility_territory",
+        "global"
+      ],
+      "type": "string",
+      "x-proto-enum": "openestate.extension.v1.ShareScope"
+    },
+    "SharingSpecProto": {
+      "additionalProperties": false,
+      "properties": {
+        "backgroundRefresh": {
+          "type": "boolean",
+          "x-alias-for": "background_refresh"
+        },
+        "background_refresh": {
+          "type": "boolean"
+        },
+        "keyFields": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "x-alias-for": "key_fields"
+        },
+        "key_fields": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "scope": {
+          "$ref": "#/$defs/ShareScope"
+        },
+        "staleWhileRevalidateSecs": {
+          "minimum": 0,
+          "type": "integer",
+          "x-alias-for": "stale_while_revalidate_secs"
+        },
+        "stale_while_revalidate_secs": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "ttlSecs": {
+          "minimum": 0,
+          "type": "integer",
+          "x-alias-for": "ttl_secs"
+        },
+        "ttl_secs": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "type": "object",
+      "x-proto-message": "openestate.extension.v1.SharingSpecProto"
+    },
+    "StaticTariffRuleSpecProto": {
+      "additionalProperties": false,
+      "properties": {
+        "carrierName": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-alias-for": "carrier_name"
+        },
+        "carrier_name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "ccaProgram": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-alias-for": "cca_program"
+        },
+        "cca_program": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "fallbackWaterCarrierName": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-alias-for": "fallback_water_carrier_name"
+        },
+        "fallback_water_carrier_name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "heatingFuelNorm": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-alias-for": "heating_fuel_norm"
+        },
+        "heating_fuel_norm": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "monthlyBaseFeeUsd": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "x-alias-for": "monthly_base_fee_usd"
+        },
+        "monthly_base_fee_usd": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "offPeakKwhUsd": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "x-alias-for": "off_peak_kwh_usd"
+        },
+        "off_peak_kwh_usd": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "peakKwhUsd": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "x-alias-for": "peak_kwh_usd"
+        },
+        "peak_kwh_usd": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "ratePerKwhUsd": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "x-alias-for": "rate_per_kwh_usd"
+        },
+        "ratePerThermUsd": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "x-alias-for": "rate_per_therm_usd"
+        },
+        "rateSchedule": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-alias-for": "rate_schedule"
+        },
+        "rateSource": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-alias-for": "rate_source"
+        },
+        "rate_per_kwh_usd": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "rate_per_therm_usd": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "rate_schedule": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "rate_source": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sewerCarrierName": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-alias-for": "sewer_carrier_name"
+        },
+        "sewerMonthlyUsd": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "x-alias-for": "sewer_monthly_usd"
+        },
+        "sewerType": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-alias-for": "sewer_type"
+        },
+        "sewer_carrier_name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sewer_monthly_usd": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "sewer_type": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "shortName": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-alias-for": "short_name"
+        },
+        "short_name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "solarNemPolicy": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-alias-for": "solar_nem_policy"
+        },
+        "solar_nem_policy": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tariffUrl": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-alias-for": "tariff_url"
+        },
+        "tariff_url": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "trashCarrierName": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-alias-for": "trash_carrier_name"
+        },
+        "trashMonthlyUsd": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "x-alias-for": "trash_monthly_usd"
+        },
+        "trash_carrier_name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "trash_monthly_usd": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "utilityType": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-alias-for": "utility_type"
+        },
+        "utilityTypeLabel": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-alias-for": "utility_type_label"
+        },
+        "utility_type": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "utility_type_label": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "waterBaseMonthlyUsd": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "x-alias-for": "water_base_monthly_usd"
+        },
+        "waterCarrierName": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-alias-for": "water_carrier_name"
+        },
+        "waterPwsid": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-alias-for": "water_pwsid"
+        },
+        "waterRateUnit": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-alias-for": "water_rate_unit"
+        },
+        "waterSourceType": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-alias-for": "water_source_type"
+        },
+        "waterTariffUrl": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-alias-for": "water_tariff_url"
+        },
+        "waterVolumetricRateUsd": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "x-alias-for": "water_volumetric_rate_usd"
+        },
+        "water_base_monthly_usd": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "water_carrier_name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "water_pwsid": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "water_rate_unit": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "water_source_type": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "water_tariff_url": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "water_volumetric_rate_usd": {
+          "type": [
+            "number",
+            "null"
+          ]
+        }
+      },
+      "type": "object",
+      "x-proto-message": "openestate.extension.v1.StaticTariffRuleSpecProto"
+    },
+    "TariffCatalogProto": {
+      "additionalProperties": false,
+      "properties": {
+        "electricRules": {
+          "items": {
+            "$ref": "#/$defs/ElectricRuleProto"
+          },
+          "type": "array",
+          "x-alias-for": "electric_rules"
+        },
+        "electric_rules": {
+          "items": {
+            "$ref": "#/$defs/ElectricRuleProto"
+          },
+          "type": "array"
+        },
+        "gasRules": {
+          "items": {
+            "$ref": "#/$defs/GasRuleProto"
+          },
+          "type": "array",
+          "x-alias-for": "gas_rules"
+        },
+        "gas_rules": {
+          "items": {
+            "$ref": "#/$defs/GasRuleProto"
+          },
+          "type": "array"
+        },
+        "waterSewerTrashRules": {
+          "items": {
+            "$ref": "#/$defs/WaterSewerTrashRuleProto"
+          },
+          "type": "array",
+          "x-alias-for": "water_sewer_trash_rules"
+        },
+        "water_sewer_trash_rules": {
+          "items": {
+            "$ref": "#/$defs/WaterSewerTrashRuleProto"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object",
+      "x-proto-message": "openestate.extension.v1.TariffCatalogProto"
+    },
+    "WaterSewerTrashRuleProto": {
+      "additionalProperties": false,
+      "properties": {
+        "fallbackWaterCarrierName": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-alias-for": "fallback_water_carrier_name"
+        },
+        "fallback_water_carrier_name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "geoScope": {
+          "$ref": "#/$defs/GeoScopeProto",
+          "x-alias-for": "geo_scope"
+        },
+        "geo_scope": {
+          "$ref": "#/$defs/GeoScopeProto"
+        },
+        "id": {
+          "type": "string"
+        },
+        "match_scope": {
+          "$ref": "#/$defs/GeoScopeProto",
+          "x-alias-for": "geo_scope"
+        },
+        "sewerCarrierName": {
+          "type": "string",
+          "x-alias-for": "sewer_carrier_name"
+        },
+        "sewerMonthlyUsd": {
+          "type": "integer",
+          "x-alias-for": "sewer_monthly_usd"
+        },
+        "sewerType": {
+          "type": "string",
+          "x-alias-for": "sewer_type"
+        },
+        "sewer_carrier_name": {
+          "type": "string"
+        },
+        "sewer_monthly_usd": {
+          "type": "integer"
+        },
+        "sewer_type": {
+          "type": "string"
+        },
+        "trashCarrierName": {
+          "type": "string",
+          "x-alias-for": "trash_carrier_name"
+        },
+        "trashMonthlyUsd": {
+          "type": "integer",
+          "x-alias-for": "trash_monthly_usd"
+        },
+        "trash_carrier_name": {
+          "type": "string"
+        },
+        "trash_monthly_usd": {
+          "type": "integer"
+        },
+        "waterBaseMonthlyUsd": {
+          "type": "number",
+          "x-alias-for": "water_base_monthly_usd"
+        },
+        "waterCarrierName": {
+          "type": "string",
+          "x-alias-for": "water_carrier_name"
+        },
+        "waterPwsid": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-alias-for": "water_pwsid"
+        },
+        "waterRateUnit": {
+          "type": "string",
+          "x-alias-for": "water_rate_unit"
+        },
+        "waterSourceType": {
+          "type": "string",
+          "x-alias-for": "water_source_type"
+        },
+        "waterTariffUrl": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-alias-for": "water_tariff_url"
+        },
+        "waterVolumetricRateUsd": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "x-alias-for": "water_volumetric_rate_usd"
+        },
+        "water_base_monthly_usd": {
+          "type": "number"
+        },
+        "water_carrier_name": {
+          "type": "string"
+        },
+        "water_pwsid": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "water_rate_unit": {
+          "type": "string"
+        },
+        "water_source_type": {
+          "type": "string"
+        },
+        "water_tariff_url": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "water_volumetric_rate_usd": {
+          "type": [
+            "number",
+            "null"
+          ]
+        }
+      },
+      "type": "object",
+      "x-proto-message": "openestate.extension.v1.WaterSewerTrashRuleProto"
+    }
+  },
+  "$id": "https://openestate.org/schemas/extension/v1/manifest.schema.json",
+  "$ref": "#/$defs/ExtensionManifestProto",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Generated strictly from the compiled openestate.extension.v1.ExtensionManifestProto descriptor (extension.descriptor.bin).",
+  "title": "Open Estate Extension Manifest"
+}

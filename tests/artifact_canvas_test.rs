@@ -3,12 +3,10 @@ mod common;
 use axum::{
     body::Body,
     http::{header, Request, StatusCode},
-    routing::post,
-    Router,
 };
 use open_estate::ai::artifact_canvas::{
     artifact_canvas_schema, build_deterministic_artifact, generate_llm_artifact_with_client,
-    handle_report_artifact_post, scrub_artifact_value,
+    scrub_artifact_value,
 };
 use open_estate::ai::llm::LlmCacheBackend;
 use open_estate::db::DbStore;
@@ -16,7 +14,7 @@ use open_estate::guardrails::HttpDefenseShield;
 use open_estate::shared::{EnvConfig, HttpClient};
 use open_estate::web::orchestrator::DbLlmCache;
 use open_estate::web::render::render_report_html;
-use open_estate::web::server::AppState;
+use open_estate::web::server::{build_router, AppState};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -385,12 +383,7 @@ async fn handle_report_artifact_post_enforces_guardrails_and_returns_valid_json(
     let tmp_reports = std::env::temp_dir().join(format!("db-art-test-{}", std::process::id()));
     let state =
         AppState::with_components(env, HttpClient::new(None), db, shield, tmp_reports, None);
-    let app = Router::new()
-        .route(
-            "/api/report/:slug/artifact",
-            post(handle_report_artifact_post),
-        )
-        .with_state(state);
+    let app = build_router(state);
 
     // 1. Valid EN request -> 200 OK
     let req_ok = Request::builder()

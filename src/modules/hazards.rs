@@ -369,6 +369,49 @@ fn shoelace_area_xy(pts: &[(f64, f64)]) -> f64 {
     0.5 * sum
 }
 
+fn segments_properly_cross(a: (f64, f64), b: (f64, f64), c: (f64, f64), d: (f64, f64)) -> bool {
+    if a == c || a == d || b == c || b == d {
+        return false;
+    }
+    if a.0.max(b.0) < c.0.min(d.0)
+        || c.0.max(d.0) < a.0.min(b.0)
+        || a.1.max(b.1) < c.1.min(d.1)
+        || c.1.max(d.1) < a.1.min(b.1)
+    {
+        return false;
+    }
+    let orient = |p: (f64, f64), q: (f64, f64), r: (f64, f64)| -> f64 {
+        (q.0 - p.0) * (r.1 - p.1) - (q.1 - p.1) * (r.0 - p.0)
+    };
+    let o1 = orient(a, b, c);
+    let o2 = orient(a, b, d);
+    let o3 = orient(c, d, a);
+    let o4 = orient(c, d, b);
+    ((o1 > 0.0 && o2 < 0.0) || (o1 < 0.0 && o2 > 0.0))
+        && ((o3 > 0.0 && o4 < 0.0) || (o3 < 0.0 && o4 > 0.0))
+}
+
+/// Return `true` when an open polygon ring vertex sequence has non-adjacent crossing segments.
+pub fn ring_has_self_intersection(pts: &[(f64, f64)]) -> bool {
+    let n = pts.len();
+    if n < 4 {
+        return false;
+    }
+    for i in 0..n {
+        let a = pts[i];
+        let b = pts[(i + 1) % n];
+        for j in (i + 2)..n {
+            if i == 0 && j == n - 1 {
+                continue;
+            }
+            if segments_properly_cross(a, b, pts[j], pts[(j + 1) % n]) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 fn sutherland_hodgman_clip_ring(
     raw_ring: &[(f64, f64)],
     min_x: f64,
@@ -549,6 +592,9 @@ fn simplify_and_round_ring(
     let mut tol = tol_deg;
     let mut simplified = run_dp(tol);
     if max_pts >= 4 {
+        // Avoid scaling tolerance into bowtie chords across narrow creek corridors.
+        let mut was_simple = (simplified.len() > max_pts && simplified.len() <= 1_200)
+            && !ring_has_self_intersection(&simplified);
         for _ in 0..10 {
             if simplified.len() <= max_pts {
                 break;
@@ -557,6 +603,12 @@ fn simplify_and_round_ring(
             let next = run_dp(tol);
             if next.len() < 3 {
                 break;
+            }
+            if was_simple && next.len() <= 1_200 && ring_has_self_intersection(&next) {
+                break;
+            }
+            if !was_simple && next.len() <= 1_200 {
+                was_simple = !ring_has_self_intersection(&next);
             }
             simplified = next;
         }
@@ -1053,7 +1105,16 @@ async fn put_cached_hazard_polygon_tile(
             .map(|s| s.eq_ignore_ascii_case("T"))
             .unwrap_or_else(|| !zone_code.is_empty());
         let geometry_geojson = geom
-            .and_then(|g| clip_and_simplify_arcgis_geometry(g, clat, clon, radius_m, 0.00018, 120))
+            .and_then(|g| {
+                clip_and_simplify_arcgis_geometry(
+                    g,
+                    clat,
+                    clon,
+                    (radius_m + 500.0).min(6_000.0),
+                    0.00008,
+                    360,
+                )
+            })
             .map(|v| v.to_string())
             .unwrap_or_default();
         proto_feats.push(crate::extensions::proto::shared_v1::HazardPolygonFeatureProto {
@@ -3078,7 +3139,7 @@ pub async fn run_hazards_with_db(
                 sfha_2km = zlist.into_iter().map(|(zn, dm)| json!({ "zone": zn, "distM": dm })).collect();
 
                 let gj_feats: Vec<Value> = hits.iter().take(20).filter_map(|(d, _, _, zn, g)| {
-                    let gj = clip_and_simplify_arcgis_geometry(g, lat, lon, 6_000.0, 0.00007, 180)?;
+                    let gj = clip_and_simplify_arcgis_geometry(g, lat, lon, 2_500.0, 0.00004, 480)?;
                     Some(json!({
                         "type": "Feature",
                         "geometry": gj,
@@ -3325,12 +3386,13 @@ pub async fn run_hazards_with_db(
             };
             let mut best = f64::INFINITY;
             let mut gj_feats = Vec::new();
+            let clip_box_m = (radius_m as f64 + 500.0).clamp(2_500.0, 5_500.0);
             if let Ok(feats) = nr {
                 for f in feats.iter().take(20) {
                     if let Some(geom) = f.get("geometry") {
                         if let Some((dm, _, _)) = polygon_distance(lat, lon, geom) {
                             if dm < best { best = dm; }
-                            if let Some(gj) = clip_and_simplify_arcgis_geometry(geom, lat, lon, 6_000.0, 0.00007, 180) {
+                            if let Some(gj) = clip_and_simplify_arcgis_geometry(geom, lat, lon, clip_box_m, 0.00004, 480) {
                                 gj_feats.push(json!({ "type": "Feature", "geometry": gj, "properties": { "name": title, "distM": dm.round() as i64 } }));
                             }
                         }
@@ -3397,7 +3459,7 @@ pub async fn run_hazards_with_db(
                 if let Some(geom) = f.get("geometry") {
                     let dm = polygon_distance(lat, lon, geom).map(|(d, _, _)| d).unwrap_or(0.0);
                     let in_area = dm <= 0.5 || pt_dams.iter().any(|d| d == name);
-                    if let Some(gj) = clip_and_simplify_arcgis_geometry(geom, lat, lon, 6_000.0, 0.00007, 200) {
+                    if let Some(gj) = clip_and_simplify_arcgis_geometry(geom, lat, lon, 2_500.0, 0.00004, 480) {
                         dam_gj.push(json!({
                             "type": "Feature",
                             "geometry": gj,
@@ -3527,7 +3589,7 @@ pub async fn run_hazards_with_db(
                     if best_fhsz.as_ref().map(|b| dm < b.0).unwrap_or(true) {
                         best_fhsz = Some((dm, nlat, nlon, a.clone()));
                     }
-                    if let Some(gj) = clip_and_simplify_arcgis_geometry(geom, lat, lon, 6_000.0, 0.00007, 180) {
+                    if let Some(gj) = clip_and_simplify_arcgis_geometry(geom, lat, lon, 5_500.0, 0.00005, 480) {
                         fhsz_gj.push(json!({
                             "type": "Feature",
                             "geometry": gj,

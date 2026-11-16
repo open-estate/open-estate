@@ -3331,8 +3331,72 @@ impl DataExtensionAdapter for TitleUnderwriterRatesAdapter {
     }
 
     fn execute_sync(&self, query: &ExtensionQueryProto) -> Result<Vec<ExtensionEnvelopeProto>> {
+        let country = query
+            .extra_params
+            .get("country")
+            .map(String::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        if let Some(c) = country {
+            let cu = c.to_ascii_uppercase();
+            if !matches!(cu.as_str(), "US" | "USA" | "UNITED STATES") {
+                return Ok(Vec::new());
+            }
+        }
         let state = query.state.trim().to_ascii_uppercase();
-        if state.len() != 2 {
+        if !matches!(
+            state.as_str(),
+            "AL" | "AK"
+                | "AZ"
+                | "AR"
+                | "CA"
+                | "CO"
+                | "CT"
+                | "DE"
+                | "DC"
+                | "FL"
+                | "GA"
+                | "HI"
+                | "ID"
+                | "IL"
+                | "IN"
+                | "IA"
+                | "KS"
+                | "KY"
+                | "LA"
+                | "ME"
+                | "MD"
+                | "MA"
+                | "MI"
+                | "MN"
+                | "MS"
+                | "MO"
+                | "MT"
+                | "NE"
+                | "NV"
+                | "NH"
+                | "NJ"
+                | "NM"
+                | "NY"
+                | "NC"
+                | "ND"
+                | "OH"
+                | "OK"
+                | "OR"
+                | "PA"
+                | "RI"
+                | "SC"
+                | "SD"
+                | "TN"
+                | "TX"
+                | "UT"
+                | "VT"
+                | "VA"
+                | "WA"
+                | "WV"
+                | "WI"
+                | "WY"
+        ) {
             return Ok(Vec::new());
         }
         let geo = json!({

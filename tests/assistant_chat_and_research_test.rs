@@ -576,14 +576,34 @@ async fn test_4_hoa_honesty_super_priority_states_master_insurance_and_live_990_
         Some(&json!(6))
     );
     let mi = &pa_condo["hoaProfile"]["masterInsurance"];
-    assert!(
-        mi.pointer("/estimatedMasterInsuranceCost/annualPerUnitUSD")
-            .and_then(Value::as_i64)
-            .unwrap_or(0)
-            > 0
+    assert_eq!(
+        mi.pointer("/estimatedMasterInsuranceCost/disclosed"),
+        Some(&json!(false)),
+        "undisclosed HOA master insurance must never fabricate a premium"
+    );
+    assert_eq!(
+        mi.pointer("/estimatedMasterInsuranceCost/annualPerUnitUSD"),
+        Some(&Value::Null)
     );
     assert_eq!(mi["policyFormGuide"].as_array().map(Vec::len), Some(4));
     assert_eq!(mi["coverageMatrix"].as_array().map(Vec::len), Some(8));
+
+    let mut disclosed_pa_condo = pa_condo.clone();
+    disclosed_pa_condo["facts"]["hoa"]["masterInsuranceAnnualPerUnit"] = json!(1800);
+    let disclosed_bundle = build_buyer_diligence_and_hoa_deterministic(&disclosed_pa_condo);
+    let disclosed_mi = &disclosed_bundle.hoa_profile["masterInsurance"];
+    assert_eq!(
+        disclosed_mi.pointer("/estimatedMasterInsuranceCost/disclosed"),
+        Some(&json!(true))
+    );
+    assert_eq!(
+        disclosed_mi.pointer("/estimatedMasterInsuranceCost/annualPerUnitUSD"),
+        Some(&json!(1800))
+    );
+    assert_eq!(
+        disclosed_mi.pointer("/estimatedMasterInsuranceCost/monthlyShareOfDuesUSD"),
+        Some(&json!(150.0))
+    );
 
     // 4C. Synthetic CA Townhouse ($540/mo HOA) + `run_buyer_diligence_and_hoa`
     // resilience when upstream APIs are unreachable (closed loopback socket).

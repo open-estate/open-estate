@@ -168,6 +168,18 @@ pub async fn analyze_inspection(
     documents: Vec<UploadedDocInput>,
     cache: Option<&dyn LlmCache>,
 ) -> Result<ModuleOutput> {
+    analyze_inspection_with_prompt(http, env, report, documents, cache, None).await
+}
+
+/// Variant of [`analyze_inspection`] accepting optional admin-tuned system instructions.
+pub async fn analyze_inspection_with_prompt(
+    http: &HttpClient,
+    env: &EnvConfig,
+    report: &Value,
+    documents: Vec<UploadedDocInput>,
+    cache: Option<&dyn LlmCache>,
+    custom_instructions: Option<&str>,
+) -> Result<ModuleOutput> {
     let batch =
         extract_and_ocr_uploads_async(http, env, &documents, DocumentKind::Inspection, 6, 110_000)
             .await?;
@@ -180,10 +192,20 @@ pub async fn analyze_inspection(
         wrap_untrusted_block("untrusted_document_text", &batch.sanitized_text)
     );
 
+    let effective_instructions = custom_instructions
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(INSPECTION_INSTRUCTIONS);
+    let instructions = crate::shared::apply_brand_to_str(
+        effective_instructions,
+        &env.brand_name(),
+        &env.brand_domain(),
+    );
+
     let mut opts = LlmCallOptions::new(
         "inspection_review",
         "inspection_review",
-        INSPECTION_INSTRUCTIONS,
+        instructions,
         prompt,
         inspection_schema(),
     )
@@ -240,14 +262,15 @@ pub async fn analyze_inspection(
         warnings.push(format!("Primary LLM unavailable; fell back to {}.", res.model));
     }
 
+    let brand_name = env.brand_name();
     let src_label = match res.effort.as_deref() {
         Some(eff) => format!(
-            "Open Estate AI Inspection Reviewer ({} · {eff}) over {}",
+            "{brand_name} AI Inspection Reviewer ({} · {eff}) over {}",
             res.model,
             file_names.join(", ")
         ),
         None => format!(
-            "Open Estate AI Inspection Reviewer ({}) over {}",
+            "{brand_name} AI Inspection Reviewer ({}) over {}",
             res.model,
             file_names.join(", ")
         ),

@@ -6,12 +6,17 @@ use open_estate::ai::llm::{
     responses_json_with_cache, LlmCallOptions, LlmInput,
 };
 use open_estate::ai::{
-    analyze_inspection, derive_neighborhood_scope, generate_repair_addendum,
-    get_cached_neighborhood_narrative, put_neighborhood_narrative, run_ai_analyst_with_store,
-    translate_report, RepairAddendumInput, UploadedDocInput, NEIGHBORHOOD_NARRATIVE_TTL_SECS,
+    analyze_inspection, ask_property_question_with_config,
+    build_agent_system_instructions_with_config, derive_neighborhood_scope,
+    generate_repair_addendum, get_cached_neighborhood_narrative, put_neighborhood_narrative,
+    run_ai_analyst_with_store, translate_report, AskPromptConfig, MemoryLlmCache,
+    RepairAddendumInput, UploadedDocInput, ANALYST_INSTRUCTIONS, ASK_INSTRUCTIONS,
+    DEFAULT_ARTIFACT_INSTRUCTIONS, DEFAULT_CHATBOX_MAX_WORDS, DEFAULT_CHATBOX_STYLE_PROMPT,
+    IMMUTABLE_HOUSING_AGENT_CONSTITUTION, INSPECTION_INSTRUCTIONS, NEIGHBORHOOD_NARRATIVE_TTL_SECS,
+    SLIDES_INSTRUCTIONS,
 };
 use open_estate::db::shared_cache_store::{ensure_shared_cache_schema, get_shared_data_record};
-use open_estate::db::DbStore;
+use open_estate::db::{DbStore, SETTING_CHATBOX_MAX_WORDS, SETTING_CHATBOX_SYSTEM_PROMPT};
 use open_estate::extensions::shared_cache::{
     dataset_ids, encode_geohash, seed_builtin_shared_datasets, ShareScope, ShareScopeExt,
 };
@@ -881,4 +886,168 @@ async fn live_keyed_neighborhood_narrative_shared_across_tract_homes() {
     );
     assert_eq!(ev_b.dims.invocations_cached, 1);
     assert_eq!(ev_b.llm_effort.as_deref(), Some("high"));
+}
+
+#[tokio::test]
+async fn deterministic_chatbox_prompt_config_markdown_and_exports() {
+    assert_eq!(DEFAULT_CHATBOX_MAX_WORDS, 120);
+    for (name, prompt) in [
+        ("DEFAULT_CHATBOX_STYLE_PROMPT", DEFAULT_CHATBOX_STYLE_PROMPT),
+        ("ASK_INSTRUCTIONS", ASK_INSTRUCTIONS),
+        (
+            "IMMUTABLE_HOUSING_AGENT_CONSTITUTION",
+            IMMUTABLE_HOUSING_AGENT_CONSTITUTION,
+        ),
+        ("ANALYST_INSTRUCTIONS", ANALYST_INSTRUCTIONS),
+        ("SLIDES_INSTRUCTIONS", SLIDES_INSTRUCTIONS),
+        (
+            "DEFAULT_ARTIFACT_INSTRUCTIONS",
+            DEFAULT_ARTIFACT_INSTRUCTIONS,
+        ),
+        ("INSPECTION_INSTRUCTIONS", INSPECTION_INSTRUCTIONS),
+    ] {
+        assert!(!prompt.trim().is_empty(), "{name} export must be non-empty");
+    }
+    assert!(ASK_INSTRUCTIONS.contains("Markdown"));
+    assert!(ASK_INSTRUCTIONS.contains("#"));
+    assert!(DEFAULT_CHATBOX_STYLE_PROMPT.contains("Markdown"));
+    assert!(DEFAULT_CHATBOX_STYLE_PROMPT.contains("en.wikipedia.org"));
+
+    let default_cfg = AskPromptConfig::default();
+    let default_sys = build_agent_system_instructions_with_config(&default_cfg);
+    assert!(default_sys.starts_with(IMMUTABLE_HOUSING_AGENT_CONSTITUTION));
+    assert!(default_sys.contains(&default_cfg.effective_style_prompt()));
+    assert!(!default_sys.contains("{max_words}"));
+    assert!(default_sys.contains("<= 120 words"));
+
+    let custom_cfg = AskPromptConfig {
+        system_prompt: Some("Always cite one specific hazard anchor in plain English.".to_string()),
+        max_words: 85,
+    };
+    let custom_sys = build_agent_system_instructions_with_config(&custom_cfg);
+    assert!(custom_sys.starts_with(IMMUTABLE_HOUSING_AGENT_CONSTITUTION));
+    assert!(custom_sys.contains("Always cite one specific hazard anchor in plain English."));
+    assert!(custom_sys.contains("85 words"));
+
+    let env_unconfigured = EnvConfig::from_map(HashMap::new());
+    let http = HttpClient::from_env(&env_unconfigured, None);
+    let cache = MemoryLlmCache::default();
+    let report = civic_report_fixture("qa-prompt-config");
+    let question = "What does this report say about natural hazards and flood zone?";
+
+    let r1 = ask_property_question_with_config(
+        &http,
+        &env_unconfigured,
+        &report,
+        question,
+        None,
+        None,
+        None,
+        Some(&cache),
+        &AskPromptConfig::default(),
+    )
+    .await
+    .expect("deterministic ask default config");
+    assert_eq!(r1["ok"], json!(true));
+    assert_eq!(r1["refused"], json!(false));
+    assert_eq!(r1["cached"], json!(false));
+    let ans1 = r1["answer"].as_str().expect("answer str");
+    assert!(ans1.contains("**"), "expected Markdown bold: {ans1}");
+    assert!(
+        ans1.contains("(#"),
+        "expected internal #anchor link: {ans1}"
+    );
+    assert!(
+        ans1.contains("https://en.wikipedia.org/"),
+        "expected Wikipedia term link: {ans1}"
+    );
+    let words = ans1.split_whitespace().count();
+    assert!(
+        words <= DEFAULT_CHATBOX_MAX_WORDS,
+        "expected concise default deterministic QA response (<= {DEFAULT_CHATBOX_MAX_WORDS} words, got {words}): {ans1}"
+    );
+
+    let r2 = ask_property_question_with_config(
+        &http,
+        &env_unconfigured,
+        &report,
+        question,
+        None,
+        None,
+        None,
+        Some(&cache),
+        &AskPromptConfig::default(),
+    )
+    .await
+    .expect("deterministic ask cache hit");
+    assert_eq!(r2["cached"], json!(true));
+
+    let r3 = ask_property_question_with_config(
+        &http,
+        &env_unconfigured,
+        &report,
+        question,
+        None,
+        None,
+        None,
+        Some(&cache),
+        &custom_cfg,
+    )
+    .await
+    .expect("custom prompt misses cache");
+    assert_eq!(r3["cached"], json!(false));
+
+    let words_only_cfg = AskPromptConfig {
+        system_prompt: None,
+        max_words: 75,
+    };
+    let r4 = ask_property_question_with_config(
+        &http,
+        &env_unconfigured,
+        &report,
+        question,
+        None,
+        None,
+        None,
+        Some(&cache),
+        &words_only_cfg,
+    )
+    .await
+    .expect("custom max_words misses cache");
+    assert_eq!(r4["cached"], json!(false));
+
+    let db = DbStore::connect_url("sqlite::memory:", Some("sqlite"))
+        .await
+        .expect("connect sqlite memory");
+    db.ensure_schema().await.expect("ensure schema");
+    let initial = db.load_ai_prompt_settings().await;
+    assert_eq!(initial.chatbox_max_words, DEFAULT_CHATBOX_MAX_WORDS);
+    assert!(initial.chatbox_system_prompt.is_none());
+
+    db.upsert_admin_setting(SETTING_CHATBOX_MAX_WORDS, "90", Some("unit-test"))
+        .await
+        .expect("upsert chatbox max words");
+    db.upsert_admin_setting(
+        SETTING_CHATBOX_SYSTEM_PROMPT,
+        "Keep answers crisp with hazard anchors.",
+        Some("unit-test"),
+    )
+    .await
+    .expect("upsert chatbox prompt");
+    let updated = db.load_ai_prompt_settings().await;
+    assert_eq!(updated.chatbox_max_words, 90);
+    assert_eq!(
+        updated.chatbox_system_prompt.as_deref(),
+        Some("Keep answers crisp with hazard anchors.")
+    );
+
+    db.reset_admin_setting(SETTING_CHATBOX_MAX_WORDS)
+        .await
+        .expect("reset max words");
+    db.reset_admin_setting(SETTING_CHATBOX_SYSTEM_PROMPT)
+        .await
+        .expect("reset chatbox prompt");
+    let restored = db.load_ai_prompt_settings().await;
+    assert_eq!(restored.chatbox_max_words, DEFAULT_CHATBOX_MAX_WORDS);
+    assert!(restored.chatbox_system_prompt.is_none());
 }

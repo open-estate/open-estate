@@ -424,7 +424,7 @@ fn validate_and_parse_manifest(
         .ok_or_else(|| anyhow!("manifest.yaml requires a 'domain' field (e.g. DOMAIN_NATURAL_HAZARDS or DOMAIN_ELECTRIC_UTILITY)."))?;
     let (canon_domain, default_proto) = canonicalize_extension_domain(raw_domain).ok_or_else(|| {
         anyhow!(
-            "Unsupported extension domain '{raw_domain}'. Expected a canonical Open Estate domain such as DOMAIN_ELECTRIC_UTILITY, DOMAIN_GAS_UTILITY, DOMAIN_WATER_SEWER_TRASH, DOMAIN_BROADBAND, DOMAIN_NATURAL_HAZARDS, DOMAIN_ENVIRONMENTAL, DOMAIN_PROPERTY_FACTS, DOMAIN_VALUATION, DOMAIN_MARKET_TRENDS, DOMAIN_LIVABILITY, or DOMAIN_GEOCODE."
+            "Unsupported extension domain '{raw_domain}'. Expected a canonical extension domain such as DOMAIN_ELECTRIC_UTILITY, DOMAIN_GAS_UTILITY, DOMAIN_WATER_SEWER_TRASH, DOMAIN_BROADBAND, DOMAIN_NATURAL_HAZARDS, DOMAIN_ENVIRONMENTAL, DOMAIN_PROPERTY_FACTS, DOMAIN_VALUATION, DOMAIN_MARKET_TRENDS, DOMAIN_LIVABILITY, or DOMAIN_GEOCODE."
         )
     })?;
 
@@ -2393,7 +2393,7 @@ pub(crate) fn verify_admin_csrf(
     )))
 }
 
-async fn require_admin(
+pub(crate) async fn require_admin(
     state: &AppState,
     headers: &HeaderMap,
     extensions: &Extensions,
@@ -2403,7 +2403,7 @@ async fn require_admin(
         .map_err(|e| admin_auth_error_json_response(&e))
 }
 
-async fn require_admin_mutation(
+pub(crate) async fn require_admin_mutation(
     state: &AppState,
     headers: &HeaderMap,
     extensions: &Extensions,
@@ -2413,7 +2413,7 @@ async fn require_admin_mutation(
     Ok(ctx)
 }
 
-fn admin_no_store_json(status: StatusCode, body: Value) -> Response {
+pub(crate) fn admin_no_store_json(status: StatusCode, body: Value) -> Response {
     let mut resp = json_response(status, body);
     resp.headers_mut().insert(
         header::CACHE_CONTROL,
@@ -2439,7 +2439,7 @@ fn admin_csv_response(filename: &str, csv_bytes: Vec<u8>) -> Response {
     resp
 }
 
-async fn log_admin_action(
+pub(crate) async fn log_admin_action(
     state: &AppState,
     auth: &AdminAuthContext,
     action: &str,
@@ -2572,6 +2572,7 @@ pub fn admin_routes() -> Router<AppState> {
             delete(handle_admin_watched_zip_delete),
         )
         .route("/api/admin/audit-logs", get(handle_admin_audit_logs_list))
+        .merge(crate::web::admin_settings::admin_settings_routes())
 }
 
 // =================================================================================================
@@ -6320,7 +6321,8 @@ pub async fn handle_admin_audit_logs_list(
 // =================================================================================================
 
 pub fn render_admin_login_gate_html(err: &AdminAuthError, brand_name: &str) -> String {
-    let safe_brand = encode_text(brand_name);
+    let eff_brand = crate::shared::effective_brand_name(brand_name);
+    let safe_brand = encode_text(eff_brand);
     let logo_svg = logo_mark_img(34);
     let favicon_tags = FAVICON_HEAD_TAGS.as_str();
     let safe_msg = encode_text(err.message);
@@ -6345,17 +6347,33 @@ pub fn render_admin_login_gate_html(err: &AdminAuthError, brand_name: &str) -> S
 }
 
 pub fn render_admin_console_html(overview: &Value, brand_name: &str) -> String {
-    let safe_brand = encode_text(brand_name);
+    let eff_brand = crate::shared::effective_brand_name(brand_name);
+    let safe_brand = encode_text(eff_brand);
+    let brand_js = safe_inline_json(
+        &serde_json::to_string(eff_brand).unwrap_or_else(|_| "\"Open Estate\"".into()),
+    );
     let logo_svg = logo_mark_img(32);
     let favicon_tags = FAVICON_HEAD_TAGS.as_str();
     let initial_json =
         safe_inline_json(&serde_json::to_string(overview).unwrap_or_else(|_| "{}".into()));
 
+    let script_settings = crate::web::admin_settings::admin_settings_script_js();
+
     ADMIN_CONSOLE_TEMPLATE
         .replace("__FAVICON_TAGS__", favicon_tags)
         .replace("__BRAND__", &safe_brand)
+        .replace("__BRAND_JSON__", &brand_js)
         .replace("__LOGO_SVG__", &logo_svg)
         .replace("__INITIAL_JSON__", &initial_json)
+        .replace(
+            "__SETTINGS_NAV_TAB__",
+            crate::web::admin_settings::admin_settings_tab_button_html(),
+        )
+        .replace(
+            "__SETTINGS_PANEL__",
+            crate::web::admin_settings::admin_settings_panel_html(),
+        )
+        .replace("__SETTINGS_SCRIPT__", &script_settings)
 }
 
 const ADMIN_GATE_TEMPLATE: &str = r#"<!doctype html>
@@ -6964,6 +6982,7 @@ pre.json-view {
         <span class="nav-tab-l"><svg class="nav-ico" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M14 2H6c-1.1 0-1.99.9-1.99 2L4 20c0 1.1.89 2 1.99 2H18c1.1 0 2-.9 2-2V8l-6-6zm2 16H8v-2h8v2zm0-4H8v-2h8v2zm-3-5V3.5L18.5 9H13z"/></svg><span class="nav-lbl">Audit Log &amp; Telemetry</span></span>
         <span class="tab-cnt" id="cntAudit">0</span>
       </button>
+      __SETTINGS_NAV_TAB__
     </nav>
   </aside>
 
@@ -7374,6 +7393,7 @@ pre.json-view {
       </div>
     </div>
   </section>
+__SETTINGS_PANEL__
 </main>
 </div>
 </div>
@@ -7395,6 +7415,7 @@ pre.json-view {
 <script id="adminInitialJson" type="application/json">__INITIAL_JSON__</script>
 <script>
 (() => {
+  const ADMIN_BRAND = __BRAND_JSON__;
   // 1. OS Light / Dark Theme Reactivity (AGENTS.md)
   const themeSelect = document.getElementById('themeSelect');
   const osDarkMq = window.matchMedia ? window.matchMedia('(prefers-color-scheme: dark)') : null;
@@ -7757,7 +7778,7 @@ openapi_operation:
     longitude: "{{ lon }}"
     riskCategory: "II"
     siteClass: "D"
-    title: "Open Estate"
+    title: ${JSON.stringify(ADMIN_BRAND)}
 
 response_mapping:
   root_path: "$.response.data"
@@ -7769,7 +7790,7 @@ response_mapping:
 
 attribution:
   source_name: USGS Seismic Design Web Service (ASCE 7-22)
-  source_url: "https://earthquake.usgs.gov/ws/designmaps/asce7-22.json?latitude={{ lat }}&longitude={{ lon }}&riskCategory=II&siteClass=D&title=Open Estate"`,
+  source_url: "https://earthquake.usgs.gov/ws/designmaps/asce7-22.json?latitude={{ lat }}&longitude={{ lon }}&riskCategory=II&siteClass=D&title=${encodeURIComponent(ADMIN_BRAND)}"`,
       openapi: `openapi: 3.0.3
 info:
   title: USGS ASCE 7-22 Seismic Design Web Service
@@ -9341,6 +9362,7 @@ geo_rules:
   renderExtensions();
   renderModules();
   renderAuditLogs();
+__SETTINGS_SCRIPT__
 })();
 </script>
 </body>

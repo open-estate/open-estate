@@ -235,6 +235,31 @@ pub fn campbell_address_matches(raw_addr: &str, target_number: &str, target_stre
     false
 }
 
+/// Builds the Campbell `Addresses/MapServer/0` SQL `WHERE` clause (`HouseNumber` is
+/// `esriFieldTypeSmallInteger`, so validated integer street numbers must not be single-quoted).
+fn build_campbell_address_where(number: &str, kw: &str) -> Option<String> {
+    let num_trim = number.trim();
+    let kw_trim = kw.trim();
+    if num_trim.is_empty() || kw_trim.is_empty() {
+        return None;
+    }
+    let digits: String = num_trim
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
+    let house_clause = match digits.parse::<i16>().ok().filter(|&n| n > 0) {
+        Some(n) => format!("HouseNumber={n}"),
+        None => format!(
+            "UPPER(FullAddress) LIKE '{} %'",
+            esc_sql(&num_trim.to_ascii_uppercase())
+        ),
+    };
+    let kw_esc = esc_sql(&kw_trim.to_ascii_uppercase());
+    Some(format!(
+        "{house_clause} AND (UPPER(StreetName) LIKE '%{kw_esc}%' OR UPPER(FullAddress) LIKE '%{kw_esc}%')"
+    ))
+}
+
 /// Queries City of Campbell `BaseFeatureLayers/Addresses/MapServer/0` to resolve the exact
 /// subject `APN` and parcel address coordinates before falling back to parcel spatial queries.
 pub async fn fetch_campbell_address_point(
@@ -243,15 +268,7 @@ pub async fn fetch_campbell_address_point(
 ) -> Option<CampbellAddressPoint> {
     let (number, core_name) = parse_street(address);
     let kw = street_keyword_of(&core_name);
-    if number.is_empty() || kw.is_empty() {
-        return None;
-    }
-    let where_c = format!(
-        "HouseNumber='{}' AND (UPPER(StreetName) LIKE '%{}%' OR UPPER(FullAddress) LIKE '%{}%')",
-        esc_sql(&number),
-        esc_sql(&kw),
-        esc_sql(&kw)
-    );
+    let where_c = build_campbell_address_where(&number, &kw)?;
     let res = http
         .arcgis_query(
             CAMPBELL_ADDRESSES_LAYER,
@@ -2215,5 +2232,18 @@ mod tests {
         assert!(loaded.complete);
         assert_eq!(loaded.permits.len(), 1);
         assert_eq!(loaded.permits[0].permit_number, "BLD-SYNTH-2026-1");
+    }
+
+    #[test]
+    fn campbell_address_where_uses_unquoted_smallint_house_number() {
+        let q = build_campbell_address_where("126", "synthcorridor").expect("where clause");
+        assert!(q.starts_with("HouseNumber=126 AND "), "got={q}");
+        assert!(!q.contains("HouseNumber='"), "got={q}");
+
+        let overflow = build_campbell_address_where("45000", "synthcorridor").expect("overflow");
+        assert!(
+            overflow.starts_with("UPPER(FullAddress) LIKE '45000 %' AND "),
+            "got={overflow}"
+        );
     }
 }

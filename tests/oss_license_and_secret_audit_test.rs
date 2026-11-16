@@ -10,7 +10,7 @@
 
 use regex::Regex;
 use serde_json::Value;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::net::Ipv4Addr;
 use std::path::Path;
@@ -139,9 +139,62 @@ fn audit_cargo_dependency_graph_licenses() {
     let pkgs = meta["packages"].as_array().expect("packages array");
     assert!(!pkgs.is_empty(), "dependency graph must not be empty");
 
+    // Parent workspaces (e.g. members = ["public", "cloud"]) emit all workspace
+    // members in `meta["packages"]` even when `--manifest-path public/Cargo.toml`
+    // is passed. Walk `resolve.nodes` from the `open-estate` package node so only
+    // `open-estate` and its actual transitive dependencies are audited.
+    let open_estate_id = pkgs
+        .iter()
+        .find(|p| p["name"].as_str() == Some("open-estate"))
+        .and_then(|p| p["id"].as_str())
+        .expect("open-estate package id in cargo metadata");
+
+    let mut node_edges: HashMap<&str, Vec<&str>> = HashMap::new();
+    if let Some(nodes) = meta["resolve"]["nodes"].as_array() {
+        for node in nodes {
+            let Some(id) = node["id"].as_str() else {
+                continue;
+            };
+            let mut edges = Vec::new();
+            if let Some(deps) = node["deps"].as_array() {
+                for dep in deps {
+                    if let Some(dep_id) = dep["pkg"].as_str() {
+                        edges.push(dep_id);
+                    }
+                }
+            }
+            if let Some(deps) = node["dependencies"].as_array() {
+                for dep in deps {
+                    if let Some(dep_id) = dep.as_str() {
+                        edges.push(dep_id);
+                    }
+                }
+            }
+            node_edges.insert(id, edges);
+        }
+    }
+
+    let mut reachable = HashSet::new();
+    let mut queue = VecDeque::from([open_estate_id]);
+    while let Some(id) = queue.pop_front() {
+        if reachable.insert(id) {
+            if let Some(edges) = node_edges.get(id) {
+                for &dep_id in edges {
+                    if !reachable.contains(dep_id) {
+                        queue.push_back(dep_id);
+                    }
+                }
+            }
+        }
+    }
+
     let mut violations = Vec::new();
     let mut checked = 0usize;
     for pkg in pkgs {
+        let pkg_id = pkg["id"].as_str().unwrap_or("");
+        if !reachable.contains(pkg_id) {
+            continue;
+        }
         let name = pkg["name"].as_str().unwrap_or("");
         let version = pkg["version"].as_str().unwrap_or("");
         if name == "open-estate" {
@@ -159,7 +212,10 @@ fn audit_cargo_dependency_graph_licenses() {
         }
     }
 
-    assert!(checked > 100, "expected full transitive graph, got {checked}");
+    assert!(
+        checked > 100,
+        "expected full transitive graph, got {checked}"
+    );
     assert!(
         violations.is_empty(),
         "Found dependencies without a permissive OSS license:\n{}",
@@ -172,9 +228,10 @@ fn audit_vendored_assets_and_docker_hygiene() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
 
     // 1. Vendored JS assets must contain zero copyleft / NC license headers
-    let forbid_vendor =
-        Regex::new(r"(?i)(?:gnu general public|affero general public|cc[- ]by[- ]nc|sspl|commons clause)")
-            .unwrap();
+    let forbid_vendor = Regex::new(
+        r"(?i)(?:gnu general public|affero general public|cc[- ]by[- ]nc|sspl|commons clause)",
+    )
+    .unwrap();
     for rel_dir in ["assets/vendor", "extension/vendor"] {
         let dir = root.join(rel_dir);
         assert!(dir.is_dir(), "missing vendor dir {}", dir.display());
@@ -199,16 +256,7 @@ fn audit_vendored_assets_and_docker_hygiene() {
         .filter(|l| !l.is_empty() && !l.starts_with('#'))
         .collect();
     for required in [
-        ".git",
-        ".env",
-        ".env*",
-        "target",
-        ".cache",
-        "data",
-        "reports",
-        "*.db*",
-        "*.pem",
-        "*.key",
+        ".git", ".env", ".env*", "target", ".cache", "data", "reports", "*.db*", "*.pem", "*.key",
     ] {
         assert!(
             lines.contains(required),
@@ -271,7 +319,10 @@ fn collect_repo_files(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
         let name = entry.file_name();
         let name_str = name.to_string_lossy();
         if path.is_dir() {
-            if matches!(name_str.as_ref(), ".git" | "target" | ".cache" | "node_modules") {
+            if matches!(
+                name_str.as_ref(),
+                ".git" | "target" | ".cache" | "node_modules"
+            ) {
                 continue;
             }
             collect_repo_files(&path, out);
@@ -326,31 +377,88 @@ fn audit_zero_secrets_cluster_ips_and_real_street_addresses() {
 
     // Generic secret/credential format patterns (no private literals embedded)
     let secret_pats = vec![
-        ("Docker Hub PAT", Regex::new(r"dckr_pat_[A-Za-z0-9_\-]{10,}").unwrap()),
-        ("OpenAI / Anthropic key", Regex::new(r"sk-(?:proj-|ant-)[A-Za-z0-9_\-]{20,}").unwrap()),
-        ("OpenAI legacy key", Regex::new(r"sk-[A-Za-z0-9]{40,}").unwrap()),
-        ("Google API key", Regex::new(r"AIza[0-9A-Za-z\-_]{30,}").unwrap()),
-        ("GitHub PAT", Regex::new(r"(?:ghp_|github_pat_)[A-Za-z0-9_]{20,}").unwrap()),
-        ("Slack token", Regex::new(r"xox[baprs]-[0-9A-Za-z\-]{15,}").unwrap()),
-        ("Restricted live key", Regex::new(r"rk_live_[0-9A-Za-z]{15,}").unwrap()),
-        ("Webhook secret", Regex::new(r"whsec_[0-9A-Za-z]{15,}").unwrap()),
-        ("FreeRoute API key", Regex::new(r"fro_[0-9a-f]{32,}").unwrap()),
-        ("Mapbox JWT token", Regex::new(r"pk\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{10,}").unwrap()),
-        ("Hex public API key", Regex::new(r"pk\.[0-9a-f]{32,}").unwrap()),
-        ("Base64 JSON API key", Regex::new(r"\beyJ[A-Za-z0-9+/=_-]{44,}\b").unwrap()),
-        ("PEM private key", Regex::new(r"-----BEGIN (?:[A-Z0-9 ]+ )?PRIVATE KEY-----").unwrap()),
-        ("Tailscale magic domain", Regex::new(&format!(r"(?i)\b{}", concat!(r"ts\.", r"net\b"))).unwrap()),
+        (
+            "Docker Hub PAT",
+            Regex::new(r"dckr_pat_[A-Za-z0-9_\-]{10,}").unwrap(),
+        ),
+        (
+            "OpenAI / Anthropic key",
+            Regex::new(r"sk-(?:proj-|ant-)[A-Za-z0-9_\-]{20,}").unwrap(),
+        ),
+        (
+            "OpenAI legacy key",
+            Regex::new(r"sk-[A-Za-z0-9]{40,}").unwrap(),
+        ),
+        (
+            "Google API key",
+            Regex::new(r"AIza[0-9A-Za-z\-_]{30,}").unwrap(),
+        ),
+        (
+            "GitHub PAT",
+            Regex::new(r"(?:ghp_|github_pat_)[A-Za-z0-9_]{20,}").unwrap(),
+        ),
+        (
+            "Slack token",
+            Regex::new(r"xox[baprs]-[0-9A-Za-z\-]{15,}").unwrap(),
+        ),
+        (
+            "Restricted live key",
+            Regex::new(r"rk_live_[0-9A-Za-z]{15,}").unwrap(),
+        ),
+        (
+            "Webhook secret",
+            Regex::new(r"whsec_[0-9A-Za-z]{15,}").unwrap(),
+        ),
+        (
+            "FreeRoute API key",
+            Regex::new(r"fro_[0-9a-f]{32,}").unwrap(),
+        ),
+        (
+            "Mapbox JWT token",
+            Regex::new(r"pk\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{10,}").unwrap(),
+        ),
+        (
+            "Hex public API key",
+            Regex::new(r"pk\.[0-9a-f]{32,}").unwrap(),
+        ),
+        (
+            "Base64 JSON API key",
+            Regex::new(r"\beyJ[A-Za-z0-9+/=_-]{44,}\b").unwrap(),
+        ),
+        (
+            "PEM private key",
+            Regex::new(r"-----BEGIN (?:[A-Z0-9 ]+ )?PRIVATE KEY-----").unwrap(),
+        ),
+        (
+            "Tailscale magic domain",
+            Regex::new(&format!(r"(?i)\b{}", concat!(r"ts\.", r"net\b"))).unwrap(),
+        ),
     ];
 
     // Internal codenames/domains/handles constructed via concat! so this file contains zero raw literals
     let internal_codenames: Vec<(&str, String)> = vec![
-        ("private product brand", concat!("deed", "buddy").to_string()),
+        (
+            "private product brand",
+            concat!("deed", "buddy").to_string(),
+        ),
         ("private author handle", concat!("eva", "wu").to_string()),
         ("private infra handle", concat!("kube", "b").to_string()),
-        ("private github org", concat!("ql-", "owo-", "lp").to_string()),
-        ("internal model codename", concat!("gpt-", "6-lu", "na").to_string()),
-        ("internal fallback codename", concat!("gpt-", "re", "serve").to_string()),
-        ("internal gateway codename", concat!("llm", "api").to_string()),
+        (
+            "private github org",
+            concat!("ql-", "owo-", "lp").to_string(),
+        ),
+        (
+            "internal model codename",
+            concat!("gpt-", "6-lu", "na").to_string(),
+        ),
+        (
+            "internal fallback codename",
+            concat!("gpt-", "re", "serve").to_string(),
+        ),
+        (
+            "internal gateway codename",
+            concat!("llm", "api").to_string(),
+        ),
         ("private k8s repo", concat!("my", "k3s").to_string()),
         ("private host repo", concat!("home-", "server").to_string()),
         ("private side repo", concat!("leap", "term").to_string()),
@@ -359,7 +467,10 @@ fn audit_zero_secrets_cluster_ips_and_real_street_addresses() {
         ("private proxy token", concat!("lite", "llm").to_string()),
         ("OCI domain", concat!("oracle", "cloud.com").to_string()),
         ("OCI OCID", concat!("oci", "d1.").to_string()),
-        ("developer home prefix", concat!("/home/", "kev", "in").to_string()),
+        (
+            "developer home prefix",
+            concat!("/home/", "kev", "in").to_string(),
+        ),
         ("developer handle", concat!("kev", "in").to_string()),
     ];
 
@@ -370,7 +481,8 @@ fn audit_zero_secrets_cluster_ips_and_real_street_addresses() {
     .unwrap();
 
     // Structural IPv4 check: catch any unexpected public/cluster/node IP without hardcoding any IP
-    let ipv4_rx = Regex::new(r"(?:^|[^0-9.])(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})(?:[^0-9.]|$)").unwrap();
+    let ipv4_rx =
+        Regex::new(r"(?:^|[^0-9.])(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})(?:[^0-9.]|$)").unwrap();
     let chrome_ua_rx = Regex::new(r"Chrome/\d+\.\d+\.\d+\.\d+").unwrap();
 
     let private_ip_pat = Regex::new(
@@ -379,7 +491,8 @@ fn audit_zero_secrets_cluster_ips_and_real_street_addresses() {
     .unwrap();
 
     // Structural developer home-directory check: reject hardcoded `/Users/<name>/` or `/home/<user>/`
-    let dev_home_rx = Regex::new(r#"(?:^|[\s"'`(=:]|file://)(?:/Users/|/home/)([A-Za-z0-9._-]+)/"#).unwrap();
+    let dev_home_rx =
+        Regex::new(r#"(?:^|[\s"'`(=:]|file://)(?:/Users/|/home/)([A-Za-z0-9._-]+)/"#).unwrap();
 
     let mut violations = Vec::new();
     for path in &files {
@@ -403,8 +516,8 @@ fn audit_zero_secrets_cluster_ips_and_real_street_addresses() {
             || rel_str.starts_with("extension/")
             || rel_str.starts_with("extensions/");
 
-        let allow_proxy_or_rate_test_ips = rel_str == "tests/free_proxy_pool_test.rs"
-            || rel_str == "tests/ddos_bombing_test.rs";
+        let allow_proxy_or_rate_test_ips =
+            rel_str == "tests/free_proxy_pool_test.rs" || rel_str == "tests/ddos_bombing_test.rs";
         let allow_civic_reference_addresses =
             rel_str.replace('\\', "/") == "tests/live_support/reference_sites.rs";
 
@@ -440,13 +553,17 @@ fn audit_zero_secrets_cluster_ips_and_real_street_addresses() {
             }
 
             if is_config_or_asset && private_ip_pat.is_match(line) {
-                violations.push(format!("{rel_str}:{lineno}: private/Tailscale IP in config or asset"));
+                violations.push(format!(
+                    "{rel_str}:{lineno}: private/Tailscale IP in config or asset"
+                ));
             }
 
             for cap in dev_home_rx.captures_iter(line) {
                 let user = &cap[1];
                 if !matches!(user, "app" | "nonroot" | "ubuntu" | "openestate" | "runner") {
-                    violations.push(format!("{rel_str}:{lineno}: hardcoded developer home path for `{user}`"));
+                    violations.push(format!(
+                        "{rel_str}:{lineno}: hardcoded developer home path for `{user}`"
+                    ));
                 }
             }
 
@@ -463,12 +580,17 @@ fn audit_zero_secrets_cluster_ips_and_real_street_addresses() {
                     // Allow statutory NMAC rule citations (`13.14.9.*`) and the explicit
                     // non-RFC1918 public-IP classification unit test in `src/web/ip_geo.rs`.
                     let o = ip.octets();
-                    if (rel_str == "src/modules/title_legal_radar.rs" && o[0] == 13 && o[1] == 14 && o[2] == 9)
+                    if (rel_str == "src/modules/title_legal_radar.rs"
+                        && o[0] == 13
+                        && o[1] == 14
+                        && o[2] == 9)
                         || (rel_str == "src/web/ip_geo.rs" && o == [172, 32, 10, 5])
                     {
                         continue;
                     }
-                    violations.push(format!("{rel_str}:{lineno}: unexpected public IPv4 literal `{raw_ip}`"));
+                    violations.push(format!(
+                        "{rel_str}:{lineno}: unexpected public IPv4 literal `{raw_ip}`"
+                    ));
                 }
             }
         }
@@ -478,6 +600,10 @@ fn audit_zero_secrets_cluster_ips_and_real_street_addresses() {
         violations.is_empty(),
         "OSS zero-knowledge security/address/IP audit failed ({} hits):\n{}",
         violations.len(),
-        violations.into_iter().take(40).collect::<Vec<_>>().join("\n")
+        violations
+            .into_iter()
+            .take(40)
+            .collect::<Vec<_>>()
+            .join("\n")
     );
 }

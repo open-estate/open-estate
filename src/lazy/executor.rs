@@ -231,6 +231,10 @@ impl LazyExecutor {
 
     /// Executes a claimed [`LazyExtensionJobRow`] via `ExtensionHub` inside `MeterScope`.
     pub async fn execute_claimed_job(&self, job: &LazyExtensionJobRow) -> Result<LazyExecResult> {
+        Box::pin(self.execute_claimed_job_inner(job)).await
+    }
+
+    async fn execute_claimed_job_inner(&self, job: &LazyExtensionJobRow) -> Result<LazyExecResult> {
         let policy = resolve_extension_policy(
             Some(&self.hub),
             &job.extension_id,
@@ -268,17 +272,19 @@ impl LazyExecutor {
             return Ok(LazyExecResult::PolicySkipped("awaiting_approval"));
         }
 
-        let query = self.build_query_for_job(job).await;
+        let query = Box::pin(self.build_query_for_job(job)).await;
         let meter_ctx = InvocationContext::new(&job.extension_id)
             .with_trigger(InvocationTrigger::LazyJob)
             .with_slug(&job.slug);
 
-        let (fetch_res, _usage_event) = MeterScope::run_result(meter_ctx, async {
-            let fut = self
-                .hub
-                .test_fetch(&job.extension_id, &query, &self.http, &self.env);
+        let (fetch_res, _usage_event) = Box::pin(MeterScope::run_result(meter_ctx, async {
+            let fut =
+                Box::pin(
+                    self.hub
+                        .test_fetch(&job.extension_id, &query, &self.http, &self.env),
+                );
             let res = if let Some(ref st) = self.hook_state {
-                ExtensionHub::with_hook_state(st.clone(), fut).await?
+                Box::pin(ExtensionHub::with_hook_state(st.clone(), fut)).await?
             } else {
                 fut.await?
             };
@@ -292,7 +298,7 @@ impl LazyExecutor {
                 ));
             }
             Ok(res)
-        })
+        }))
         .await;
 
         let test_res = match fetch_res {
@@ -361,7 +367,7 @@ impl LazyExecutor {
             .filter(|&ttl| ttl > 0)
             .map(|ttl| now_unix_secs() + ttl as i64);
 
-        let completed = complete(
+        let completed = Box::pin(complete(
             &self.db,
             &self.http,
             &self.env,
@@ -372,7 +378,7 @@ impl LazyExecutor {
             policy.min_plan_tier.as_deref(),
             expires_at,
             &self.base_origin,
-        )
+        ))
         .await?;
 
         Ok(LazyExecResult::Completed(Box::new(completed)))

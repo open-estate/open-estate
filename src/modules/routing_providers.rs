@@ -1603,6 +1603,13 @@ pub async fn probe_routing_extension(
         }
     };
 
+    if sample_dur.is_none() || sample_dist.is_none() {
+        return Err(anyhow!(
+            "OUTSIDE_COVERAGE: {} returned unroutable null duration/distance for query coordinates",
+            kind.display_name()
+        ));
+    }
+
     let latency_ms = started.elapsed().as_millis() as u32;
     let (attr_name, attr_url) = kind.extension_source_attribution();
     let proto = RoutingMatrixProto {
@@ -1674,10 +1681,24 @@ mod tests {
 
         hub.set_module_enabled("neighborhood_livability", true)
             .unwrap();
-        hub.set_module_enabled("commute_transit", false).unwrap();
+        assert!(!hub.set_module_enabled("commute_transit", false).unwrap());
+        hub.reconcile_from_db_rows(
+            &[crate::db::SystemModuleRow {
+                module_id: "commute_transit".to_string(),
+                category: "livability".to_string(),
+                display_name: "Commute & Transit Routing".to_string(),
+                description_text: "Driving matrix & transit travel times".to_string(),
+                enabled: false,
+                priority: 95,
+                config_json: "{}".to_string(),
+                updated_at: String::new(),
+            }],
+            &[],
+        )
+        .unwrap();
         assert!(
             !is_routing_module_enabled(&hub),
-            "routing must disable when commute_transit module is off"
+            "routing must disable when optional registered commute_transit module is off"
         );
 
         // FreeRoute stays unconfigured by default so AUTH_MISSING contract holds unless explicitly opted in

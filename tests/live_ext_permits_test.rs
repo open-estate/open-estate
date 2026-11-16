@@ -8,9 +8,9 @@
 mod live_support;
 
 use live_support::reference_sites::{
-    unreachable_local_url, AUSTIN_CITY_HALL, CAMPBELL_CITY_HALL, CAMPBELL_COMMUNITY_CENTER,
-    COLUMBUS_CITY_HALL, PACIFIC_OFFSHORE_OUT_OF_SCOPE, SEATTLE_CITY_HALL, SF_CITY_HALL,
-    TORONTO_CITY_HALL_OUT_OF_SCOPE,
+    unreachable_local_url, PublicCivicSite, AUSTIN_CITY_HALL, CAMPBELL_CITY_HALL,
+    CAMPBELL_COMMUNITY_CENTER, COLUMBUS_CITY_HALL, PACIFIC_OFFSHORE_OUT_OF_SCOPE,
+    SEATTLE_CITY_HALL, SF_CITY_HALL, TORONTO_CITY_HALL_OUT_OF_SCOPE,
 };
 use open_estate::extensions::{
     extension_envelope_proto::Payload, CapabilityDomain, ExtensionHub,
@@ -29,6 +29,22 @@ fn env_with(pairs: &[(&str, String)]) -> EnvConfig {
         map.insert((*k).to_string(), v.clone());
     }
     EnvConfig::from_map(map)
+}
+
+async fn assert_campbell_unreachable_upstream(extension_id: &str, site: &PublicCivicSite) {
+    let bad_hub = ExtensionHub::new_default();
+    let bad_env = env_with(&[("CAMPBELL_MGO_BASE_URL", unreachable_local_url())]);
+    let bad_http = HttpClient::from_env(&bad_env, None);
+    let mut query = site.to_extension_query();
+    query
+        .extra_params
+        .insert("shared_cache_force_refresh".to_string(), "1".to_string());
+    let fail = bad_hub
+        .test_fetch(extension_id, &query, &bad_http, &bad_env)
+        .await
+        .expect("unreachable upstream");
+    assert!(!fail.ok, "expected failure for {extension_id}, got ok=true");
+    assert_eq!(fail.health_status, "upstream_unavailable");
 }
 
 fn require_shovels_env() -> EnvConfig {
@@ -189,17 +205,16 @@ async fn live_public_municipal_open_data_sf_city_hall_resolves_real_permits() {
     let hub = ExtensionHub::new_default();
     let env = default_live_env();
     let http = HttpClient::from_env(&env, None);
+    let mut query = SF_CITY_HALL.to_extension_query();
+    query
+        .extra_params
+        .insert("shared_cache_force_refresh".to_string(), "1".to_string());
 
     let ctx = InvocationContext::new("municipal_open_data_permits")
         .with_trigger(InvocationTrigger::AdminTest);
     let (res_wrap, event) = MeterScope::run(ctx, async {
-        hub.test_fetch(
-            "municipal_open_data_permits",
-            &SF_CITY_HALL.to_extension_query(),
-            &http,
-            &env,
-        )
-        .await
+        hub.test_fetch("municipal_open_data_permits", &query, &http, &env)
+            .await
     })
     .await;
 
@@ -481,19 +496,7 @@ async fn live_public_permit_roof_extractor_campbell_and_sf_and_failure_paths() {
     assert_eq!(oos.health_status, "upstream_unavailable");
 
     // 4) Unreachable Campbell upstream -> skips downstream cleanly
-    let bad_env = env_with(&[("CAMPBELL_MGO_BASE_URL", unreachable_local_url())]);
-    let bad_http = HttpClient::from_env(&bad_env, None);
-    let fail = hub
-        .test_fetch(
-            "permit_roof_extractor",
-            &CAMPBELL_CITY_HALL.to_extension_query(),
-            &bad_http,
-            &bad_env,
-        )
-        .await
-        .expect("roof unreachable");
-    assert!(!fail.ok);
-    assert_eq!(fail.health_status, "upstream_unavailable");
+    assert_campbell_unreachable_upstream("permit_roof_extractor", &CAMPBELL_CITY_HALL).await;
 }
 
 #[tokio::test]
@@ -544,18 +547,7 @@ async fn live_public_permit_solar_extractor_detects_campbell_city_hall_pv_and_ha
         .expect("solar oos");
     assert_eq!(oos.health_status, "upstream_unavailable");
 
-    let bad_env = env_with(&[("CAMPBELL_MGO_BASE_URL", unreachable_local_url())]);
-    let bad_http = HttpClient::from_env(&bad_env, None);
-    let fail = hub
-        .test_fetch(
-            "permit_solar_extractor",
-            &CAMPBELL_CITY_HALL.to_extension_query(),
-            &bad_http,
-            &bad_env,
-        )
-        .await
-        .expect("solar unreachable");
-    assert_eq!(fail.health_status, "upstream_unavailable");
+    assert_campbell_unreachable_upstream("permit_solar_extractor", &CAMPBELL_CITY_HALL).await;
 }
 
 #[tokio::test]
@@ -599,18 +591,7 @@ async fn live_public_permit_mep_extractor_covers_two_geographies_oos_and_failure
         .expect("mep oos");
     assert_eq!(oos.health_status, "upstream_unavailable");
 
-    let bad_env = env_with(&[("CAMPBELL_MGO_BASE_URL", unreachable_local_url())]);
-    let bad_http = HttpClient::from_env(&bad_env, None);
-    let fail = hub
-        .test_fetch(
-            "permit_mep_extractor",
-            &CAMPBELL_COMMUNITY_CENTER.to_extension_query(),
-            &bad_http,
-            &bad_env,
-        )
-        .await
-        .expect("mep unreachable");
-    assert_eq!(fail.health_status, "upstream_unavailable");
+    assert_campbell_unreachable_upstream("permit_mep_extractor", &CAMPBELL_COMMUNITY_CENTER).await;
 }
 
 #[tokio::test]
@@ -656,18 +637,8 @@ async fn live_public_permit_remodel_extractor_detects_campbell_adult_center_ti_a
         .expect("remodel oos");
     assert_eq!(oos.health_status, "upstream_unavailable");
 
-    let bad_env = env_with(&[("CAMPBELL_MGO_BASE_URL", unreachable_local_url())]);
-    let bad_http = HttpClient::from_env(&bad_env, None);
-    let fail = hub
-        .test_fetch(
-            "permit_remodel_extractor",
-            &CAMPBELL_COMMUNITY_CENTER.to_extension_query(),
-            &bad_http,
-            &bad_env,
-        )
-        .await
-        .expect("remodel unreachable");
-    assert_eq!(fail.health_status, "upstream_unavailable");
+    assert_campbell_unreachable_upstream("permit_remodel_extractor", &CAMPBELL_COMMUNITY_CENTER)
+        .await;
 }
 
 #[tokio::test]
@@ -711,18 +682,8 @@ async fn live_public_permit_code_enforcement_extractor_sf_and_campbell_and_failu
         .expect("ce oos");
     assert_eq!(oos.health_status, "upstream_unavailable");
 
-    let bad_env = env_with(&[("CAMPBELL_MGO_BASE_URL", unreachable_local_url())]);
-    let bad_http = HttpClient::from_env(&bad_env, None);
-    let fail = hub
-        .test_fetch(
-            "permit_code_enforcement_extractor",
-            &CAMPBELL_CITY_HALL.to_extension_query(),
-            &bad_http,
-            &bad_env,
-        )
-        .await
-        .expect("ce unreachable");
-    assert_eq!(fail.health_status, "upstream_unavailable");
+    assert_campbell_unreachable_upstream("permit_code_enforcement_extractor", &CAMPBELL_CITY_HALL)
+        .await;
 }
 
 #[tokio::test]

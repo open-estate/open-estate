@@ -444,6 +444,7 @@ fn fmt_usd(n: Option<f64>) -> String {
 /// Deterministic, schema-valid analyst synthesis grounded strictly in `report` facts, valuation, hazards,
 /// environment, civic, and feng-shui sections (used when `OPENAI_API_KEY` is unconfigured or in offline mode).
 pub fn build_deterministic_analyst_fallback(report: &Value) -> Value {
+    let (brand_name, _) = crate::shared::report_brand(report);
     let address = report
         .pointer("/meta/displayAddress")
         .or_else(|| report.pointer("/geo/displayAddress"))
@@ -629,7 +630,7 @@ pub fn build_deterministic_analyst_fallback(report: &Value) -> Value {
                 fmt_usd(est_low),
                 fmt_usd(est_high)
             ),
-            format!("Overall Open Estate due-diligence composite score is {overall_score}/100."),
+            format!("Overall {brand_name} due-diligence composite score is {overall_score}/100."),
             format!("Physical footprint offers {beds}, {baths}, {sqft} on a {lot_sqft}."),
             "Public water utility and neighborhood amenity access metrics are documented in public datasets."
                 .to_string(),
@@ -811,7 +812,7 @@ pub fn build_deterministic_analyst_fallback(report: &Value) -> Value {
                 ],
                 "upside": [
                     format!("混合统计估值中枢为 {}（区间 {}–{}）。", fmt_usd(est_val), fmt_usd(est_low), fmt_usd(est_high)),
-                    format!("Open Estate 综合尽调评分为 {overall_score}/100。"),
+                    format!("{brand_name} 综合尽调评分为 {overall_score}/100。"),
                     format!("实体规模提供 {beds_zh}、{baths_zh}、{sqft_zh}，对应 {lot_zh}。"),
                     "公共供水系统合规模态与周边生活配套可达性均已由公开数据集完整记录。".to_string()
                 ],
@@ -926,7 +927,7 @@ pub fn build_deterministic_analyst_fallback(report: &Value) -> Value {
                 ],
                 "upside": [
                     format!("Valoración estadística combinada centrada en {} (rango {}–{}).", fmt_usd(est_val), fmt_usd(est_low), fmt_usd(est_high)),
-                    format!("Puntuación compuesta de diligencia debida Open Estate de {overall_score}/100."),
+                    format!("Puntuación compuesta de diligencia debida {brand_name} de {overall_score}/100."),
                     format!("Huella física con {beds_es}, {baths_es}, {sqft_es} en un {lot_es}."),
                     "Registros públicos documentan el sistema de agua potable y la accesibilidad a servicios del vecindario.".to_string()
                 ],
@@ -1396,7 +1397,22 @@ pub async fn run_ai_analyst_with_store(
     cache: Option<&dyn LlmCache>,
     refresh: bool,
 ) -> Result<ModuleOutput> {
+    run_ai_analyst_with_prompt(http, env, db, report, cache, refresh, None).await
+}
+
+/// Variant of [`run_ai_analyst_with_store`] accepting optional admin-tuned system instructions.
+pub async fn run_ai_analyst_with_prompt(
+    http: &HttpClient,
+    env: &EnvConfig,
+    db: Option<&DbStore>,
+    report: &Value,
+    cache: Option<&dyn LlmCache>,
+    refresh: bool,
+    custom_instructions: Option<&str>,
+) -> Result<ModuleOutput> {
     let mut warnings = Vec::new();
+    let brand_name = env.brand_name();
+    let brand_domain = env.brand_domain();
     let active_db = db
         .cloned()
         .or_else(|| ExtensionHub::global().active_db());
@@ -1419,7 +1435,7 @@ pub async fn run_ai_analyst_with_store(
         return Ok(ModuleOutput {
             data: fallback,
             sources: vec![SourceItem::new(
-                "Open Estate Deterministic Property Synthesis (grounded on cited report data)",
+                format!("{brand_name} Deterministic Property Synthesis (grounded on cited report data)"),
                 "https://census.gov/",
             )],
             warnings,
@@ -1453,10 +1469,17 @@ pub async fn run_ai_analyst_with_store(
         )
     };
 
+    let base_instructions = custom_instructions
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(ANALYST_INSTRUCTIONS);
+    let instructions =
+        crate::shared::apply_brand_to_str(base_instructions, &brand_name, &brand_domain);
+
     let mut opts = LlmCallOptions::new(
         "report_synthesis",
         "property_analysis",
-        ANALYST_INSTRUCTIONS,
+        instructions,
         user_prompt,
         analysis_schema(),
     )
@@ -1523,10 +1546,10 @@ pub async fn run_ai_analyst_with_store(
 
     let src_label = match res.effort.as_deref() {
         Some(eff) => format!(
-            "Open Estate AI Analyst ({} · {eff} reasoning) grounded on cited report data",
+            "{brand_name} AI Analyst ({} · {eff} reasoning) grounded on cited report data",
             res.model
         ),
-        None => format!("Open Estate AI Analyst ({}) grounded on cited report data", res.model),
+        None => format!("{brand_name} AI Analyst ({}) grounded on cited report data", res.model),
     };
 
     Ok(ModuleOutput {

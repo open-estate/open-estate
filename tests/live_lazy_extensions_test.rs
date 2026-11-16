@@ -245,7 +245,14 @@ impl HomeScanRunner for RealSqliteScanRunner {
 #[tokio::test]
 async fn lazy_schema_ddl_heatwave_and_sqlite_tables_exist() {
     assert_eq!(LAZY_TABLE_NAMES.len(), 3);
-    assert_eq!(lazy_sqlite_ddl().len(), 3);
+    assert_eq!(lazy_sqlite_ddl().len(), 8);
+    assert_eq!(
+        lazy_sqlite_ddl()
+            .iter()
+            .filter(|ddl| ddl.to_ascii_lowercase().starts_with("create table"))
+            .count(),
+        3
+    );
     assert_eq!(lazy_mysql_ddl().len(), 3);
 
     for ddl in lazy_mysql_ddl() {
@@ -300,6 +307,7 @@ async fn live_public_lazy_job_runs_real_extension_and_marks_ready() {
         .method("POST")
         .uri(format!("/api/report/{slug}/subscriptions"))
         .header(header::CONTENT_TYPE, "application/json")
+        .header(header::HOST, "reports.example.com")
         .header(header::ORIGIN, "https://reports.example.com")
         .body(Body::from(
             json!({
@@ -310,7 +318,7 @@ async fn live_public_lazy_job_runs_real_extension_and_marks_ready() {
         ))
         .unwrap();
     let sub_resp = router.clone().oneshot(sub_req).await.unwrap();
-    assert_eq!(sub_resp.status(), StatusCode::OK);
+    assert_eq!(sub_resp.status(), StatusCode::CREATED);
 
     // Enqueue real public keyless USGS ASCE7 seismic extension against Campbell City Hall coords.
     let enq = enqueue(
@@ -348,6 +356,7 @@ async fn live_public_lazy_job_runs_real_extension_and_marks_ready() {
             heartbeat_interval: Duration::from_secs(10),
             base_backoff_secs: 5,
             max_backoff_secs: 60,
+            wake_notify_only: false,
         },
     );
 
@@ -383,8 +392,12 @@ async fn live_public_lazy_job_runs_real_extension_and_marks_ready() {
     let artifact_val: Value =
         serde_json::from_str(&artifact.payload_json).expect("valid artifact payload json");
     assert!(
-        artifact_val.pointer("/reportPatch/hazards").is_some(),
-        "artifact missing real USGS hazards reportPatch: {artifact_val}"
+        artifact_val
+            .pointer("/reportPatch/hazardSummary/seismicDesignCategory")
+            .and_then(Value::as_str)
+            .map(|s| !s.is_empty())
+            .unwrap_or(false),
+        "artifact missing real USGS hazardSummary reportPatch: {artifact_val}"
     );
     assert!(
         artifact_val
@@ -415,14 +428,18 @@ async fn live_public_lazy_job_runs_real_extension_and_marks_ready() {
         json!("ready")
     );
     assert!(
-        updated_record.report["hazards"]["seismicDesignCategory"].is_string()
-            || updated_record.report["hazards"]["seismic"].is_object()
-            || !updated_record.report["attributions"]
+        updated_record
+            .report
+            .pointer("/modules/hazards/data/seismic/sdc")
+            .and_then(Value::as_str)
+            .map(|s| !s.is_empty())
+            .unwrap_or(false)
+            && !updated_record.report["sources"]
                 .as_array()
                 .map(|a| a.is_empty())
                 .unwrap_or(true),
-        "real USGS seismic hazard fields should be merged into report.hazards: {}",
-        updated_record.report["hazards"]
+        "real USGS seismic hazard fields and source attribution should be merged into report.modules.hazards.data and report.sources: {}",
+        updated_record.report
     );
 
     // 3. First-visit merge_ready_artifacts_into_report on a clean report
@@ -434,6 +451,15 @@ async fn live_public_lazy_job_runs_real_extension_and_marks_ready() {
     assert_eq!(
         fresh_visit_report["lazySections"]["hazards"]["status"],
         json!("ready")
+    );
+    assert!(
+        fresh_visit_report
+            .pointer("/modules/hazards/data/seismic/sdc")
+            .and_then(Value::as_str)
+            .map(|s| !s.is_empty())
+            .unwrap_or(false),
+        "first-visit merge must hydrate /modules/hazards/data/seismic/sdc: {}",
+        fresh_visit_report
     );
 
     // 4. GET /api/report/:slug/lazy-status contract + zero payload_json leak
@@ -557,6 +583,12 @@ enabled: true
 builtin: false
 execution_mode: lazy
 section_id: publicResearch
+geo_scope:
+  country: "US"
+  nationwide: true
+source_attribution:
+  name: "Unreachable Local TCP Probe"
+  url: "https://example.com"
 auth:
   auth_type: none
 rate_limit:
@@ -833,11 +865,15 @@ async fn subscriptions_idempotent_exactly_once_notify_and_email_headers() {
     // 1. Subscribe twice -> same subscription row & unsubscribe_token
     let mut tokens = Vec::new();
     let mut ids = Vec::new();
-    for email_variant in ["Subscriber@Example.COM ", "subscriber@example.com"] {
+    for (idx, email_variant) in ["Subscriber@Example.COM ", "subscriber@example.com"]
+        .into_iter()
+        .enumerate()
+    {
         let req = Request::builder()
             .method("POST")
             .uri(format!("/api/report/{slug}/subscriptions"))
             .header(header::CONTENT_TYPE, "application/json")
+            .header(header::HOST, "reports.example.com")
             .header(header::ORIGIN, "https://reports.example.com")
             .body(Body::from(
                 json!({
@@ -848,13 +884,18 @@ async fn subscriptions_idempotent_exactly_once_notify_and_email_headers() {
             ))
             .unwrap();
         let resp = router.clone().oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
+        let expected_status = if idx == 0 {
+            StatusCode::CREATED
+        } else {
+            StatusCode::OK
+        };
+        assert_eq!(resp.status(), expected_status);
         let body: Value =
             serde_json::from_slice(&to_bytes(resp.into_body(), 65536).await.unwrap()).unwrap();
         assert_eq!(body["ok"], json!(true));
         ids.push(body["subscription"]["id"].as_str().unwrap().to_string());
         tokens.push(
-            body["subscription"]["unsubscribe_token"]
+            body["subscription"]["unsubscribeToken"]
                 .as_str()
                 .unwrap()
                 .to_string(),
@@ -972,6 +1013,7 @@ async fn subscriptions_idempotent_exactly_once_notify_and_email_headers() {
         .method("POST")
         .uri(format!("/api/report/{slug}/subscriptions/unsubscribe"))
         .header(header::CONTENT_TYPE, "application/json")
+        .header(header::HOST, "reports.example.com")
         .header(header::ORIGIN, "https://reports.example.com")
         .body(Body::from(json!({ "token": token }).to_string()))
         .unwrap();
@@ -1034,30 +1076,25 @@ async fn scanner_periodic_hook_and_cached_sweep_enqueue_singleflight() {
     .with_lazy_hook(hook);
 
     let accepted = engine
-        .submit_batch(BatchScanRequest {
-            batch_id: None,
-            items: vec![ScanTask::with_coords(
+        .enqueue_batch(BatchScanRequest {
+            tasks: vec![ScanTask::with_coords(
                 CAMPBELL_CITY_HALL.address,
                 CAMPBELL_CITY_HALL.lat,
                 CAMPBELL_CITY_HALL.lon,
                 Some(CAMPBELL_CITY_HALL.zip.to_string()),
             )],
             skip_ai: true,
+            ..BatchScanRequest::default()
         })
-        .await
         .unwrap();
     assert_eq!(accepted.unique_queued, 1);
 
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-    while tokio::time::Instant::now() < deadline {
-        if let Some(st) = engine.get_batch_status(&accepted.batch_id, 0, 10) {
-            if st.status == "completed" {
-                break;
-            }
-        }
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
-    engine.flush_barrier().await.unwrap();
+    let _ = tokio::time::timeout(
+        Duration::from_secs(10),
+        engine.wait_for_batch(&accepted.batch_id, 0, 10),
+    )
+    .await;
+    engine.flush_now().await.unwrap();
 
     let slugs = db.list_cached_report_slugs(10).await.unwrap();
     assert_eq!(slugs.len(), 1);
@@ -1257,16 +1294,20 @@ async fn live_keyed_section_ready_email_delivered_to_owned_inbox() {
     let env = EnvConfig::from_map(env_map);
     let slug = format!("live-smtp-{}", Uuid::new_v4().simple());
     let notif = SectionReadyNotification {
+        subscription_id: format!("sub_{}", Uuid::new_v4().simple()),
         slug: slug.clone(),
         section_id: "hazards".to_string(),
         section_label: "Climate & Natural Hazards".to_string(),
         display_address: CAMPBELL_CITY_HALL.label.to_string(),
         email: owned_inbox,
+        user_id: None,
         unsubscribe_token: format!("tok_{}", Uuid::new_v4().simple()),
-        base_origin: env
-            .get("PUBLIC_BASE_URL")
-            .unwrap_or("https://reports.example.com")
-            .to_string(),
+        unsubscribe_url: format!(
+            "{}/u/section/tok_live",
+            env.get("PUBLIC_BASE_URL")
+                .unwrap_or("https://reports.example.com")
+                .trim_end_matches('/')
+        ),
         deep_link_url: format!(
             "{}/r/{}/#hazards",
             env.get("PUBLIC_BASE_URL")
@@ -1274,12 +1315,11 @@ async fn live_keyed_section_ready_email_delivered_to_owned_inbox() {
                 .trim_end_matches('/'),
             slug
         ),
-        unsubscribe_url: format!(
-            "{}/u/section/tok_live",
-            env.get("PUBLIC_BASE_URL")
-                .unwrap_or("https://reports.example.com")
-                .trim_end_matches('/')
-        ),
+        event_key: format!("evt_{}", Uuid::new_v4().simple()),
+        base_origin: env
+            .get("PUBLIC_BASE_URL")
+            .unwrap_or("https://reports.example.com")
+            .to_string(),
     };
 
     let delivery = send_section_ready_email(&env, &notif)

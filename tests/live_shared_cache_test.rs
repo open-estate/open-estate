@@ -7,7 +7,7 @@ mod live_support;
 use futures::future::join_all;
 use live_support::reference_sites::{
     CAMPBELL_CITY_HALL, CAMPBELL_COMMUNITY_CENTER, MIAMI_BEACH_CITY_HALL, SAN_JOSE_CITY_HALL,
-    SEATTLE_CITY_HALL, SF_CITY_HALL, TORONTO_CITY_HALL_OUT_OF_SCOPE,
+    TORONTO_CITY_HALL_OUT_OF_SCOPE,
 };
 use open_estate::db::shared_cache_store::{
     get_shared_blob, get_shared_blob_by_tile_key, get_shared_cache_entry,
@@ -874,68 +874,42 @@ async fn live_public_shared_cache_singleflight_under_real_concurrency() {
     assert!(pgas.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-9));
 }
 
-#[tokio::test]
-async fn live_public_shared_cache_swr_serves_stale_and_enqueues_lazy_refresh() {
-    let (_dir, env, http, db) = setup_real_db("swr-lazy").await;
-    let hub = load_hub_with_extensions();
-    let cache = SharedExtensionCache::new();
-    let manifest = manifest_by_id(&hub, "usgs_asce7_seismic");
-    let spec = SharingSpec::new(ShareScope::Geohash5, 1)
-        .with_swr(3600)
-        .with_background_refresh(true);
-    let upstream_fetches = Arc::new(AtomicUsize::new(0));
-
-    let q_a = coord_only_query(CAMPBELL_CITY_HALL.lat, CAMPBELL_CITY_HALL.lon);
-    let q_a_fetch = force_refresh_query(&q_a);
-    let f1 = Arc::clone(&upstream_fetches);
-    let (r1, _ev1) = MeterScope::run(
-        InvocationContext::new("usgs_asce7_seismic").with_trigger(InvocationTrigger::UserRequest),
-        async {
-            get_or_fetch_with_spec(
-                &cache,
-                Some(&db),
-                Some(&hub),
-                &manifest,
-                &spec,
-                &q_a,
-                || async {
-                    f1.fetch_add(1, Ordering::SeqCst);
-                    let r = hub
-                        .test_fetch("usgs_asce7_seismic", &q_a_fetch, &http, &env)
-                        .await?;
-                    assert!(
-                        r.ok,
-                        "initial USGS fetch for SWR must succeed: {:?}",
-                        r.error
-                    );
-                    Ok(decode_test_fetch_envelopes(&r))
-                },
-            )
-            .await
-        },
-    )
-    .await;
-    let pga1 = extract_seismic_pga(&r1.unwrap()).expect("initial PGA");
-    let ph = compute_params_hash(&spec.key_fields, &q_a);
-    let row1 = get_shared_cache_entry(&db, "usgs_asce7_seismic", "geohash5", "9q9k1", &ph)
-        .await
-        .unwrap()
-        .expect("initial SWR row exists");
-
-    for _ in 0..20 {
-        if now_unix_secs() >= row1.expires_at {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(150)).await;
+fn run_on_large_stack<F>(name: &str, fut: F)
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    let handle = std::thread::Builder::new()
+        .name(name.to_string())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("tokio runtime");
+            rt.block_on(Box::pin(fut));
+        })
+        .expect("spawn 16 MiB test thread");
+    if let Err(payload) = handle.join() {
+        std::panic::resume_unwind(payload);
     }
-    assert!(now_unix_secs() >= row1.expires_at);
+}
 
-    // Call 2 & Call 3 inside stale window -> serve stale with 0 external calls + deduplicate 1 lazy job
-    let q_b = coord_only_query(37.295000, -121.930000);
-    let q_b_fetch = force_refresh_query(&q_b);
-    for _ in 0..2 {
-        let f_swr = Arc::clone(&upstream_fetches);
-        let (res_stale, ev_stale) = MeterScope::run(
+#[test]
+fn live_public_shared_cache_swr_serves_stale_and_enqueues_lazy_refresh() {
+    run_on_large_stack("swr-lazy-live", async move {
+        let (_dir, env, http, db) = setup_real_db("swr-lazy").await;
+        let hub = load_hub_with_extensions();
+        let cache = SharedExtensionCache::new();
+        let manifest = manifest_by_id(&hub, "usgs_asce7_seismic");
+        let spec = SharingSpec::new(ShareScope::Geohash5, 1)
+            .with_swr(3600)
+            .with_background_refresh(true);
+        let upstream_fetches = Arc::new(AtomicUsize::new(0));
+
+        let q_a = coord_only_query(CAMPBELL_CITY_HALL.lat, CAMPBELL_CITY_HALL.lon);
+        let q_a_fetch = force_refresh_query(&q_a);
+        let f1 = Arc::clone(&upstream_fetches);
+        let (r1, _ev1) = MeterScope::run(
             InvocationContext::new("usgs_asce7_seismic")
                 .with_trigger(InvocationTrigger::UserRequest),
             async {
@@ -945,12 +919,17 @@ async fn live_public_shared_cache_swr_serves_stale_and_enqueues_lazy_refresh() {
                     Some(&hub),
                     &manifest,
                     &spec,
-                    &q_b,
+                    &q_a,
                     || async {
-                        f_swr.fetch_add(1, Ordering::SeqCst);
+                        f1.fetch_add(1, Ordering::SeqCst);
                         let r = hub
-                            .test_fetch("usgs_asce7_seismic", &q_b_fetch, &http, &env)
+                            .test_fetch("usgs_asce7_seismic", &q_a_fetch, &http, &env)
                             .await?;
+                        assert!(
+                            r.ok,
+                            "initial USGS fetch for SWR must succeed: {:?}",
+                            r.error
+                        );
                         Ok(decode_test_fetch_envelopes(&r))
                     },
                 )
@@ -958,47 +937,97 @@ async fn live_public_shared_cache_swr_serves_stale_and_enqueues_lazy_refresh() {
             },
         )
         .await;
-        let envs_stale = res_stale.expect("SWR stale response ok");
-        assert_eq!(ev_stale.outcome, InvocationOutcome::Cached);
-        assert_eq!(ev_stale.dims.external_api_calls, 0);
-        assert!(envs_stale[0].cached);
-        assert_eq!(extract_seismic_pga(&envs_stale), Some(pga1));
-    }
-    assert_eq!(upstream_fetches.load(Ordering::SeqCst), 1);
+        let pga1 = extract_seismic_pga(&r1.unwrap()).expect("initial PGA");
+        let ph = compute_params_hash(&spec.key_fields, &q_a);
+        let row1 = get_shared_cache_entry(&db, "usgs_asce7_seismic", "geohash5", "9q9k1", &ph)
+            .await
+            .unwrap()
+            .expect("initial SWR row exists");
 
-    let lazy_slug =
-        shared_cache_lazy_slug("usgs_asce7_seismic", ShareScope::Geohash5, "9q9k1", &ph);
-    let jobs = db
-        .list_lazy_jobs_for_slug(&lazy_slug)
-        .await
-        .expect("list SWR lazy jobs");
-    assert_eq!(
-        jobs.len(),
-        1,
-        "two stale hits must enqueue 1 deduplicated job"
-    );
-    assert_eq!(jobs[0].extension_id, "usgs_asce7_seismic");
-    assert_eq!(jobs[0].trigger_kind, "shared_cache_swr");
-    assert_eq!(jobs[0].status, "queued");
-    assert!(jobs[0].query_json.contains(FORCE_REFRESH_PARAM));
+        for _ in 0..20 {
+            if now_unix_secs() >= row1.expires_at {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(150)).await;
+        }
+        assert!(now_unix_secs() >= row1.expires_at);
 
-    let worker = LazyWorker::new(
-        LazyExecutor::new(db.clone(), http.clone(), env.clone(), Arc::clone(&hub)),
-        LazyWorkerConfig::from_env(&env),
-    );
-    let processed = worker.drain_due_jobs(8).await.expect("drain SWR lazy job");
-    assert!(processed >= 1);
+        // Call 2 & Call 3 inside stale window -> serve stale with 0 external calls + deduplicate 1 lazy job
+        let q_b = coord_only_query(37.295000, -121.930000);
+        let q_b_fetch = force_refresh_query(&q_b);
+        for _ in 0..2 {
+            let f_swr = Arc::clone(&upstream_fetches);
+            let (res_stale, ev_stale) = MeterScope::run(
+                InvocationContext::new("usgs_asce7_seismic")
+                    .with_trigger(InvocationTrigger::UserRequest),
+                async {
+                    get_or_fetch_with_spec(
+                        &cache,
+                        Some(&db),
+                        Some(&hub),
+                        &manifest,
+                        &spec,
+                        &q_b,
+                        || async {
+                            f_swr.fetch_add(1, Ordering::SeqCst);
+                            let r = hub
+                                .test_fetch("usgs_asce7_seismic", &q_b_fetch, &http, &env)
+                                .await?;
+                            Ok(decode_test_fetch_envelopes(&r))
+                        },
+                    )
+                    .await
+                },
+            )
+            .await;
+            let envs_stale = res_stale.expect("SWR stale response ok");
+            assert_eq!(ev_stale.outcome, InvocationOutcome::Cached);
+            assert_eq!(ev_stale.dims.external_api_calls, 0);
+            assert!(envs_stale[0].cached);
+            assert_eq!(extract_seismic_pga(&envs_stale), Some(pga1));
+        }
+        assert_eq!(upstream_fetches.load(Ordering::SeqCst), 1);
 
-    let done_job = db
-        .get_lazy_job(&lazy_slug, "usgs_asce7_seismic")
-        .await
-        .expect("reload SWR job")
-        .expect("SWR job row");
-    assert_eq!(
-        done_job.status, "succeeded",
-        "real SWR lazy job must succeed: {:?}",
-        done_job.last_error
-    );
+        let lazy_slug =
+            shared_cache_lazy_slug("usgs_asce7_seismic", ShareScope::Geohash5, "9q9k1", &ph);
+        let jobs = db
+            .list_lazy_jobs_for_slug(&lazy_slug)
+            .await
+            .expect("list SWR lazy jobs");
+        assert_eq!(
+            jobs.len(),
+            1,
+            "two stale hits must enqueue 1 deduplicated job"
+        );
+        assert_eq!(jobs[0].extension_id, "usgs_asce7_seismic");
+        assert_eq!(jobs[0].trigger_kind, "shared_cache_swr");
+        assert_eq!(jobs[0].status, "queued");
+        assert!(jobs[0]
+            .query_json
+            .as_deref()
+            .unwrap_or("")
+            .contains(FORCE_REFRESH_PARAM));
+
+        let worker = LazyWorker::new(
+            LazyExecutor::new(db.clone(), http.clone(), env.clone(), Arc::clone(&hub)),
+            LazyWorkerConfig::from_env(&env),
+        );
+        let processed = Box::pin(worker.drain_due_jobs(8))
+            .await
+            .expect("drain SWR lazy job");
+        assert!(processed >= 1);
+
+        let done_job = db
+            .get_lazy_job(&lazy_slug, "usgs_asce7_seismic")
+            .await
+            .expect("reload SWR job")
+            .expect("SWR job row");
+        assert_eq!(
+            done_job.status, "succeeded",
+            "real SWR lazy job must succeed: {:?}",
+            done_job.last_error
+        );
+    });
 }
 
 #[tokio::test]
@@ -1091,83 +1120,96 @@ async fn deterministic_shared_cache_invalidation_and_stats() {
     );
 }
 
-#[tokio::test]
-async fn live_public_shared_cache_scheduler_and_hot_refresh() {
-    let (_dir, env, http, db) = setup_real_db("hot-refresh").await;
-    let hub = load_hub_with_extensions();
-    let cache = SharedExtensionCache::new();
+#[test]
+fn live_public_shared_cache_scheduler_and_hot_refresh() {
+    run_on_large_stack("hot-refresh-live", async move {
+        let (_dir, env, http, db) = setup_real_db("hot-refresh").await;
+        let hub = load_hub_with_extensions();
+        let cache = SharedExtensionCache::new();
 
-    register_shared_cache_scheduled_jobs();
-    assert!(
-        global_handler_registry()
-            .get(SHARED_DATA_REFRESH_JOB_KIND)
-            .is_some(),
-        "shared_data_refresh must be registered with open_estate::scheduler"
-    );
+        register_shared_cache_scheduled_jobs();
+        assert!(
+            global_handler_registry()
+                .get(SHARED_DATA_REFRESH_JOB_KIND)
+                .is_some(),
+            "shared_data_refresh must be registered with open_estate::scheduler"
+        );
 
-    let seeded1 = seed_shared_cache_default_jobs(&db, &env)
+        let seeded1 = seed_shared_cache_default_jobs(&db, &env)
+            .await
+            .expect("seed default shared cache job");
+        assert_eq!(seeded1, 1);
+        let seeded2 = seed_shared_cache_default_jobs(&db, &env)
+            .await
+            .expect("idempotent re-seed");
+        assert_eq!(seeded2, 0);
+        let jobs = list_scheduled_jobs(&db, Some(SHARED_DATA_REFRESH_JOB_KIND), None, None, 16)
+            .await
+            .expect("list scheduled jobs");
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].kind, SHARED_DATA_REFRESH_JOB_KIND);
+
+        // Seed an expiring hot key (hit_count >= 3, expires within lead_time_secs) and run hot refresh
+        let now = now_unix_secs();
+        let q = coord_only_query(CAMPBELL_CITY_HALL.lat, CAMPBELL_CITY_HALL.lon);
+        let ph = compute_params_hash(&[], &q);
+        upsert_shared_cache_entry(
+            &db,
+            &UpsertSharedCacheInput {
+                extension_id: "usgs_asce7_seismic".to_string(),
+                extension_version: "1.0.0".to_string(),
+                scope: "geohash5".to_string(),
+                scope_key: "9q9k1".to_string(),
+                params_hash: ph.clone(),
+                payload: r#"{"wireEnvelopes":[],"envelopeCount":0}"#.to_string(),
+                fetched_at: now - 7200,
+                expires_at: now + 60,
+                last_hit_at: now - 10,
+            },
+        )
         .await
-        .expect("seed default shared cache job");
-    assert_eq!(seeded1, 1);
-    let seeded2 = seed_shared_cache_default_jobs(&db, &env)
+        .expect("seed hot candidate");
+        db.execute_params(
+            "UPDATE extension_shared_cache \
+             SET hit_count = 5, last_hit_at = ? \
+             WHERE extension_id = ? AND scope = ? AND scope_key = ? AND params_hash = ?",
+            &[
+                SqlParam::I64(now - 10),
+                SqlParam::Text("usgs_asce7_seismic".to_string()),
+                SqlParam::Text("geohash5".to_string()),
+                SqlParam::Text("9q9k1".to_string()),
+                SqlParam::Text(ph.clone()),
+            ],
+        )
         .await
-        .expect("idempotent re-seed");
-    assert_eq!(seeded2, 0);
-    let jobs = list_scheduled_jobs(&db, Some(SHARED_DATA_REFRESH_JOB_KIND))
+        .expect("bump hot candidate hit_count");
+
+        let hot_cands = list_hot_refresh_candidates(&db, 3, now - 3600, now + 600, 16)
+            .await
+            .expect("list hot candidates");
+        assert_eq!(hot_cands.len(), 1);
+
+        let summary = refresh_hot_shared_keys(
+            &cache,
+            &db,
+            &hub,
+            &http,
+            &env,
+            &HotRefreshConfig::default(),
+            true,
+        )
         .await
-        .expect("list scheduled jobs");
-    assert_eq!(jobs.len(), 1);
-    assert_eq!(jobs[0].kind, SHARED_DATA_REFRESH_JOB_KIND);
+        .expect("refresh hot shared keys");
+        assert_eq!(summary.candidates, 1);
+        assert_eq!(summary.refreshed, 1);
+        assert_eq!(summary.errors, 0);
 
-    // Seed an expiring hot key (hit_count >= 3, expires within lead_time_secs) and run hot refresh
-    let now = now_unix_secs();
-    let q = coord_only_query(CAMPBELL_CITY_HALL.lat, CAMPBELL_CITY_HALL.lon);
-    let ph = compute_params_hash(&[], &q);
-    db.execute_params(
-        "INSERT INTO extension_shared_cache \
-         (extension_id, extension_version, scope, scope_key, params_hash, payload, fetched_at, expires_at, hit_count, last_hit_at) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        &[
-            SqlParam::Text("usgs_asce7_seismic".to_string()),
-            SqlParam::Text("1.0.0".to_string()),
-            SqlParam::Text("geohash5".to_string()),
-            SqlParam::Text("9q9k1".to_string()),
-            SqlParam::Text(ph.clone()),
-            SqlParam::Text(r#"{"wireEnvelopes":[],"envelopeCount":0}"#.to_string()),
-            SqlParam::I64(now - 7200),
-            SqlParam::I64(now + 60),
-            SqlParam::I64(5),
-            SqlParam::I64(now - 10),
-        ],
-    )
-    .await
-    .expect("seed hot candidate");
-
-    let hot_cands = list_hot_refresh_candidates(&db, 3, now - 3600, now + 600, 16)
-        .await
-        .expect("list hot candidates");
-    assert_eq!(hot_cands.len(), 1);
-
-    let summary = refresh_hot_shared_keys(
-        &cache,
-        &db,
-        &hub,
-        &http,
-        &env,
-        &HotRefreshConfig::default(),
-        true,
-    )
-    .await
-    .expect("refresh hot shared keys");
-    assert_eq!(summary.candidates, 1);
-    assert_eq!(summary.refreshed, 1);
-    assert_eq!(summary.errors, 0);
-
-    let refreshed = get_shared_cache_entry(&db, "usgs_asce7_seismic", "geohash5", "9q9k1", &ph)
-        .await
-        .unwrap()
-        .expect("refreshed row exists");
-    assert!(refreshed.expires_at > now + 100);
+        let refreshed = get_shared_cache_entry(&db, "usgs_asce7_seismic", "geohash5", "9q9k1", &ph)
+            .await
+            .unwrap()
+            .expect("refreshed row exists");
+        assert!(refreshed.expires_at > now + 100);
+    });
 }
 
 #[tokio::test]

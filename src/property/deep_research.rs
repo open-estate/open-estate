@@ -1638,23 +1638,15 @@ fn soql_escape(s: &str) -> String {
 }
 
 async fn fetch_json_bounded(http: &HttpClient, url: &str) -> Option<Value> {
-    let resp = tokio::time::timeout(
-        Duration::from_millis(CONNECTOR_TIMEOUT_MS),
-        http.raw()
-            .get(url)
-            .header("Accept", "application/json")
-            .send(),
+    http.get_json_opts(
+        url,
+        CONNECTOR_TIMEOUT_MS + 2200,
+        0,
+        86400 * 7,
+        Some(&[("Accept", "application/json")]),
     )
     .await
-    .ok()?
-    .ok()?;
-    if !resp.status().is_success() {
-        return None;
-    }
-    tokio::time::timeout(Duration::from_millis(2200), resp.json::<Value>())
-        .await
-        .ok()?
-        .ok()
+    .ok()
 }
 
 fn build_endpoint(base_override: Option<&str>, prod_origin: &str, path_and_query: &str) -> String {

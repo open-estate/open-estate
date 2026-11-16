@@ -21,7 +21,7 @@ use open_estate::extensions::proto::{
 };
 use open_estate::extensions::ExtensionHub;
 use open_estate::guardrails::HttpDefenseShield;
-use open_estate::lazy::{claim_next, LazyExecutor, LazySectionStatusKind, LazyStatusReport};
+use open_estate::lazy::{claim_next, LazySectionStatusKind, LazyStatusReport};
 use open_estate::metering::{
     add_external_call, ExtensionUsageEvent, InvocationContext, InvocationDecision,
     InvocationOutcome, InvocationTrigger, MeterScope,
@@ -153,8 +153,11 @@ impl DataExtensionAdapter for WiringDagChildAdapter {
             }),
             payload: Some(extension_envelope_proto::Payload::RoofIntel(
                 RoofIntelProto {
-                    latest_roof_year: Some(2024),
-                    permit_count: query.upstream_envelopes.len() as u32,
+                    verification_status: "verified_reroof".to_string(),
+                    replacement_date_verified: true,
+                    reroof_verified: true,
+                    verified_reroof_year: Some(2024),
+                    note: format!("upstream_envelopes={}", query.upstream_envelopes.len()),
                     ..Default::default()
                 },
             )),
@@ -230,7 +233,7 @@ impl DataExtensionAdapter for WiringLazyResearchAdapter {
                 resolved_llm
                     .models
                     .first()
-                    .and_then(|m| m.reasoning_effort.as_deref()),
+                    .and_then(|m| m.effort.as_deref()),
                 Some("low")
             );
             add_external_call("wiring-lazy.example.org");
@@ -249,7 +252,7 @@ impl DataExtensionAdapter for WiringLazyResearchAdapter {
                 }),
                 payload: Some(extension_envelope_proto::Payload::MarketValuation(
                     MarketValuationProto {
-                        estimated_value_usd: Some(1_675_000.0),
+                        estimated_value_usd: Some(1_675_000),
                         ..Default::default()
                     },
                 )),
@@ -477,11 +480,12 @@ geo_scope:
 footprint_catalog:
   broadband_rules:
     - id: rule1
-      states: [CA]
-      provider_name: Fiber Reference Carrier
+      geo_scope:
+        states: [CA]
+      carrier_name: Fiber Reference Carrier
       technology: fiber
-      max_down_mbps: 1000
-      max_up_mbps: 1000
+      max_download_mbps: 1000
+      max_upload_mbps: 1000
       check_url: https://broadbandmap.fcc.gov/
 "#;
     state_deny
@@ -599,7 +603,10 @@ async fn lazy_mode_skips_eager_waves_enqueues_on_first_visit_runs_worker_and_mer
     let (_ws, raw_state) = create_isolated_state(
         "lazy-flow",
         vec![
-            ("INTERNAL_API_TOKEN", "wiring-secret-token".to_string()),
+            (
+                "OPEN_ESTATE_INTERNAL_API_KEY",
+                "wiring-secret-token".to_string(),
+            ),
             ("RUN_MODE", "all".to_string()),
         ],
     )
@@ -703,7 +710,7 @@ async fn lazy_mode_skips_eager_waves_enqueues_on_first_visit_runs_worker_and_mer
         .oneshot(
             Request::builder()
                 .uri(format!("/r/{slug}"))
-                .header("x-internal-token", "wiring-secret-token")
+                .header("x-openestate-internal-key", "wiring-secret-token")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -716,7 +723,7 @@ async fn lazy_mode_skips_eager_waves_enqueues_on_first_visit_runs_worker_and_mer
         .oneshot(
             Request::builder()
                 .uri(format!("/api/report/{slug}/lazy-status"))
-                .header("x-internal-token", "wiring-secret-token")
+                .header("x-openestate-internal-key", "wiring-secret-token")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -740,7 +747,7 @@ async fn lazy_mode_skips_eager_waves_enqueues_on_first_visit_runs_worker_and_mer
         .oneshot(
             Request::builder()
                 .uri("/api/admin/scheduler/kinds")
-                .header("x-internal-token", "wiring-secret-token")
+                .header("x-openestate-internal-key", "wiring-secret-token")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -778,7 +785,7 @@ async fn lazy_mode_skips_eager_waves_enqueues_on_first_visit_runs_worker_and_mer
             .oneshot(
                 Request::builder()
                     .uri(format!("/api/report/{slug}/lazy-status"))
-                    .header("x-internal-token", "wiring-secret-token")
+                    .header("x-openestate-internal-key", "wiring-secret-token")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -808,7 +815,7 @@ async fn lazy_mode_skips_eager_waves_enqueues_on_first_visit_runs_worker_and_mer
         .oneshot(
             Request::builder()
                 .uri(format!("/r/{slug}/report.json"))
-                .header("x-internal-token", "wiring-secret-token")
+                .header("x-openestate-internal-key", "wiring-secret-token")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -830,10 +837,12 @@ async fn lazy_mode_skips_eager_waves_enqueues_on_first_visit_runs_worker_and_mer
     );
 
     // Clean shutdown of worker and scheduler handles held on AppState.
-    if let Some(handle) = state.lazy_worker.lock().await.take() {
+    let lazy_handle = state.lazy_worker.lock().await.take();
+    if let Some(handle) = lazy_handle {
         handle.shutdown().await;
     }
-    if let Some(sh) = state.scheduler_handle.lock().await.take() {
+    let sched_handle = state.scheduler_handle.lock().await.take();
+    if let Some(sh) = sched_handle {
         sh.shutdown().await;
     }
 }
@@ -890,7 +899,7 @@ fn seeded_paywall_report(slug: &str, secret_val: &str, est_usd: i64) -> Value {
             "displayAddress": format!("Parcel {slug}, Campbell, CA 95008"),
             "generatedAt": "2026-11-16T00:00:00Z",
             "aiPending": false,
-            "geometryVersion": 1,
+            "geometryVersion": open_estate::modules::fengshui::GEOMETRY_VERSION,
         },
         "geo": {
             "city": "Campbell",
@@ -907,6 +916,9 @@ fn seeded_paywall_report(slug: &str, secret_val: &str, est_usd: i64) -> Value {
         },
         "buyerDiligence": {
             "redactedSecret": secret_val,
+            "ongoingCosts": {
+                "monthlyUtilities": { "electricCarrier": "Reference Utility" }
+            },
             "connectivity": { "fcc": { "queried": false } }
         },
         "modules": {

@@ -135,7 +135,7 @@ a{color:var(--blue);text-decoration:none}a:hover{text-decoration:underline}
 .gtile{position:relative;border-radius:14px;overflow:hidden;background:#dfe5ec}
 .gtile .gmap{position:absolute;inset:0}
 .gtag{position:absolute;left:10px;bottom:10px;z-index:500;background:rgba(17,24,39,.76);color:#fff;font:600 12px var(--font);padding:5px 11px;border-radius:999px;backdrop-filter:blur(4px);display:inline-flex;align-items:center;gap:9px;flex-wrap:wrap;max-width:calc(100% - 20px)}
-.gtile.main .gtag{bottom:44px}
+.gtile.main .gtag{bottom:58px}
 .gtag .gleg{display:inline-flex;align-items:center;gap:4px;white-space:nowrap}
 .gtag .gsw{display:inline-block;width:10px;height:10px;border-radius:2.5px;flex:0 0 auto}
 .gbtns{position:absolute;right:48px;top:10px;z-index:500;display:flex;gap:6px}
@@ -457,7 +457,7 @@ main,aside.side,main>section{min-width:0;max-width:100%}
 @media (max-width:1240px){#refreshBtn .hblbl{display:none}#refreshBtn{padding:5px 8px}}
 @media (max-width:780px){.hdrbtn .hblbl{display:none}.hdrbtn{padding:5px 8px}.swrap{min-width:130px}}
 /* [/feat/chrome-extension] */
-@media (max-width:640px){.hdr .row{padding:0 14px;gap:8px}.nav-pop{left:0;right:auto;width:calc(100vw - 28px)}.cfcards,.dfgrid{grid-template-columns:repeat(2,minmax(0,1fr))}.chk{grid-template-columns:minmax(0,1fr)}.srcs{columns:1}.gtile.main .gtag{bottom:44px}.schc{flex-wrap:wrap;align-items:flex-start}.schlinks{width:100%;justify-content:flex-start;margin-top:4px}}
+@media (max-width:640px){.hdr .row{padding:0 14px;gap:8px}.nav-pop{left:0;right:auto;width:calc(100vw - 28px)}.cfcards,.dfgrid{grid-template-columns:repeat(2,minmax(0,1fr))}.chk{grid-template-columns:minmax(0,1fr)}.srcs{columns:1}.gtile.main .gtag{bottom:58px}.schc{flex-wrap:wrap;align-items:flex-start}.schlinks{width:100%;justify-content:flex-start;margin-top:4px}}
 /* [feat/chrome-extension] */
 @media print{
   @page{size:letter portrait;margin:12mm 14mm}
@@ -1013,7 +1013,7 @@ html:not([data-role="all"]) .verdict-media-col .bento-grid,html:not([data-role="
 @media(max-width:760px){
   .db-fab-dock{padding:0 12px 18px}
 }
-.db-drawer{position:fixed;right:16px;bottom:74px;z-index:945;width:min(420px,calc(100vw - 24px));max-height:min(620px,calc(100vh - 90px));background:#fff;border:1px solid #cbd5e1;border-radius:16px;box-shadow:0 22px 52px rgba(15,23,42,.26),0 4px 12px rgba(15,23,42,.08);display:none;flex-direction:column;overflow:hidden}
+.db-drawer{position:fixed;right:16px;bottom:74px;z-index:2500;width:min(420px,calc(100vw - 24px));max-height:min(620px,calc(100vh - 90px));background:#fff;border:1px solid #cbd5e1;border-radius:16px;box-shadow:0 22px 52px rgba(15,23,42,.26),0 4px 12px rgba(15,23,42,.08);display:none;flex-direction:column;overflow:hidden}
 .db-drawer.open{display:flex}
 .db-drawer.maximized{right:16px;bottom:16px;left:auto;top:auto;width:min(980px,calc(100vw - 32px));height:min(820px,calc(100vh - 32px));max-height:calc(100vh - 32px)}
 .db-dhdr{padding:12px 14px 10px;background:linear-gradient(135deg,#0f766e 0%,#134e4a 60%,#1e1b4b 100%);color:#fff}
@@ -1030,9 +1030,34 @@ html:not([data-role="all"]) .verdict-media-col .bento-grid,html:not([data-role="
 .db-dqs button:hover{border-color:var(--brand);color:var(--brand);background:var(--brandsoft)}
 .db-dlog{flex:1 1 auto;min-height:170px;max-height:310px;overflow-y:auto;padding:10px 12px;display:flex;flex-direction:column;gap:8px;background:#fff}
 .db-drawer.maximized .db-dlog{max-height:none}
-.db-dlog .msg{padding:8px 11px;border-radius:11px;font-size:12.8px;line-height:1.55;max-width:92%;white-space:pre-wrap;word-break:break-word}
+.db-dlog .msg{padding:8px 11px;border-radius:11px;font-size:12.8px;line-height:1.55;max-width:92%;white-space:normal;word-break:break-word}
 .db-dlog .msg.u{align-self:flex-end;background:var(--brand);color:#fff}
 .db-dlog .msg.a{align-self:flex-start;background:var(--soft);border:1px solid var(--line);color:var(--ink)}
+.db-dlog .msg .db-md-p{margin:0 0 6px}
+.db-dlog .msg .db-md-p:last-child{margin-bottom:0}
+.db-dlog .msg .db-md-h{font-weight:700;font-size:13px;margin:4px 0}
+.db-dlog .msg .db-md-ul{margin:4px 0 6px;padding-left:18px}
+.db-dlog .msg .db-md-ul:last-child{margin-bottom:0}
+.db-dlog .msg .db-md-ul li{margin:2px 0}
+.db-dlog .msg code{font-family:var(--mono,ui-monospace,SFMono-Regular,Menlo,monospace);font-size:11.8px;padding:1px 4px;border-radius:4px;background:rgba(15,23,42,.08)}
+.db-dlog .msg.u code{background:rgba(255,255,255,.2);color:#fff}
+.db-dlog .msg a.db-anchor-link,.db-dlog .msg a.db-ext-link{font-weight:600;text-decoration:underline;text-underline-offset:2px;cursor:pointer}
+.db-dlog .msg.a a.db-anchor-link,.db-dlog .msg.a a.db-ext-link{color:var(--brand)}
+.db-dlog .msg.a a.db-anchor-link:hover,.db-dlog .msg.a a.db-ext-link:hover{color:#115e59}
+.db-dlog .msg.u a.db-anchor-link,.db-dlog .msg.u a.db-ext-link{color:#ecfeff}
+.db-dlog .msg.u a.db-anchor-link:hover,.db-dlog .msg.u a.db-ext-link:hover{color:#fff}
+.db-anchor-flash{animation:dbAnchorPulse 1.4s ease-out}
+@keyframes dbAnchorPulse{0%{box-shadow:0 0 0 3px rgba(15,118,110,.55);background-color:rgba(20,184,166,.12)}100%{box-shadow:0 0 0 0 rgba(15,118,110,0);background-color:transparent}}
+@media(prefers-color-scheme:dark){
+  .db-drawer{background:#0f172a;border-color:#334155}
+  .db-dqs,.db-dfoot{background:#111827;border-color:#334155}
+  .db-dqs button,.db-dform input{background:#1e293b;border-color:#334155;color:#f1f5f9}
+  .db-dlog{background:#0f172a}
+  .db-dlog .msg.a{background:#1e293b;border-color:#334155;color:#f1f5f9}
+  .db-dlog .msg.a code{background:rgba(255,255,255,.12);color:#e2e8f0}
+  .db-dlog .msg.a a.db-anchor-link,.db-dlog .msg.a a.db-ext-link{color:#5eead4}
+  .db-dlog .msg.a a.db-anchor-link:hover,.db-dlog .msg.a a.db-ext-link:hover{color:#99f6e4}
+}
 .db-dcites{display:flex;flex-wrap:wrap;gap:4px;margin-top:6px;padding-top:6px;border-top:1px dashed var(--line)}
 .db-dfollow{display:flex;flex-wrap:wrap;gap:5px;margin-top:6px}
 .db-dfollow button{background:#fff;border:1px solid rgba(15,118,110,.32);color:var(--brand);border-radius:999px;padding:3px 8px;font:600 11px var(--font);cursor:pointer}
@@ -1254,7 +1279,7 @@ html:not([data-role="all"]) .verdict-media-col .bento-grid,html:not([data-role="
     <div class="mexp-body" id="mapExpandBody"><div class="gmap" id="mapExpandCanvas"></div></div>
   </div>
 </div>
-<aside class="db-drawer" id="openEstateDrawer" role="dialog" aria-label="Property Assistant" aria-hidden="true"></aside>
+<aside class="db-drawer" id="openEstateDrawer" role="dialog" aria-label="__REPORT_BRAND_NAME__ Property Assistant" aria-hidden="true"></aside>
 
 <script>__I18NEXT_JS__</script>
 <script>
@@ -1368,19 +1393,17 @@ const detectInitialLang = () => {
 };
 let LANG = detectInitialLang();
 if (document.documentElement) document.documentElement.lang = LANG === 'zh' ? 'zh-CN' : LANG;
-const _DEFAULT_BRAND_NAME = ['Open', 'Estate'].join(' ');
-const _DEFAULT_BRAND_DOMAIN = ['open-estate', 'local'].join('.');
 window.__OPEN_ESTATE_BRAND__ = {
-  name: (R && R.brand && R.brand.name && String(R.brand.name).trim()) || _DEFAULT_BRAND_NAME,
-  domain: (R && R.brand && R.brand.domain && String(R.brand.domain).trim()) || _DEFAULT_BRAND_DOMAIN
+  name: (R && R.brand && R.brand.name && String(R.brand.name).trim()) || __REPORT_BRAND_NAME_JSON__,
+  domain: (R && R.brand && R.brand.domain && String(R.brand.domain).trim()) || __REPORT_BRAND_DOMAIN_JSON__
 };
 (() => {
   const b = window.__OPEN_ESTATE_BRAND__ || {};
-  const bName = (b.name && String(b.name).trim()) || _DEFAULT_BRAND_NAME;
-  const bDom = (b.domain && String(b.domain).trim()) || _DEFAULT_BRAND_DOMAIN;
+  const bName = (b.name && String(b.name).trim()) || __REPORT_BRAND_NAME_JSON__;
+  const bDom = (b.domain && String(b.domain).trim()) || __REPORT_BRAND_DOMAIN_JSON__;
   const resEn = window.__OPEN_ESTATE_I18N_RES__ && window.__OPEN_ESTATE_I18N_RES__.en && window.__OPEN_ESTATE_I18N_RES__.en.translation;
-  const resBrand = (resEn && resEn.brand && resEn.brand.name) || _DEFAULT_BRAND_NAME;
-  const resDom = (resEn && resEn.brand && resEn.brand.domain) || _DEFAULT_BRAND_DOMAIN;
+  const resBrand = (resEn && resEn.brand && resEn.brand.name) || '';
+  const resDom = (resEn && resEn.brand && resEn.brand.domain) || '';
   if (((resBrand && resBrand !== bName) || (resDom && resDom !== bDom)) && window.__OPEN_ESTATE_I18N_RES__) {
     const walk = (n) => {
       if (!n || typeof n !== 'object') return;
@@ -1406,8 +1429,8 @@ if (window.i18next) {
   });
 }
 const brandInfo = () => ({
-  name: (R.brand && R.brand.name && String(R.brand.name).trim()) || window.__OPEN_ESTATE_BRAND__?.name || _DEFAULT_BRAND_NAME,
-  domain: (R.brand && R.brand.domain && String(R.brand.domain).trim()) || window.__OPEN_ESTATE_BRAND__?.domain || _DEFAULT_BRAND_DOMAIN,
+  name: (R.brand && R.brand.name && String(R.brand.name).trim()) || window.__OPEN_ESTATE_BRAND__?.name || __REPORT_BRAND_NAME_JSON__,
+  domain: (R.brand && R.brand.domain && String(R.brand.domain).trim()) || window.__OPEN_ESTATE_BRAND__?.domain || __REPORT_BRAND_DOMAIN_JSON__,
 });
 const TKEY = (key, vars, fallback) => {
   if (window.i18next && typeof window.i18next.t === 'function') {
@@ -4202,6 +4225,8 @@ function renderGallery() {
   [gMainEl, gStreetEl, gTerrainEl].forEach((el) => {
     if (!el) return;
     if (el._ro) { try { el._ro.disconnect(); } catch {} el._ro = null; }
+    if (el._tagRo) { try { el._tagRo.disconnect(); } catch {} el._tagRo = null; }
+    if (el._tagMo) { try { el._tagMo.disconnect(); } catch {} el._tagMo = null; }
     if (el._map) { try { el._map.remove(); } catch {} el._map = null; }
   });
   const satHero = resolveSatelliteConfig();
@@ -4226,6 +4251,27 @@ function renderGallery() {
     }
     if (lotPoly) parts.push(`<span class="gleg"><i class="gsw" style="border:2px dashed #38bdf8;background:rgba(56,189,248,.12)"></i>${tx('Lot', '地块红线', 'Lote')}</span>`);
     gTag.innerHTML = parts.join('');
+  }
+  if (gTag && gMainEl) {
+    const syncMainTagOffset = () => {
+      const attr = gMainEl.querySelector('.leaflet-control-attribution');
+      const attrH = attr ? attr.getBoundingClientRect().height : 0;
+      if (attrH > 0) gTag.style.bottom = `${Math.max(58, Math.ceil(attrH) + 8)}px`;
+    };
+    syncMainTagOffset();
+    m1.on('resize layeradd layerremove', syncMainTagOffset);
+    const attrEl = gMainEl.querySelector('.leaflet-control-attribution');
+    if (typeof ResizeObserver !== 'undefined') {
+      const tagRo = new ResizeObserver(syncMainTagOffset);
+      tagRo.observe(gMainEl);
+      if (attrEl) tagRo.observe(attrEl);
+      gMainEl._tagRo = tagRo;
+    }
+    if (typeof MutationObserver !== 'undefined' && attrEl) {
+      const tagMo = new MutationObserver(syncMainTagOffset);
+      tagMo.observe(attrEl, { childList: true, characterData: true, subtree: true });
+      gMainEl._tagMo = tagMo;
+    }
   }
   const m2 = L.map(gStreetEl, { zoomControl: true, scrollWheelZoom: false, attributionControl: false, dragging: true, minZoom: 3, maxZoom: 21 }).setView(HOME, 17);
   BASE.streets().addTo(m2); addPropertyOutlines(m2, { theme: 'light' }); homeMarker().addTo(m2);
@@ -9968,12 +10014,62 @@ function baZhaiSVG(bz, doorPal) {
 }
 function kuaNumber(year, gender) { const yy = year % 100; let k; if (gender === 'male') { k = year >= 2000 ? (99 - yy) % 9 : (100 - yy) % 9; if (k === 0) k = 9; if (k === 5) k = 2; } else { k = year >= 2000 ? (yy + 6) % 9 : (yy - 4 + 180) % 9; if (k === 0) k = 9; if (k === 5) k = 8; } return k; }
 function fsItems(items) {
-  return (items || []).slice().sort((a, b) => Math.abs(b.impact ?? 0) - Math.abs(a.impact ?? 0)).map((f) => { const imp = Number(f.impact ?? 0); return `<div class="fsi"><span class="z" style="flex:1">${esc(f.zh || '')}</span><span class="imp ${imp > 0 ? 'pos' : imp < 0 ? 'neg' : 'z'}">${imp > 0 ? '+' : ''}${imp}</span></div>`; }).join('');
+  const arr = Array.isArray(items) ? items : [];
+  return arr.slice().sort((a, b) => Math.abs(b.impact ?? 0) - Math.abs(a.impact ?? 0)).map((f) => { const imp = Number(f.impact ?? 0); return `<div class="fsi"><span class="z" style="flex:1">${esc(f.zh || '')}</span><span class="imp ${imp > 0 ? 'pos' : imp < 0 ? 'neg' : 'z'}">${imp > 0 ? '+' : ''}${imp}</span></div>`; }).join('');
+}
+
+function normalizeFengShuiData(raw) {
+  if (!raw || typeof raw !== 'object') return raw;
+  const oIn = raw.orientation || {};
+  const round1 = (v, fb = 0) => (typeof v === 'number' && Number.isFinite(v) ? Math.round(v * 10) / 10 : fb);
+  const fMag = oIn.facingMagnetic ?? oIn.facingMag ?? oIn.facingTrue ?? 0;
+  const decl = oIn.declination ?? oIn.declinationDeg ?? 0;
+  const mIn = oIn.mountain && typeof oIn.mountain === 'object' ? oIn.mountain : {};
+  const o = Object.assign({}, oIn, {
+    facingMagnetic: round1(fMag, 0),
+    declination: round1(decl, 0),
+    mountain: Object.assign({
+      palace: oIn.facingMountain?.palace || oIn[_PT.fComp] || 'S',
+      zh: oIn.facingMountain?.zh || '',
+    }, mIn),
+  });
+  const pIn = raw.period || {};
+  const curP = pIn.current ?? pIn.currentPeriod ?? 9;
+  const pRanges = { 1: [1864, 1883], 2: [1884, 1903], 3: [1904, 1923], 4: [1924, 1943], 5: [1944, 1963], 6: [1964, 1983], 7: [1984, 2003], 8: [2004, 2023], 9: [2024, 2043] };
+  const p = Object.assign({}, pIn, {
+    construction: pIn.construction ?? pIn.natalPeriod ?? (pIn.constructionYear ? Math.min(9, Math.max(1, ((Math.floor((pIn.constructionYear - 1864) / 20)) % 9) + 1)) : curP),
+    current: curP,
+    currentRange: Array.isArray(pIn.currentRange) && pIn.currentRange.length >= 2 ? pIn.currentRange : (pRanges[curP] || [2024, 2043]),
+    basis: pIn.basis ?? (pIn.constructionYear ? String(pIn.constructionYear) : ''),
+  });
+  const chIn = raw.charts || {};
+  const ch = Object.assign({}, chIn, {
+    primary: chIn.primary || chIn.currentPeriod || chIn.natal || null,
+  });
+  const scIn = raw.scores || {};
+  const ov = scIn.overall ?? raw.score ?? 0;
+  const sc = Object.assign({}, scIn, {
+    overall: ov,
+    grade: scIn.grade || (ov >= 85 ? 'A' : ov >= 75 ? 'B+' : ov >= 65 ? 'B' : 'C'),
+    form: scIn.form ?? ov,
+    liqi: scIn.liqi ?? ov,
+  });
+  let annual = [];
+  if (Array.isArray(raw.annual)) annual = raw.annual;
+  else if (raw.annual && typeof raw.annual === 'object' && raw.annual.palaces) {
+    annual = [{
+      year: raw.annual.year || new Date().getFullYear(),
+      center: raw.annual.center ?? raw.annual.centerStar ?? raw.annual.palaces.C ?? 1,
+      stars: raw.annual.stars || raw.annual.palaces,
+      palaces: raw.annual.palaces,
+    }];
+  }
+  return Object.assign({}, raw, { orientation: o, period: p, charts: ch, scores: sc, annual });
 }
 
 function renderFengShui() {
-  const fs = D('fengshui');
-  if (!fs || !fs.available) { $('#fengshui').innerHTML = `<div class="eyebrow">传统堪舆实景推演</div><div class="stitle"><h2>堪舆风水</h2></div><div class="empty">暂未获取本宅建筑坐向与堪舆测绘数据。</div>`; return; }
+  const fs = normalizeFengShuiData(D('fengshui'));
+  if (!fs || !fs.available || !fs.charts?.primary) { $('#fengshui').innerHTML = `<div class="eyebrow">传统堪舆实景推演</div><div class="stitle"><h2>堪舆风水</h2></div><div class="empty">暂未获取本宅建筑坐向与堪舆测绘数据。</div>`; return; }
   const o = fs.orientation, p = fs.period, ch = fs.charts, sc = fs.scores, bz = fs.baZhai;
   const charts2 = [ch.primary, ch.alternate].filter(Boolean);
   const fsLayers = [
@@ -10001,7 +10097,7 @@ function renderFengShui() {
   const yrStr = String(p.basis || '').replace(/[^0-9]/g, '');
 
   const qsData = fs.quickScreens || {};
-  const formArr = fs.form || [];
+  const formArr = Array.isArray(fs.form) ? fs.form : [];
   const tJunctionHit = qsData.tJunction != null
     ? (typeof qsData.tJunction === 'object' ? Boolean(qsData.tJunction.hit) : Boolean(qsData.tJunction))
     : formArr.some((x) => x.key === 'lu-chong' || /路冲/.test(x.zh || ''));
@@ -12294,6 +12390,160 @@ function clampOpenEstateDrawer() {
   }
 }
 
+const _CHAT_ANCHOR_ALIASES = {
+  hazards: ['hazards', 'risk', 'qCardRisk'],
+  risk: ['risk', 'hazards', 'qCardRisk'],
+  risks: ['risk', 'hazards', 'qCardRisk'],
+  cost: ['payment', 'qCardCost'],
+  mortgage: ['payment', 'qCardCost'],
+  tax: ['payment', 'qCardCost'],
+  taxes: ['payment', 'qCardCost'],
+  hoa: ['diligence', 'hoaPaywallMount', 'qCardCost'],
+  rent: ['rentResearchCostMount', 'payment', 'qCardCost'],
+  rentresearch: ['rentResearchCostMount', 'payment'],
+  insurance: ['insuranceQuoteStudio', 'diligence', 'payment'],
+  docs: ['inspection', 'inspectionReview', 'history'],
+  disclosures: ['history', 'inspection', 'disclosuresAndInspectionsMount'],
+  permits: ['history', 'inspection', 'county'],
+  title: ['titleLegalRadarPanel', 'history', 'county'],
+  comps: ['comps', 'value', 'qCardPrice'],
+  price: ['value', 'comps', 'qCardPrice'],
+  valuation: ['value', 'comps', 'qCardPrice'],
+  schools: ['schools', 'qCardLiving'],
+  living: ['neighborhood', 'schools', 'qCardLiving'],
+  crime: ['safety', 'qCardLiving'],
+  potential: ['house3d', 'house', 'remodel', 'qCardPotential'],
+  house3d: ['house3d', 'house', 'qCardPotential'],
+  adu: ['remodel', 'house', 'qCardPotential'],
+};
+
+function resolveChatAnchorTarget(rawId) {
+  const clean = String(rawId || '').replace(/^#/, '').trim();
+  if (!/^[A-Za-z][A-Za-z0-9_-]*$/.test(clean)) return null;
+  const direct = document.getElementById(clean);
+  if (direct) return direct;
+  const al = _CHAT_ANCHOR_ALIASES[clean] || _CHAT_ANCHOR_ALIASES[clean.toLowerCase()] || [];
+  for (const cand of al) {
+    const el = document.getElementById(cand);
+    if (el) return el;
+  }
+  return null;
+}
+
+function navigateToChatAnchor(rawId) {
+  const clean = String(rawId || '').replace(/^#/, '').trim();
+  if (!/^[A-Za-z][A-Za-z0-9_-]*$/.test(clean)) return false;
+  const target = resolveChatAnchorTarget(clean);
+  if (!target) return false;
+  const resolvedId = target.id || clean;
+  if (window.OpenEstateWorkspace?.jumpToSection) {
+    try { window.OpenEstateWorkspace.jumpToSection(resolvedId, false); } catch {}
+  }
+  let cur = target;
+  while (cur && cur !== document.body) {
+    if (cur.tagName === 'DETAILS' && !cur.open) cur.open = true;
+    if (cur.classList?.contains('q-card') && !cur.classList.contains('open')) {
+      cur.classList.add('open');
+      cur.querySelector('.q-drawer')?.setAttribute('aria-hidden', 'false');
+    }
+    cur = cur.parentElement;
+  }
+  if (typeof target.scrollIntoView === 'function') {
+    target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
+  target.classList.remove('db-anchor-flash');
+  void target.offsetWidth;
+  target.classList.add('db-anchor-flash');
+  setTimeout(() => target.classList.remove('db-anchor-flash'), 1500);
+  try { history.replaceState(null, '', '#' + encodeURIComponent(resolvedId)); } catch {}
+  return true;
+}
+
+function renderChatMarkdown(rawText) {
+  const src = String(rawText ?? '').replace(/\r\n?/g, '\n').replace(/\u0000/g, '').trim();
+  if (!src) return '';
+  const fmtEmph = (s) => esc(s)
+    .replace(/\*\*([^\n*]+?)\*\*/g, '<strong>$1</strong>')
+    .replace(/(^|[^*])\*([^\n*]+?)\*(?!\*)/g, '$1<em>$2</em>');
+  const fmtInline = (line) => {
+    let segs = [{ t: 'text', v: String(line ?? '') }];
+    const splitBy = (re, fn) => {
+      const next = [];
+      for (const seg of segs) {
+        if (seg.t !== 'text') { next.push(seg); continue; }
+        let last = 0;
+        re.lastIndex = 0;
+        let m;
+        while ((m = re.exec(seg.v)) !== null) {
+          if (m.index > last) next.push({ t: 'text', v: seg.v.slice(last, m.index) });
+          next.push(fn(m));
+          last = m.index + m[0].length;
+        }
+        if (last < seg.v.length) next.push({ t: 'text', v: seg.v.slice(last) });
+      }
+      segs = next;
+    };
+    splitBy(/`([^`\n]+)`/g, (m) => ({ t: 'html', v: `<code>${esc(m[1])}</code>` }));
+    splitBy(/\[([^\]\n]+)\]\(([^)\s]+)\)/g, (m) => {
+      const href = String(m[2] || '').trim();
+      const labelHtml = fmtEmph(m[1]);
+      if (/^#[A-Za-z][A-Za-z0-9_-]*$/.test(href)) {
+        return {
+          t: 'html',
+          v: `<a href="${esc(href)}" class="db-anchor-link" data-db-anchor="${esc(href.slice(1))}">${labelHtml}</a>`,
+        };
+      }
+      if (/^https?:\/\/[^\s<>"']+$/i.test(href)) {
+        return {
+          t: 'html',
+          v: `<a href="${esc(href)}" class="db-ext-link" target="_blank" rel="noopener noreferrer">${labelHtml} ↗</a>`,
+        };
+      }
+      return { t: 'html', v: labelHtml };
+    });
+    return segs.map((seg) => (seg.t === 'html' ? seg.v : fmtEmph(seg.v))).join('');
+  };
+  const out = [];
+  let para = [];
+  let items = [];
+  const flushPara = () => {
+    if (!para.length) return;
+    out.push(`<p class="db-md-p">${para.map(fmtInline).join('<br>')}</p>`);
+    para = [];
+  };
+  const flushList = () => {
+    if (!items.length) return;
+    out.push(`<ul class="db-md-ul">${items.map((it) => `<li>${fmtInline(it)}</li>`).join('')}</ul>`);
+    items = [];
+  };
+  for (const rawLine of src.split('\n')) {
+    const t = rawLine.trim();
+    if (!t) {
+      flushPara();
+      flushList();
+      continue;
+    }
+    const ulMatch = rawLine.match(/^\s*(?:[-•]|\*)\s+(.+)$/);
+    if (ulMatch) {
+      flushPara();
+      items.push(ulMatch[1]);
+      continue;
+    }
+    const hdrMatch = rawLine.match(/^\s*#{1,3}\s+(.+)$/);
+    if (hdrMatch) {
+      flushPara();
+      flushList();
+      out.push(`<div class="db-md-h">${fmtInline(hdrMatch[1])}</div>`);
+      continue;
+    }
+    flushList();
+    para.push(rawLine.trimEnd());
+  }
+  flushPara();
+  flushList();
+  return out.join('');
+}
+
 function renderOpenEstateWidget() {
   const fab = document.getElementById('openEstateFab');
   const dr = document.getElementById('openEstateDrawer');
@@ -12353,7 +12603,7 @@ function renderOpenEstateWidget() {
     <div class="db-dqs" id="chatQs">${starters.map((q) => `<button type="button">${esc(q)}</button>`).join('')}</div>
     <div class="db-dlog" id="chatLog"></div>
     <div class="db-dfoot">
-      <div class="db-dstatus"><span id="chatStatus">${tx('Grounded in verified report records & US housing rules', '严格基于本报告核实档案与房产法规作答', 'Basado en registros verificados y normas inmobiliarias')}</span></div>
+      <div class="db-dstatus"><span id="chatStatus">${tx('Grounded in verified report records & US housing rules · Supports Markdown & #section links', '严格基于本报告核实档案与房产法规作答 · 支持 Markdown 与 #章节锚点跳转', 'Basado en registros verificados · Admite Markdown y enlaces #sección')}</span></div>
       <form class="db-dform" id="chatForm">
         <input id="chatIn" placeholder="${esc(tr3(TKEY('ai.chatPlaceholder'), '提问本房源或任何买房问题…', 'Pregunte sobre esta casa o bienes raíces…'))}" autocomplete="off" />
         <button type="submit" id="chatSend">${esc(tr3(TKEY('ai.askBtn'), '提问', 'Preguntar'))}</button>
@@ -12382,7 +12632,7 @@ function renderOpenEstateWidget() {
     const d = document.createElement('div');
     d.className = 'msg ' + (entry.role === 'user' ? 'u' : 'a');
     const txtSpan = document.createElement('div');
-    txtSpan.textContent = entry.content || '';
+    txtSpan.innerHTML = renderChatMarkdown(entry.content || '');
     d.appendChild(txtSpan);
     if (entry.role === 'assistant' && Array.isArray(entry.citations) && entry.citations.length) {
       const cWrap = document.createElement('div');
@@ -12470,6 +12720,13 @@ function renderOpenEstateWidget() {
   }
 
   _dbSendFn = sendQ;
+  logEl.addEventListener('click', (ev) => {
+    const a = ev.target && ev.target.closest ? ev.target.closest('a.db-anchor-link') : null;
+    if (!a) return;
+    ev.preventDefault();
+    const anchor = a.getAttribute('data-db-anchor') || (a.getAttribute('href') || '').slice(1);
+    navigateToChatAnchor(anchor);
+  });
   dr.querySelector('#chatForm')?.addEventListener('submit', (ev) => { ev.preventDefault(); sendQ(inEl.value); });
   dr.querySelectorAll('#chatQs button').forEach((b) => b.addEventListener('click', () => sendQ(b.textContent)));
   dr.querySelector('#dbMaxBtn')?.addEventListener('click', () => {

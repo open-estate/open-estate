@@ -168,10 +168,7 @@ try {
   await page.setContent(html, { waitUntil: 'domcontentloaded' });
   if (lang && lang !== 'en') {
     await page.evaluate((l) => {
-      document.documentElement.lang = l;
-      if (window.OpenEstateCore && typeof window.OpenEstateCore.setLang === 'function') {
-        window.OpenEstateCore.setLang(l);
-      }
+      document.documentElement.lang = l === 'zh' ? 'zh-CN' : l;
     }, lang);
   }
 
@@ -274,7 +271,8 @@ try {
   // Verify live OS color-scheme change reactivity (`AGENTS.md`).
   const flippedScheme = theme === 'dark' ? 'light' : 'dark';
   await page.emulateMedia({ colorScheme: flippedScheme });
-  const liveThemeAfterFlip = await page.evaluate(() => {
+  const liveThemeAfterFlip = await page.evaluate(async () => {
+    await new Promise((r) => requestAnimationFrame(() => setTimeout(r, 20)));
     const M = window.OpenEstateMotion;
     const modalEl = document.getElementById('motionReelModal');
     const wtEl = document.getElementById('walkthroughModal');

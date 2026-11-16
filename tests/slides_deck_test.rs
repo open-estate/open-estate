@@ -3,21 +3,18 @@ mod common;
 use axum::{
     body::Body,
     http::{Request, StatusCode},
-    routing::post,
-    Router,
 };
 use open_estate::ai::slides::{
     build_deterministic_walkthrough_slides, ensure_walkthrough_slides_on_report,
     generate_llm_walkthrough_slides, generate_llm_walkthrough_slides_with_client,
     generate_slides_for_report_json, generate_slides_for_report_json_with_client,
-    handle_report_slides_post, scrub_walkthrough_deck_value, walkthrough_slides_schema,
-    WALKTHROUGH_SLIDE_IDS,
+    scrub_walkthrough_deck_value, walkthrough_slides_schema, WALKTHROUGH_SLIDE_IDS,
 };
 use open_estate::db::DbStore;
 use open_estate::guardrails::HttpDefenseShield;
 use open_estate::shared::{EnvConfig, HttpClient};
 use open_estate::web::render::render_report_html;
-use open_estate::web::server::AppState;
+use open_estate::web::server::{build_router, AppState};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -525,9 +522,7 @@ async fn test_axum_post_report_slides_route_persists_and_guards() {
         tmp_dir.clone(),
         None,
     );
-    let app = Router::new()
-        .route("/api/report/:slug/slides", post(handle_report_slides_post))
-        .with_state(state);
+    let app = build_router(state);
 
     let req = Request::builder()
         .method("POST")

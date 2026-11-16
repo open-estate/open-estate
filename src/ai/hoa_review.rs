@@ -1762,7 +1762,8 @@ pub async fn analyze_hoa_documents(
         data: parsed,
         sources: vec![SourceItem::new(
             format!(
-                "Open Estate HOA Reserve, Governance & Warrantability Analyzer over {}",
+                "{} HOA Reserve, Governance & Warrantability Analyzer over {}",
+                env.brand_name(),
                 file_names.join(", ")
             ),
             "https://singlefamily.fanniemae.com/originating-underwriting/condo-co-op-and-pud-eligibility",

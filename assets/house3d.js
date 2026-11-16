@@ -2811,7 +2811,8 @@
     links.forEach(function (t) {
       html += '<div class="h3d-src"><a href="' + escH(t.openUrl) + '" target="_blank" rel="noopener noreferrer">' + T('Open the listing’s virtual tour ↗', '打开房源虚拟看房 ↗', 'Abrir el recorrido virtual del anuncio ↗') + '</a></div>';
     });
-    var bn3d = (typeof R !== 'undefined' && R && R.brand && R.brand.name) ? String(R.brand.name) : 'Open Estate';
+    var wb3d = (typeof window !== 'undefined' && window.__OPEN_ESTATE_BRAND__) || {};
+    var bn3d = (wb3d.name && String(wb3d.name).trim()) || (typeof R !== 'undefined' && R && R.brand && R.brand.name && String(R.brand.name).trim()) || 'Open Estate';
     html += '<div class="h3d-paste"><input type="url" id="h3dTourUrl" inputmode="url" autocomplete="off" spellcheck="false" placeholder="' + escH(P('Paste a 3D tour link (Matterport, iGUIDE, YouTube…)', '粘贴三维漫游链接（Matterport、iGUIDE、YouTube…）', 'Pegue un enlace de recorrido 3D (Matterport, iGUIDE, YouTube…)')) + '">' +
       '<button type="button" data-act="touradd">' + T('Show tour', '显示漫游', 'Mostrar recorrido') + '</button>' +
       (addr ? '<a class="h3d-src" style="align-self:center;margin:0" href="https://www.google.com/search?q=' + q + '%203D%20tour" target="_blank" rel="noopener noreferrer">' + T('Search for this home’s tour ↗', '搜索此房的三维漫游 ↗', 'Buscar el recorrido de esta casa ↗') + '</a>' : '') + '</div>' +
@@ -2846,7 +2847,8 @@
     if (act === 'touradd') {
       var inp = $('#h3dTourUrl'), raw = inp ? String(inp.value || '').trim() : '', parsed = H3.parseTourUrl(raw);
       if (!raw) return;
-      var bn3d2 = (typeof R !== 'undefined' && R && R.brand && R.brand.name) ? String(R.brand.name) : 'Open Estate';
+      var wb3d2 = (typeof window !== 'undefined' && window.__OPEN_ESTATE_BRAND__) || {};
+      var bn3d2 = (wb3d2.name && String(wb3d2.name).trim()) || (typeof R !== 'undefined' && R && R.brand && R.brand.name && String(R.brand.name).trim()) || 'Open Estate';
       if (!parsed) { renderTour(T('That link is not from a tour service ' + bn3d2 + ' can embed. Supported: Matterport, iGUIDE, Kuula, CloudPano, RICOH360, Giraffe360, Cupix, YouTube and Vimeo.', '该链接不属于可嵌入的漫游服务。支持：Matterport、iGUIDE、Kuula、CloudPano、RICOH360、Giraffe360、Cupix、YouTube 与 Vimeo。', 'Ese enlace no es de un servicio de recorridos que se pueda incrustar. Compatibles: Matterport, iGUIDE, Kuula, CloudPano, RICOH360, Giraffe360, Cupix, YouTube y Vimeo.')); return; }
       saveTour(parsed.openUrl);
       collectTours();

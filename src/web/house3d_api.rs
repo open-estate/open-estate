@@ -16,7 +16,7 @@
 //! [`spawn_scene_warmup`] as soon as the report is saved, so the 3D section normally opens from
 //! cache on the very first view.
 
-use crate::db::DbStore;
+use crate::db::{DbBackend, DbStore};
 use crate::guardrails::{apply_security_headers, validate_slug_param};
 use crate::modules::house3d::{
     build_house3d_with_budget, input_fingerprint, pack_json, scene_input_from_report, unpack_json, SceneInput,
@@ -78,12 +78,42 @@ fn cache_key(slug: &str, fingerprint: &str) -> String {
     format!("house3d:v{SCENE_VERSION}:{slug}:{fingerprint}")
 }
 
+fn db_cache_scope(db: &DbStore, data_dir: Option<&std::path::Path>) -> String {
+    match &db.backend {
+        DbBackend::Sqlite(pool) => {
+            let file = pool
+                .connect_options()
+                .get_filename()
+                .to_string_lossy()
+                .into_owned();
+            if file == ":memory:" || file.is_empty() {
+                let dir_scope = data_dir
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| format!("{db:p}"));
+                format!("sqlite:mem:{dir_scope}")
+            } else {
+                format!("sqlite:{file}")
+            }
+        }
+        DbBackend::MySql { .. } => format!("mysql:{}", db.provider),
+    }
+}
+
+fn hot_cache_key(deps: &SceneDeps, db_key: &str) -> String {
+    format!(
+        "{}|{}",
+        db_cache_scope(&deps.db, deps.data_dir.as_deref()),
+        db_key
+    )
+}
+
 /// Starts — or joins — the detached build of one home's scene. The task survives the request
 /// that started it, so a download that outlives the request's wait still reaches the cache.
 fn start_build(deps: SceneDeps, key: String, input: SceneInput, built_now: Arc<AtomicBool>) -> tokio::task::JoinHandle<anyhow::Result<Arc<Value>>> {
+    let hot_key = hot_cache_key(&deps, &key);
     tokio::spawn(async move {
-        let key_for_build = key.clone();
-        HOT.try_get_with(key, async move {
+        let key_for_build = key;
+        HOT.try_get_with(hot_key, async move {
             if let Ok(Some(hit)) = deps.db.get_llm_cache(&key_for_build).await {
                 if let Some(body) = unpack_json(&hit) {
                     return Ok::<Arc<Value>, anyhow::Error>(Arc::new(body));

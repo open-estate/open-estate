@@ -20,31 +20,34 @@ pub mod repair_addendum;
 // [/feat/hoa-packet-ai]
 
 pub use agent_harness::{
-    build_agent_messages, build_agent_system_instructions, build_deterministic_qa_response,
+    build_agent_messages, build_agent_system_instructions,
+    build_agent_system_instructions_with_config, build_deterministic_qa_response,
     build_housing_concept_tie_in, compact_housing_history, execute_housing_tool,
-    housing_agent_step_schema, match_housing_concept_id, run_housing_agent_loop, CompactedHistory,
-    ConceptTieIn, HousingSkillTool, UploadedDocContext, IMMUTABLE_HOUSING_AGENT_CONSTITUTION,
-    MAX_COMPACTED_CHARS, MAX_TOOL_STEPS,
+    housing_agent_step_schema, match_housing_concept_id, run_housing_agent_loop,
+    run_housing_agent_loop_with_prompt, CompactedHistory, ConceptTieIn, HousingSkillTool,
+    UploadedDocContext, IMMUTABLE_HOUSING_AGENT_CONSTITUTION, MAX_COMPACTED_CHARS, MAX_TOOL_STEPS,
 };
 pub use analyst::{
     analysis_schema, build_deterministic_analyst_fallback, derive_neighborhood_scope,
     get_cached_neighborhood_narrative, put_neighborhood_narrative, run_ai_analyst,
-    run_ai_analyst_with_refresh, run_ai_analyst_with_store, sanitize_fair_housing,
-    validate_analyst_data, NeighborhoodNarrativeScope, NEIGHBORHOOD_NARRATIVE_TTL_SECS,
+    run_ai_analyst_with_prompt, run_ai_analyst_with_refresh, run_ai_analyst_with_store,
+    sanitize_fair_housing, validate_analyst_data, NeighborhoodNarrativeScope, ANALYST_INSTRUCTIONS,
+    NEIGHBORHOOD_NARRATIVE_TTL_SECS,
 };
 pub use artifact_canvas::{
     artifact_canvas_schema, build_deterministic_artifact, generate_llm_artifact_with_client,
-    handle_report_artifact_post, scrub_artifact_value,
+    generate_llm_artifact_with_prompt, handle_report_artifact_post, scrub_artifact_value,
+    DEFAULT_ARTIFACT_INSTRUCTIONS,
 };
-pub use ask::{ask_property_question, ask_schema};
-pub use slides::{
-    build_deterministic_walkthrough_slides, ensure_walkthrough_slides_on_report,
-    generate_llm_walkthrough_slides, generate_llm_walkthrough_slides_with_client,
-    generate_slides_for_report_json, handle_report_slides_post, scrub_walkthrough_deck_value,
-    walkthrough_slides_schema, WALKTHROUGH_SLIDE_IDS,
+pub use ask::{
+    ask_property_question, ask_property_question_with_config, ask_schema, AskPromptConfig,
+    ASK_INSTRUCTIONS, DEFAULT_CHATBOX_MAX_WORDS, DEFAULT_CHATBOX_STYLE_PROMPT,
 };
 pub use brief::{build_brief, build_brief_with_limit, BRIEF_VERSION, DEFAULT_MAX_BRIEF_BYTES};
-pub use inspect::{analyze_inspection, inspection_schema, SYSTEMS};
+pub use inspect::{
+    analyze_inspection, analyze_inspection_with_prompt, inspection_schema, INSPECTION_INSTRUCTIONS,
+    SYSTEMS,
+};
 pub use llm::{
     compute_llm_cache_key, global_llm_cache, parse_json_loose, parse_model_spec,
     resolve_interactive_model_specs, resolve_llm_spec_for_call,
@@ -60,6 +63,13 @@ pub use pdf::{
     extract_pdf_pages_from_bytes, normalize_and_validate_uploads, ocr_pdf_via_llm_responses,
     ExtractedDocument, ExtractedPdfImage, NormalizedUploadBatch, OcrConfig, PageExtract,
     PdfImageFormat, UploadedDocInput,
+};
+pub use slides::{
+    build_deterministic_walkthrough_slides, ensure_walkthrough_slides_on_report,
+    generate_llm_walkthrough_slides, generate_llm_walkthrough_slides_with_client,
+    generate_llm_walkthrough_slides_with_prompt, generate_slides_for_report_json,
+    handle_report_slides_post, scrub_walkthrough_deck_value, walkthrough_slides_schema,
+    SLIDES_INSTRUCTIONS, WALKTHROUGH_SLIDE_IDS,
 };
 pub use title_review::{
     ai_title_schema, analyze_title_report, mask_title_pii, parse_title_report_text,

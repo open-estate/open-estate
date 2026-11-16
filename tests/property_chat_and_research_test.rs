@@ -24,7 +24,9 @@ use open_estate::{
     },
     db::DbStore,
     guardrails::{validate_buyer_question, validate_buyer_question_with_context},
-    modules::buyer_diligence::run_buyer_diligence_and_hoa,
+    modules::buyer_diligence::{
+        build_buyer_diligence_and_hoa_deterministic, run_buyer_diligence_and_hoa,
+    },
     property::{
         attach_data_point_anchor, is_public_routable_ip, merge_open_data_permits_into_report,
         run_deep_property_research, validate_ssrf_safe_public_url,
@@ -641,27 +643,45 @@ async fn test_4_hoa_funding_board_form_990_and_master_insurance_matrix() {
         "Form 990 sourceUrl must carry W3C Scroll-to-Text deep anchor: {filing_url}"
     );
 
-    // Verify HOA Master Insurance breakdown & 8-row coverage matrix
+    // Verify HOA Master Insurance honesty (zero fabrication when undisclosed) & 8-row coverage matrix
     let mi = bundle
         .hoa_profile
         .get("masterInsurance")
         .expect("masterInsurance object");
-    assert!(
-        mi.pointer("/estimatedMasterInsuranceCost/annualPerUnitUSD")
-            .and_then(Value::as_i64)
-            .unwrap_or(0)
-            > 0
+    assert_eq!(
+        mi.pointer("/estimatedMasterInsuranceCost/disclosed"),
+        Some(&json!(false)),
+        "undisclosed HOA master insurance must set disclosed=false"
     );
-    assert!(
-        mi.pointer("/estimatedMasterInsuranceCost/monthlyShareOfDuesUSD")
-            .and_then(Value::as_f64)
-            .unwrap_or(0.0)
-            > 0.0
+    assert_eq!(
+        mi.pointer("/estimatedMasterInsuranceCost/annualPerUnitUSD"),
+        Some(&Value::Null)
+    );
+    assert_eq!(
+        mi.pointer("/estimatedMasterInsuranceCost/monthlyShareOfDuesUSD"),
+        Some(&Value::Null)
     );
     assert_eq!(
         mi["policyFormGuide"].as_array().map(|a| a.len()),
         Some(4),
         "must document all 4 standard HOA master policy forms"
+    );
+
+    let mut disclosed_condo = report.clone();
+    disclosed_condo["facts"]["hoa"]["masterInsuranceAnnualPerUnit"] = json!(1800);
+    let disclosed_bundle = build_buyer_diligence_and_hoa_deterministic(&disclosed_condo);
+    let disclosed_mi = &disclosed_bundle.hoa_profile["masterInsurance"];
+    assert_eq!(
+        disclosed_mi.pointer("/estimatedMasterInsuranceCost/disclosed"),
+        Some(&json!(true))
+    );
+    assert_eq!(
+        disclosed_mi.pointer("/estimatedMasterInsuranceCost/annualPerUnitUSD"),
+        Some(&json!(1800))
+    );
+    assert_eq!(
+        disclosed_mi.pointer("/estimatedMasterInsuranceCost/monthlyShareOfDuesUSD"),
+        Some(&json!(150.0))
     );
     assert_eq!(
         mi["coverageMatrix"].as_array().map(|a| a.len()),

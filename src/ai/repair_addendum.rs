@@ -1193,11 +1193,22 @@ pub async fn generate_repair_addendum(
         obj.insert("ms".to_string(), json!(t0.elapsed().as_millis() as u64));
     }
 
+    let addendum_src_url = {
+        let dom = env.brand_domain();
+        if dom == "open-estate.local" {
+            "https://openestate.org/repair-addendum".to_string()
+        } else {
+            format!("https://{dom}/repair-addendum")
+        }
+    };
     Ok(ModuleOutput {
         data,
         sources: vec![SourceItem::new(
-            "Open Estate Repair & Seller Credit Addendum Generator",
-            "https://openestate.org/repair-addendum",
+            format!(
+                "{} Repair & Seller Credit Addendum Generator",
+                env.brand_name()
+            ),
+            addendum_src_url,
         )],
         warnings,
     })

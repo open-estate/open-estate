@@ -5,7 +5,16 @@ pub mod lazy_store;
 pub mod metering_store;
 pub mod migrate;
 pub mod schema;
+pub mod settings_store;
 pub mod shared_cache_store;
+
+pub use settings_store::{
+    is_allowed_admin_setting_key, validate_admin_setting_value, AdminSettingRow, AdminSettingView,
+    AiPromptSettings, DEFAULT_CHATBOX_MAX_WORDS, MAX_CHATBOX_MAX_WORDS, MAX_PROMPT_SETTING_CHARS,
+    MIN_CHATBOX_MAX_WORDS, SETTING_ANALYST_SYSTEM_PROMPT, SETTING_ARTIFACT_SYSTEM_PROMPT,
+    SETTING_CHATBOX_MAX_WORDS, SETTING_CHATBOX_SYSTEM_PROMPT, SETTING_INSPECT_SYSTEM_PROMPT,
+    SETTING_SLIDES_SYSTEM_PROMPT,
+};
 
 pub use lazy_store::{
     compute_exponential_backoff_secs, deterministic_section_sub_event_key, LazyExtensionJobRow,

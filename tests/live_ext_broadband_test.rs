@@ -456,8 +456,11 @@ async fn live_public_us_cable_wireless_isp_seattle_second_geography() {
     assert!(fetch.ok);
     assert!(fetch.envelope_count >= 2);
     let serialized = serde_json::to_string(&fetch.canonical_json).unwrap();
-    assert!(serialized.contains("Xfinity") && serialized.contains("Starlink Residential"));
-    assert!(!serialized.contains("Xfinity (Comcast)"));
+    assert!(
+        serialized.contains("Xfinity (Comcast)") && serialized.contains("Starlink Residential")
+    );
+    // Seattle (WA) matches `xfinity_east_pnw` (1200 Mbps), distinct from `xfinity_norcal` (2000 Mbps).
+    assert!(serialized.contains("1200") && !serialized.contains("2000"));
 }
 
 #[tokio::test]

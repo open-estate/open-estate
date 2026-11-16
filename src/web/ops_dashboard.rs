@@ -5,7 +5,10 @@
 
 use crate::db::{DbBackend, DbStore};
 use crate::guardrails::{apply_security_headers, constant_time_eq};
-use crate::shared::{normalize_retired_brand, now_iso, now_unix_secs, round_n, EnvConfig};
+use crate::shared::{
+    effective_brand_name, format_brand_wordmark_html, normalize_retired_brand, now_iso,
+    now_unix_secs, round_n, EnvConfig,
+};
 use crate::web::favicon::{logo_mark_img, FAVICON_HEAD_TAGS};
 use crate::web::render::safe_inline_json;
 use crate::web::server::{resolve_client_ip_from_req, AppState};
@@ -1761,7 +1764,8 @@ fn render_ssr_routes(snapshot: &Value) -> String {
     out
 }
 
-fn render_ssr_recent_reports(snapshot: &Value) -> String {
+fn render_ssr_recent_reports(snapshot: &Value, brand_name: &str) -> String {
+    let eff_brand = encode_text(effective_brand_name(brand_name));
     let Some(items) = snapshot
         .pointer("/inventory/recentReports")
         .and_then(Value::as_array)
@@ -1769,7 +1773,9 @@ fn render_ssr_recent_reports(snapshot: &Value) -> String {
         return String::new();
     };
     if items.is_empty() {
-        return r#"<tr><td colspan="6" style="text-align:center;color:#64748b;padding:18px">No cached reports yet. Search an address on Open Estate to populate reports.</td></tr>"#.to_string();
+        return format!(
+            r#"<tr><td colspan="6" style="text-align:center;color:#64748b;padding:18px">No cached reports yet. Search an address on {eff_brand} to populate reports.</td></tr>"#
+        );
     }
     let mut out = String::new();
     for r in items {
@@ -1820,14 +1826,19 @@ fn render_ssr_recent_reports(snapshot: &Value) -> String {
 }
 
 pub fn render_ops_dashboard_html(snapshot: &Value, brand_name: &str) -> String {
-    let safe_brand = encode_text(brand_name);
+    let eff_brand = effective_brand_name(brand_name);
+    let safe_brand = encode_text(eff_brand);
+    let brand_wordmark = format_brand_wordmark_html(eff_brand);
+    let brand_js = safe_inline_json(
+        &serde_json::to_string(eff_brand).unwrap_or_else(|_| "\"Open Estate\"".into()),
+    );
     let initial_json =
         safe_inline_json(&serde_json::to_string(snapshot).unwrap_or_else(|_| "{}".into()));
     let logo_svg = logo_mark_img(32);
     let favicon_tags = FAVICON_HEAD_TAGS.as_str();
     let ssr_connectors = render_ssr_connectors(snapshot);
     let ssr_routes = render_ssr_routes(snapshot);
-    let ssr_reports = render_ssr_recent_reports(snapshot);
+    let ssr_reports = render_ssr_recent_reports(snapshot, eff_brand);
 
     let db_connected = snapshot
         .pointer("/database/connected")
@@ -2098,12 +2109,12 @@ table.ops-tbl tr:hover td{{background:#f8fafc}}
   <div class="cmd-inner">
     <div class="cmd-top">
       <div class="brand-group">
-        <a class="logo-link" href="/">{logo_svg}<span>Open <b>Estate</b></span></a>
+        <a class="logo-link" href="/">{logo_svg}<span>{brand_wordmark}</span></a>
         <span class="ops-tag" data-i18n="opsTag">OPS TELEMETRY</span>
         <span id="healthBadge" class="status-led {status_class}"><span class="led-dot"></span><span id="healthBadgeText">{status_label}</span></span>
       </div>
       <div class="cmd-actions">
-        <a class="cmd-btn" href="/" data-i18n="backHome">← Back to Open Estate</a>
+        <a class="cmd-btn" href="/" data-i18n="backHome">← Back to {safe_brand}</a>
         <a class="cmd-btn" href="/deal-room" data-i18n="dealRoom">Deal Room</a>
         <a class="cmd-btn" href="/admin">Admin Console</a>
         <button type="button" id="autoRefreshBtn" class="cmd-btn active" aria-pressed="true">
@@ -2311,7 +2322,7 @@ table.ops-tbl tr:hover td{{background:#f8fafc}}
   </section>
 
   <footer class="foot-note">
-    <span data-i18n="footerNote">Open Estate Platform Telemetry — Zero PII, zero credential exposure, live SQLite/MySQL observability.</span>
+    <span data-i18n="footerNote">{safe_brand} Platform Telemetry — Zero PII, zero credential exposure, live SQLite/MySQL observability.</span>
     <span class="mono">GET /api/ops/telemetry</span>
   </footer>
 </main>
@@ -2321,10 +2332,11 @@ table.ops-tbl tr:hover td{{background:#f8fafc}}
 'use strict';
 (function () {{
   const LANG_COOKIE = 'open_estate_lang';
+  const BRAND_NAME = {brand_js};
   const I18N = {{
     en: {{
       opsTag: 'OPS TELEMETRY',
-      backHome: '← Back to Open Estate',
+      backHome: '← Back to ' + BRAND_NAME,
       dealRoom: 'Deal Room',
       autoOn: 'Auto-Refresh (5s)',
       autoOff: 'Auto-Refresh: Paused',
@@ -2371,7 +2383,7 @@ table.ops-tbl tr:hover td{{background:#f8fafc}}
       openReport: 'Open Report ↗',
       openCmd: '⚡ Buyer Command Center ↗',
       noEvents: 'No requests recorded yet — traffic will appear here automatically.',
-      noReports: 'No cached reports yet. Search an address on Open Estate to populate reports.',
+      noReports: 'No cached reports yet. Search an address on ' + BRAND_NAME + ' to populate reports.',
       ready: 'Ready',
       standby: 'Standby',
       cleanRoom: 'Clean-Room',
@@ -2396,11 +2408,11 @@ table.ops-tbl tr:hover td{{background:#f8fafc}}
       invDealRooms: 'Deal Rooms',
       invSubs: 'Subscriptions',
       invDocReviews: 'Doc Reviews',
-      footerNote: 'Open Estate Platform Telemetry — Zero PII, zero credential exposure, live SQLite/MySQL observability.'
+      footerNote: BRAND_NAME + ' Platform Telemetry — Zero PII, zero credential exposure, live SQLite/MySQL observability.'
     }},
     zh: {{
       opsTag: '运维监控面板',
-      backHome: '← 返回 Open Estate',
+      backHome: '← 返回 ' + BRAND_NAME,
       dealRoom: '交易对比室',
       autoOn: '自动刷新 (5秒)',
       autoOff: '自动刷新: 已暂停',
@@ -2472,11 +2484,11 @@ table.ops-tbl tr:hover td{{background:#f8fafc}}
       invDealRooms: '交易对比室',
       invSubs: '活跃订阅',
       invDocReviews: '文档审阅',
-      footerNote: 'Open Estate 平台运维遥测 — 零个人隐私、零密钥泄露、实时 SQLite/MySQL 监控。'
+      footerNote: BRAND_NAME + ' 平台运维遥测 — 零个人隐私、零密钥泄露、实时 SQLite/MySQL 监控。'
     }},
     es: {{
       opsTag: 'TELEMETRÍA OPS',
-      backHome: '← Volver a Open Estate',
+      backHome: '← Volver a ' + BRAND_NAME,
       dealRoom: 'Sala de Comparación',
       autoOn: 'Auto-Refresco (5s)',
       autoOff: 'Auto-Refresco: Pausado',
@@ -2523,7 +2535,7 @@ table.ops-tbl tr:hover td{{background:#f8fafc}}
       openReport: 'Abrir Informe ↗',
       openCmd: '⚡ Centro de Mando ↗',
       noEvents: 'Sin solicitudes registradas aún — el tráfico aparecerá aquí.',
-      noReports: 'Aún no hay informes en caché. Busca una dirección en Open Estate.',
+      noReports: 'Aún no hay informes en caché. Busca una dirección en ' + BRAND_NAME + '.',
       ready: 'Activo',
       standby: 'En espera',
       cleanRoom: 'Sala Limpia',
@@ -2548,7 +2560,7 @@ table.ops-tbl tr:hover td{{background:#f8fafc}}
       invDealRooms: 'Salas Deal',
       invSubs: 'Suscripciones',
       invDocReviews: 'Reseñas Doc.',
-      footerNote: 'Telemetría Open Estate — Cero PII, cero credenciales expuestas, observabilidad en vivo.'
+      footerNote: 'Telemetría ' + BRAND_NAME + ' — Cero PII, cero credenciales expuestas, observabilidad en vivo.'
     }}
   }};
 

@@ -20,9 +20,10 @@
 
   function brandInfo() {
     var r = (typeof R !== 'undefined' && R) || (typeof window !== 'undefined' && window.__OPEN_ESTATE_REPORT__) || null;
-    var b = (r && r.brand) || (typeof window !== 'undefined' && window.__OPEN_ESTATE_BRAND__) || {};
-    var name = (b.name && String(b.name).trim()) || 'Open Estate';
-    var domain = (b.domain && String(b.domain).trim()) || 'open-estate.local';
+    var wb = (typeof window !== 'undefined' && window.__OPEN_ESTATE_BRAND__) || {};
+    var rb = (r && r.brand) || {};
+    var name = (wb.name && String(wb.name).trim()) || (rb.name && String(rb.name).trim()) || 'Open Estate';
+    var domain = (wb.domain && String(wb.domain).trim()) || (rb.domain && String(rb.domain).trim()) || 'open-estate.local';
     var parts = name.replace(/([a-z])([A-Z])/g, '$1 $2').split(/[\s_-]+/).filter(Boolean);
     var monogram = parts.length >= 2
       ? (parts[0][0] + parts[1][0]).toUpperCase()
@@ -210,6 +211,15 @@
   }
   function langCode() {
     if (state.langOverride) return state.langOverride;
+    if (Core && typeof Core.langCode === 'function') {
+      var cl = Core.langCode();
+      if (cl !== 'en') return cl;
+    }
+    try { if (typeof LANG === 'string' && LANG && normLang(LANG) !== 'en') return normLang(LANG); } catch (e) {}
+    if (document.documentElement && document.documentElement.lang) {
+      var dl = normLang(document.documentElement.lang);
+      if (dl !== 'en') return dl;
+    }
     if (Core && typeof Core.langCode === 'function') return Core.langCode();
     try { if (typeof LANG === 'string' && LANG) return normLang(LANG); } catch (e) {}
     return normLang(document.documentElement && document.documentElement.lang);
@@ -621,7 +631,11 @@
 
     // Verdict + what to verify (the deck's watch-outs, localized).
     var verdictText = l === 'en' ? clean(summ.verdict || '') : clean((tr && tr.verdict) || slideField(slideOf(slides, 'verdict'), 'title', true) || summ.verdict || '');
-    var wo = function (kind) { return brief(slideField(slideOf(slides, kind), 'watchout', true)); };
+    var hasSubjectData = isN(facts.beds) || isN(facts.baths) || isN(facts.sqft) || isN(facts.yearBuilt) || isN(facts.lotSqft) ||
+      isN(areas.house) || isN(areas.lotRecord) || isN(areas.lotOutline) || Boolean(value) || Boolean(cost) ||
+      hazards.length > 0 || living.length > 0 || pois.length > 0 || Boolean(verdictText) ||
+      Boolean(rep.ai && Array.isArray(rep.ai.verify) && rep.ai.verify.length);
+    var wo = function (kind) { return hasSubjectData ? brief(slideField(slideOf(slides, kind), 'watchout', true)) : ''; };
     var watch = {
       lot: wo('property_lot') || wo('remodel_upside'),
       value: wo('zestimate_comps'),
@@ -632,10 +646,12 @@
     // The checklist on screen has room for two lines per item; captions get the short form.
     var checksFull = [];
     var fullMax = function (t) { return isCjk(t) ? 60 : 140; };
-    ['property_lot', 'cost_insurance', 'risk_climate', 'action_plan', 'remodel_upside', 'zestimate_comps'].forEach(function (k) {
-      var w = stripEnd(slideField(slideOf(slides, k), 'watchout', true));
-      if (w && checksFull.length < 3 && checksFull.indexOf(shorten(w, fullMax(w))) < 0) checksFull.push(shorten(w, fullMax(w)));
-    });
+    if (hasSubjectData) {
+      ['property_lot', 'cost_insurance', 'risk_climate', 'action_plan', 'remodel_upside', 'zestimate_comps'].forEach(function (k) {
+        var w = stripEnd(slideField(slideOf(slides, k), 'watchout', true));
+        if (w && checksFull.length < 3 && checksFull.indexOf(shorten(w, fullMax(w))) < 0) checksFull.push(shorten(w, fullMax(w)));
+      });
+    }
     if (!checksFull.length) {
       var fallback = (tr && Array.isArray(tr.verify) && tr.verify) || (rep.ai && Array.isArray(rep.ai.verify) && rep.ai.verify) || (summ.findings && Array.isArray(summ.findings.watch) && summ.findings.watch) || [];
       fallback.slice(0, 3).forEach(function (x) { var t = stripEnd(typeof x === 'string' ? x : (x.text || '')); if (t) checksFull.push(shorten(t, fullMax(t))); });
@@ -797,9 +813,9 @@
   var KINGCO_TILE_TMPL = 'https://gismaps.kingcounty.gov/arcgis/rest/services/BaseMaps/KingCo_Aerial_2023/MapServer/tile/{z}/{y}/{x}';
   var KINGCO_EXPORT = 'https://gismaps.kingcounty.gov/arcgis/rest/services/BaseMaps/KingCo_Aerial_2023/MapServer/export';
   var USGS_ATTR = 'Imagery © USGS The National Map / USDA NAIP (public domain)';
-  /** Default USGS cached tile ceiling; resolved high-res sources raise `zMax` up to 20. */
+  /** Default USGS cached tile ceiling; resolved high-res sources raise `zMax` up to 19. */
   var Z_MAX = 16;
-  var HIGH_RES_TILE_CEIL = 20;
+  var HIGH_RES_TILE_CEIL = 19;
   var AERIAL_EXPORT = 'https://basemap.nationalmap.gov/arcgis/rest/services/USGSImageryOnly/MapServer/export';
   var DETAIL_HALF_M = 80, DETAIL_PX = 1600;
 
@@ -2388,7 +2404,7 @@
   }
   function reportUrl(d) {
     var bi = brandInfo();
-    var host = bi.domain || 'open-estate.local';
+    var host = bi.domain;
     try {
       var h = typeof location !== 'undefined' && location.host ? String(location.host) : '';
       if (h && !/^(localhost|127\.0\.0\.1)(:|$)/i.test(h)) host = h.replace(/^www\./i, '');
@@ -2982,7 +2998,10 @@
       injectEntryButtons();
     };
     if (typeof window.setLang === 'function') {
-      Promise.resolve(window.setLang(norm)).then(finish, finish);
+      Promise.resolve().then(function () { return window.setLang(norm); }).then(finish, function () {
+        if (document.documentElement) document.documentElement.lang = norm === 'zh' ? 'zh-CN' : norm;
+        finish();
+      });
     } else {
       if (document.documentElement) document.documentElement.lang = norm === 'zh' ? 'zh-CN' : norm;
       finish();
@@ -3182,6 +3201,7 @@
       window.__DB_MOTION_THEME__ = true;
       try {
         var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        window.__DB_MOTION_MQ__ = mq;
         var onTheme = function () { if (!state.themeOverride) syncTheme(); };
         if (mq && typeof mq.addEventListener === 'function') mq.addEventListener('change', onTheme);
         else if (mq && typeof mq.addListener === 'function') mq.addListener(onTheme);

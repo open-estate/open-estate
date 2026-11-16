@@ -60,7 +60,7 @@ const SCC_SANITATION_BASE_URL: &str =
     "https://geo.sanjoseca.gov/server/rest/services/REF/REF_CountyReferenceLayers/MapServer";
 const WVCR_SINGLE_FAMILY_URL: &str = "https://westvalleyrecycles.com/single-family/";
 const WVCR_DEFAULT_PDF_URL: &str = "https://westvalleyrecycles.com/wp-content/uploads/2026/05/Single-Family-Rate-Sheet_2026-27.pdf";
-const WVSD_DOC_URL: &str = "https://www.wvsdca.gov/DocumentCenter/View/1217";
+const WVSD_DOC_URL: &str = "https://www.wvsdca.gov/177/Whats-that-on-your-property-tax-bill";
 const WVSD_SERVICE_URL: &str = "https://www.wvsdca.gov/161/District-Service-Area";
 const OPENEI_URDB_URL: &str = "https://api.openei.org/utility_rates";
 const EIA_ELEC_RETAIL_URL: &str = "https://api.eia.gov/v2/electricity/retail-sales/data/";
@@ -1510,19 +1510,33 @@ fn fetch_cached_wvsd_rate_with_db<'a>(
                 return Some(mo);
             }
         }
-        let pb = boxed_get_bytes(http, WVSD_DOC_URL, 4500, 4000, 0, Some(3 * 1024 * 1024)).await?;
-        let text = pdf_extract::extract_text_from_mem(&pb).ok()?;
-        static WVSD_AMT_RE: Lazy<Regex> =
-            Lazy::new(|| Regex::new(r"\$\s*(\d{3,4}(?:,\d{3})?\.\d{2})").unwrap());
-        let clean =
-            collapse_pdf_number_spaces(&text.split_whitespace().collect::<Vec<_>>().join(" "));
-        // Extract SFD/townhouse annual sanitary sewer charge (~$450-$1,200/yr)
+        let html = boxed_get_text(http, WVSD_DOC_URL, 4500, 4000, 0, 12 * 3600).await?;
+        static HTML_TAG_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"<[^>]+>").unwrap());
+        static WVSD_SFR_PAIR_RE: Lazy<Regex> = Lazy::new(|| {
+            Regex::new(
+                r"(?i)Single\s+Family\s+Residence\s*\$\s*(\d{2,4}(?:,\d{3})?\.\d{2})(?:\s*\$\s*(\d{3,4}(?:,\d{3})?\.\d{2}))?",
+            )
+            .unwrap()
+        });
+        let stripped = HTML_TAG_RE.replace_all(&html, " ");
+        let clean = stripped.split_whitespace().collect::<Vec<_>>().join(" ");
         let mut found_mo = None;
-        for cap in WVSD_AMT_RE.captures_iter(&clean) {
-            let num = cap[1].replace(',', "").parse::<f64>().ok();
-            if let Some(ann) = num.filter(|&x| (450.0..=1_400.0).contains(&x)) {
-                found_mo = Some((ann / 12.0).round() as i64);
-                break;
+        if let Some(cap) = WVSD_SFR_PAIR_RE.captures(&clean) {
+            if let Some(v1) = cap[1].replace(',', "").parse::<f64>().ok() {
+                if (30.0..=150.0).contains(&v1) {
+                    found_mo = Some(v1.round() as i64);
+                } else if (360.0..=1_800.0).contains(&v1) {
+                    found_mo = Some((v1 / 12.0).round() as i64);
+                }
+            }
+            if found_mo.is_none() {
+                if let Some(v2) = cap
+                    .get(2)
+                    .and_then(|m| m.as_str().replace(',', "").parse::<f64>().ok())
+                    .filter(|&x| (360.0..=1_800.0).contains(&x))
+                {
+                    found_mo = Some((v2 / 12.0).round() as i64);
+                }
             }
         }
         if let Some(mo) = found_mo {
@@ -1600,21 +1614,38 @@ fn query_eia861_electric_point_with_db<'a>(
             EIA861_ELECTRIC_H3_URL.to_string(),
             lat,
             lon,
-            "NAME,STATE,HOLDING_COMPANY,UTILITY_TYPE,Res_Electricity_Rate_Nom_2025,Res_Electricity_Rate_Nom_2024",
+            "NAME,STATE,HOLDING_CO,TYPE,Res_Electricity_Rate_Nom_2025,Res_Electricity_Rate_Nom_2024,Res_Customer_Count_2024",
             3200,
             3000,
         )
         .await?;
-        let attr = feats.first()?;
+        let attr = feats.iter().max_by_key(|a| {
+            let has_name = a
+                .get("NAME")
+                .or_else(|| a.get("HOLDING_CO"))
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .is_some_and(|s| !s.is_empty());
+            let has_rate = a
+                .get("Res_Electricity_Rate_Nom_2025")
+                .and_then(|v| v.as_f64())
+                .or_else(|| a.get("Res_Electricity_Rate_Nom_2024").and_then(|v| v.as_f64()))
+                .is_some_and(|c| c > 2.0 && c < 95.0);
+            let cust = a
+                .get("Res_Customer_Count_2024")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.0) as i64;
+            (has_name, has_rate, cust)
+        })?;
         let name = attr
             .get("NAME")
-            .or_else(|| attr.get("HOLDING_COMPANY"))
+            .or_else(|| attr.get("HOLDING_CO"))
             .and_then(|v| v.as_str())
             .map(str::trim)
             .filter(|s| !s.is_empty())?
             .to_string();
         let utype_raw = attr
-            .get("UTILITY_TYPE")
+            .get("TYPE")
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_ascii_lowercase();
@@ -1746,38 +1777,94 @@ fn query_cec_electric_ca_with_db<'a>(
         );
         let (iou_r, cca_r) = tokio::join!(iou_fut, cca_fut);
 
-        let iou = iou_r.and_then(|v| v.into_iter().next()).and_then(|a| {
+        let is_wholesale_pool = |a: &Value| {
             let full = a
                 .get("Utility")
-                .and_then(|x| x.as_str())?
-                .trim()
-                .to_string();
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_ascii_lowercase();
             let acr = a
                 .get("Acronym")
                 .and_then(|x| x.as_str())
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .unwrap_or(&full)
-                .to_string();
-            let tp = a
-                .get("Type")
-                .and_then(|x| x.as_str())
-                .map(|s| s.to_ascii_lowercase())
-                .unwrap_or_else(|| "iou".to_string());
-            let url = a.get("URL").and_then(|x| x.as_str()).map(String::from);
-            Some((full, acr, tp, url))
-        });
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            full.contains("power and water resource pooling")
+                || full.contains("metropolitan water district")
+                || acr == "pwrpa"
+        };
+        let iou = iou_r
+            .and_then(|v| {
+                v.iter()
+                    .find(|a| {
+                        !is_wholesale_pool(a)
+                            && a.get("Type")
+                                .and_then(|x| x.as_str())
+                                .is_some_and(|t| t.eq_ignore_ascii_case("iou"))
+                    })
+                    .or_else(|| v.iter().find(|a| !is_wholesale_pool(a)))
+                    .or_else(|| v.first())
+                    .cloned()
+            })
+            .and_then(|a| {
+                let full = a
+                    .get("Utility")
+                    .and_then(|x| x.as_str())?
+                    .trim()
+                    .to_string();
+                let acr = a
+                    .get("Acronym")
+                    .and_then(|x| x.as_str())
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or(&full)
+                    .to_string();
+                let tp = a
+                    .get("Type")
+                    .and_then(|x| x.as_str())
+                    .map(|s| s.to_ascii_lowercase())
+                    .unwrap_or_else(|| "iou".to_string());
+                let url = a.get("URL").and_then(|x| x.as_str()).map(String::from);
+                Some((full, acr, tp, url))
+            });
 
-        let cca = cca_r.and_then(|v| v.into_iter().next()).and_then(|a| {
-            let nm = a
-                .get("Utility")
-                .or_else(|| a.get("Acronym"))
-                .and_then(|x| x.as_str())?
-                .trim()
-                .to_string();
-            let url = a.get("URL").and_then(|x| x.as_str()).map(String::from);
-            Some((nm, url))
-        });
+        let cca = cca_r
+            .and_then(|v| {
+                v.iter()
+                    .find(|a| {
+                        a.get("Type")
+                            .and_then(|x| x.as_str())
+                            .is_some_and(|t| t.eq_ignore_ascii_case("cca"))
+                    })
+                    .or_else(|| {
+                        v.iter().find(|a| {
+                            let tp = a
+                                .get("Type")
+                                .and_then(|x| x.as_str())
+                                .unwrap_or("")
+                                .to_ascii_lowercase();
+                            let nm = a
+                                .get("Utility")
+                                .and_then(|x| x.as_str())
+                                .unwrap_or("")
+                                .to_ascii_lowercase();
+                            !tp.contains("admin")
+                                && (tp.contains("cca")
+                                    || nm.contains("clean energy")
+                                    || nm.contains("community choice"))
+                        })
+                    })
+                    .cloned()
+            })
+            .and_then(|a| {
+                let nm = a
+                    .get("Utility")
+                    .or_else(|| a.get("Acronym"))
+                    .and_then(|x| x.as_str())?
+                    .trim()
+                    .to_string();
+                let url = a.get("URL").and_then(|x| x.as_str()).map(String::from);
+                Some((nm, url))
+            });
         if iou.is_some() || cca.is_some() {
             if let Some((gh5, geo)) = geo_pair {
                 let carrier = iou
@@ -1837,13 +1924,19 @@ fn query_cec_electric_ca_with_db<'a>(
     .boxed()
 }
 
+#[allow(dead_code)]
 fn query_gas_territory_point<'a>(
     http: &'a HttpClient,
     state: &'a str,
     lat: f64,
     lon: f64,
 ) -> BoxFuture<'a, Option<(String, Option<String>)>> {
-    query_gas_territory_point_with_db(http, None, state, lat, lon)
+    async move {
+        query_gas_territory_point_with_db(http, None, state, lat, lon)
+            .await
+            .map(|(c, w, _)| (c, w))
+    }
+    .boxed()
 }
 
 fn query_gas_territory_point_with_db<'a>(
@@ -1852,7 +1945,7 @@ fn query_gas_territory_point_with_db<'a>(
     state: &'a str,
     lat: f64,
     lon: f64,
-) -> BoxFuture<'a, Option<(String, Option<String>)>> {
+) -> BoxFuture<'a, Option<(String, Option<String>, Option<f64>)>> {
     async move {
         let geo_pair = point_geo_index(lat, lon, Some(state));
         if let Some((ref gh5, _)) = geo_pair {
@@ -1865,25 +1958,30 @@ fn query_gas_territory_point_with_db<'a>(
             )
             .await
             {
-                let web = row
+                let parsed_pj = row
                     .payload_json
                     .as_deref()
-                    .and_then(|s| serde_json::from_str::<Value>(s).ok())
+                    .and_then(|s| serde_json::from_str::<Value>(s).ok());
+                let web = parsed_pj
+                    .as_ref()
                     .and_then(|v| v.get("website").and_then(|x| x.as_str()).map(String::from));
-                return Some((proto.carrier_name, web));
+                let res_therm = parsed_pj
+                    .as_ref()
+                    .and_then(|v| v.get("resPriceTherm").and_then(|x| x.as_f64()));
+                return Some((proto.carrier_name, web, res_therm));
             }
         }
         if http.is_offline_external_blocked() {
             return None;
         }
-        let mut found: Option<(String, Option<String>)> = None;
+        let mut found: Option<(String, Option<String>, Option<f64>)> = None;
         if state == "CA" {
             if let Some(feats) = boxed_arcgis_point(
                 http,
                 CEC_GAS_AREA_URL.to_string(),
                 lat,
                 lon,
-                "Utility,ABR,Type",
+                "SERVICE,ABR,CATEGORY",
                 2800,
                 2600,
             )
@@ -1891,11 +1989,12 @@ fn query_gas_territory_point_with_db<'a>(
             {
                 if let Some(a) = feats.first() {
                     if let Some(u) = a
-                        .get("Utility")
+                        .get("SERVICE")
+                        .or_else(|| a.get("ABR"))
                         .and_then(|v| v.as_str())
                         .filter(|s| !s.trim().is_empty())
                     {
-                        found = Some((u.trim().to_string(), None));
+                        found = Some((u.trim().to_string(), None, None));
                     }
                 }
             }
@@ -1906,7 +2005,7 @@ fn query_gas_territory_point_with_db<'a>(
                 HIFLD_GAS_LDC_URL.to_string(),
                 lat,
                 lon,
-                "NAME,TYPE,WEBSITE",
+                "NAME,TYPE,WEBSITE,RES_PRICE",
                 3200,
                 3000,
             )
@@ -1917,11 +2016,22 @@ fn query_gas_territory_point_with_db<'a>(
                 .get("WEBSITE")
                 .and_then(|v| v.as_str())
                 .map(str::trim)
-                .filter(|s| s.starts_with("http"))
-                .map(String::from);
-            found = Some((nm, web));
+                .filter(|s| !s.is_empty() && !s.eq_ignore_ascii_case("not available"))
+                .map(|s| {
+                    if s.starts_with("http://") || s.starts_with("https://") {
+                        s.to_string()
+                    } else {
+                        format!("https://{s}")
+                    }
+                });
+            let res_therm = a
+                .get("RES_PRICE")
+                .and_then(|v| v.as_f64())
+                .filter(|&p| p > 2.0 && p < 120.0)
+                .map(|mcf| round_n(mcf / 10.37, 4));
+            found = Some((nm, web, res_therm));
         }
-        if let (Some((ref nm, ref web)), Some((gh5, geo))) = (&found, geo_pair) {
+        if let (Some((ref nm, ref web, ref res_therm)), Some((gh5, geo))) = (&found, geo_pair) {
             let src_url = web.clone().unwrap_or_else(|| {
                 if state == "CA" {
                     CEC_GAS_AREA_URL.to_string()
@@ -1947,7 +2057,7 @@ fn query_gas_territory_point_with_db<'a>(
                 source_url: src_url.clone(),
                 fetched_at_rfc3339: now_iso(),
             };
-            let pj = serde_json::json!({ "website": web }).to_string();
+            let pj = serde_json::json!({ "website": web, "resPriceTherm": res_therm }).to_string();
             boxed_shared_put(
                 db,
                 dataset_ids::UTILITY_TERRITORY,
@@ -2426,7 +2536,7 @@ fn query_scc_sanitation_district_with_db<'a>(
         }
         let futs = (1..=6).map(|layer| {
             let url = format!("{SCC_SANITATION_BASE_URL}/{layer}");
-            boxed_arcgis_point(http, url, lat, lon, "DISTRICT,NAME,AGENCY", 2800, 2500)
+            boxed_arcgis_point(http, url, lat, lon, "*", 2800, 2500)
         });
         let results = futures::future::join_all(futs).await;
         for feats_opt in results.into_iter().flatten() {
@@ -2808,7 +2918,7 @@ fn resolve_live_gas_with_db<'a>(
         let eia_gas_fut = query_eia_v2_state_rate_with_db(http, env, db, state, false);
         let (terr_opt, eia_gas) = tokio::join!(terr_fut, eia_gas_fut);
 
-        let (carrier_raw, web_opt) = terr_opt?;
+        let (carrier_raw, web_opt, mut hifld_rate_opt) = terr_opt?;
         let lc = carrier_raw.to_ascii_lowercase();
         if lc.contains("pacific gas") || lc.contains("pg&e") {
             if let Some(pge_gas) = fetch_cached_pge_gas_with_db(http, db).await {
@@ -2816,18 +2926,52 @@ fn resolve_live_gas_with_db<'a>(
             }
         }
 
-        let (rate_therm, period) = eia_gas?;
+        if let Some((rate_therm, period)) = eia_gas {
+            return Some(LiveGasTariff {
+                carrier_name: carrier_raw,
+                heating_fuel_norm: "natural_gas".to_string(),
+                rate_schedule: format!("EIA Monthly State Residential Gas Rate ({period})"),
+                rate_per_therm_usd: Some(rate_therm),
+                monthly_base_fee_usd: 12.0,
+                tariff_url: web_opt
+                    .unwrap_or_else(|| "https://www.eia.gov/naturalgas/data.php".to_string()),
+                rate_source: format!("HIFLD/CEC Gas Territory + EIA API v2 ({period})"),
+                is_live_verified: true,
+                provenance_label: "live_eia_state_utility".to_string(),
+            });
+        }
+        if hifld_rate_opt.is_none() && !http.is_offline_external_blocked() {
+            if let Some(feats) = boxed_arcgis_point(
+                http,
+                HIFLD_GAS_LDC_URL.to_string(),
+                lat,
+                lon,
+                "RES_PRICE",
+                3200,
+                3000,
+            )
+            .await
+            {
+                hifld_rate_opt = feats.first().and_then(|a| {
+                    a.get("RES_PRICE")
+                        .and_then(|v| v.as_f64())
+                        .filter(|&p| p > 2.0 && p < 120.0)
+                        .map(|mcf| round_n(mcf / 10.37, 4))
+                });
+            }
+        }
+        let hifld_therm = hifld_rate_opt?;
         Some(LiveGasTariff {
             carrier_name: carrier_raw,
             heating_fuel_norm: "natural_gas".to_string(),
-            rate_schedule: format!("EIA Monthly State Residential Gas Rate ({period})"),
-            rate_per_therm_usd: Some(rate_therm),
+            rate_schedule: "HIFLD / EIA-176 Residential LDC Rate".to_string(),
+            rate_per_therm_usd: Some(hifld_therm),
             monthly_base_fee_usd: 12.0,
-            tariff_url: web_opt
-                .unwrap_or_else(|| "https://www.eia.gov/naturalgas/data.php".to_string()),
-            rate_source: format!("HIFLD/CEC Gas Territory + EIA API v2 ({period})"),
+            tariff_url: web_opt.unwrap_or_else(|| HIFLD_GAS_LDC_URL.to_string()),
+            rate_source: "HIFLD Natural Gas LDC Service Territories (EIA-176 RES_PRICE)"
+                .to_string(),
             is_live_verified: true,
-            provenance_label: "live_eia_state_utility".to_string(),
+            provenance_label: "live_hifld_eia176_utility".to_string(),
         })
     }
     .boxed()
@@ -2871,7 +3015,7 @@ fn resolve_live_wst_with_db<'a>(
                 query_retail_water_boundary_with_db(http, db, &q.state, lat, lon)
             }
         };
-        let scc_sewer_fut = if q.is_private_septic {
+        let scc_sewer_fut = if q.is_private_septic || q.state != "CA" {
             futures::future::ready(None).boxed()
         } else {
             query_scc_sanitation_district_with_db(http, db, lat, lon)
@@ -3509,6 +3653,9 @@ impl DataExtensionAdapter for SjWaterLiveTariffsAdapter {
     ) -> BoxFuture<'a, Result<Vec<ExtensionEnvelopeProto>>> {
         Box::pin(async move {
             let lq = live_query_from_proto(query);
+            if lq.state != "CA" {
+                return Ok(Vec::new());
+            }
             let (Some(lat), Some(lon)) = (lq.lat, lq.lon) else {
                 return Ok(Vec::new());
             };
@@ -3582,6 +3729,9 @@ impl DataExtensionAdapter for SccSanitationDistrictAdapter {
     ) -> BoxFuture<'a, Result<Vec<ExtensionEnvelopeProto>>> {
         Box::pin(async move {
             let lq = live_query_from_proto(query);
+            if lq.state != "CA" {
+                return Ok(Vec::new());
+            }
             let (Some(lat), Some(lon)) = (lq.lat, lq.lon) else {
                 return Ok(Vec::new());
             };

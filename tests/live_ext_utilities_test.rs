@@ -161,8 +161,9 @@ fn decode_envelopes(res: &ExtensionTestFetchResult) -> Vec<ExtensionEnvelopeProt
     envelopes_val
         .iter()
         .map(|v| {
+            let env_val = v.get("envelope").unwrap_or(v).clone();
             let env: ExtensionEnvelopeProto =
-                serde_json::from_value(v.clone()).expect("deserialize canonical envelope");
+                serde_json::from_value(env_val).expect("deserialize canonical envelope");
             assert_eq!(env.extension_id, res.extension_id);
             let attr = env
                 .attribution
@@ -226,46 +227,68 @@ async fn run_metered_test_fetch_and_verify_rollup(
     http: &HttpClient,
     env: &EnvConfig,
 ) -> ExtensionTestFetchResult {
-    let db = DbStore::connect_url(":memory:", None)
-        .await
-        .expect("connect in-memory sqlite for metering");
-    let ctx = InvocationContext::new(extension_id)
-        .with_trigger(InvocationTrigger::UserRequest)
-        .with_actor_user_id("live-utilities-verifier")
-        .with_slug(format!("live-util-{extension_id}"));
+    // Run heavy SQLite + ExtensionHub metering futures on an 8 MiB scoped thread so debug
+    // `#[tokio::test]` worker stacks (2 MiB on Linux) never overflow without needing `RUST_MIN_STACK`.
+    std::thread::scope(|scope| {
+        std::thread::Builder::new()
+            .name(format!("metered-{extension_id}"))
+            .stack_size(8 * 1024 * 1024)
+            .spawn_scoped(scope, || {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("build current_thread runtime for metered test");
+                rt.block_on(async move {
+                    let db = Box::pin(DbStore::connect_url(":memory:", None))
+                        .await
+                        .expect("connect in-memory sqlite for metering");
+                    let ctx = InvocationContext::new(extension_id)
+                        .with_trigger(InvocationTrigger::UserRequest)
+                        .with_actor_user_id("live-utilities-verifier")
+                        .with_slug(format!("live-util-{extension_id}"));
 
-    let (fetch_res, event) =
-        MeterScope::run_result(ctx, hub.test_fetch(extension_id, query, http, env)).await;
+                    let (fetch_res, event) = Box::pin(MeterScope::run_result(
+                        ctx,
+                        Box::pin(hub.test_fetch(extension_id, query, http, env)),
+                    ))
+                    .await;
 
-    let fetched = fetch_res.expect("test_fetch inside MeterScope");
-    assert!(
-        fetched.ok && fetched.envelope_count >= 1,
-        "{extension_id} metered fetch failed: health={}, err={:?}",
-        fetched.health_status,
-        fetched.error
-    );
-    assert_eq!(event.extension_id, extension_id);
-    assert_eq!(
-        event.actor_user_id.as_deref(),
-        Some("live-utilities-verifier")
-    );
-    assert_eq!(event.outcome, InvocationOutcome::Ok);
-    assert_eq!(event.dims.invocations, 1);
-    assert_eq!(event.dims.invocations_ok, 1);
-    assert_eq!(event.dims.invocations_failed, 0);
+                    let fetched = fetch_res.expect("test_fetch inside MeterScope");
+                    assert!(
+                        fetched.ok && fetched.envelope_count >= 1,
+                        "{extension_id} metered fetch failed: health={}, err={:?}",
+                        fetched.health_status,
+                        fetched.error
+                    );
+                    assert_eq!(event.extension_id, extension_id);
+                    assert_eq!(
+                        event.actor_user_id.as_deref(),
+                        Some("live-utilities-verifier")
+                    );
+                    assert_eq!(event.outcome, InvocationOutcome::Ok);
+                    assert_eq!(event.dims.invocations, 1);
+                    assert_eq!(event.dims.invocations_ok, 1);
+                    assert_eq!(event.dims.invocations_failed, 0);
 
-    record_local_usage_rollup(&db, &event)
-        .await
-        .expect("record local usage rollup");
-    let rollups = query_local_daily_rollups(&db, None, Some(extension_id), 10)
-        .await
-        .expect("query local rollups");
-    assert_eq!(rollups.len(), 1, "expected 1 rollup row for {extension_id}");
-    assert_eq!(rollups[0].extension_id, extension_id);
-    assert!(rollups[0].dims.invocations >= 1);
-    assert!(rollups[0].dims.invocations_ok >= 1);
+                    Box::pin(record_local_usage_rollup(&db, &event))
+                        .await
+                        .expect("record local usage rollup");
+                    let rollups =
+                        Box::pin(query_local_daily_rollups(&db, None, Some(extension_id), 10))
+                            .await
+                            .expect("query local rollups");
+                    assert_eq!(rollups.len(), 1, "expected 1 rollup row for {extension_id}");
+                    assert_eq!(rollups[0].extension_id, extension_id);
+                    assert!(rollups[0].dims.invocations >= 1);
+                    assert!(rollups[0].dims.invocations_ok >= 1);
 
-    fetched
+                    fetched
+                })
+            })
+            .expect("spawn metered test thread")
+            .join()
+            .expect("metered test thread panicked")
+    })
 }
 
 fn civic(site: PublicCivicSite) -> ExtensionQueryProto {
@@ -1768,7 +1791,18 @@ async fn live_public_shared_utility_and_tax_datasets_reuse_without_http() {
         .expect("Campbell home 1 live Open-Meteo HDD/CDD should resolve");
     assert!(e1.is_live_verified && e1.rate_per_kwh_usd > 0.15);
     assert!(g1.rate_per_therm_usd.unwrap_or(0.0) > 0.5);
-    assert!(w1.water_verified && w1.sewer_verified && w1.trash_verified);
+    assert!(
+        w1.water_verified,
+        "Campbell home 1 water should be verified: {w1:?}"
+    );
+    assert!(
+        w1.sewer_verified,
+        "Campbell home 1 sewer should be verified: {w1:?}"
+    );
+    assert!(
+        w1.trash_verified,
+        "Campbell home 1 trash should be verified: {w1:?}"
+    );
     assert!(c1.hdd_65 > 500 && c1.cdd_65 > 100);
 
     let terr_rows = query_shared_data_records_by_geo_col(

@@ -889,7 +889,8 @@ pub async fn analyze_title_report(
         data: parsed,
         sources: vec![SourceItem::new(
             format!(
-                "Open Estate Title & Lien Reviewer (PII-Redacted) over {}",
+                "{} Title & Lien Reviewer (PII-Redacted) over {}",
+                env.brand_name(),
                 file_names.join(", ")
             ),
             "https://www.alta.org/",

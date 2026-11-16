@@ -49,10 +49,7 @@ static RE_MULTI_SPACE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\s+").unwrap());
 
 fn first_geo<'a>(geos: &'a serde_json::Map<String, Value>, names: &[&str]) -> Option<&'a Value> {
     for &n in names {
-        if let Some((_, arr)) = geos
-            .iter()
-            .find(|(k, _)| k.as_str() == n || k.ends_with(n))
-        {
+        if let Some((_, arr)) = geos.iter().find(|(k, _)| k.as_str() == n || k.ends_with(n)) {
             if let Some(first) = arr.as_array().and_then(|a| a.first()) {
                 return Some(first);
             }
@@ -191,18 +188,16 @@ fn build_geocode_payload(
     let county_fips = str_field(county, "GEOID");
     let place_name = str_field(place, "NAME");
     let place_fips = str_field(place, "GEOID");
-    let city = addr_city
-        .filter(|s| !s.is_empty())
-        .or_else(|| {
-            place_name.as_ref().map(|p| {
-                p.trim_end_matches(" city")
-                    .trim_end_matches(" town")
-                    .trim_end_matches(" CDP")
-                    .trim_end_matches(" village")
-                    .trim()
-                    .to_string()
-            })
-        });
+    let city = addr_city.filter(|s| !s.is_empty()).or_else(|| {
+        place_name.as_ref().map(|p| {
+            p.trim_end_matches(" city")
+                .trim_end_matches(" town")
+                .trim_end_matches(" CDP")
+                .trim_end_matches(" village")
+                .trim()
+                .to_string()
+        })
+    });
     let zcta_geoid = str_field(zcta, "GEOID").or_else(|| str_field(zcta, "ZCTA5"));
     let zip = addr_zip
         .filter(|s| !s.is_empty())
@@ -365,7 +360,9 @@ async fn arcgis_find_candidate(
                     .and_then(|l| l.get("x"))
                     .and_then(|v| v.as_f64())
                     .unwrap_or(0.0);
-                if !(score >= 82.0 && (17.5..=72.0).contains(&lat) && (-179.9..=-64.5).contains(&lon))
+                if !(score >= 82.0
+                    && (17.5..=72.0).contains(&lat)
+                    && (-179.9..=-64.5).contains(&lon))
                 {
                     return false;
                 }
@@ -386,7 +383,11 @@ async fn arcgis_find_candidate(
                 }
                 let st_check = str_field(attrs, "StAddr")
                     .or_else(|| str_field(attrs, "Match_addr"))
-                    .or_else(|| cand.get("address").and_then(|v| v.as_str()).map(|s| s.to_string()))
+                    .or_else(|| {
+                        cand.get("address")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string())
+                    })
                     .unwrap_or_default();
                 let first_tok = st_check.split_whitespace().next().unwrap_or("");
                 let starts_with_num = first_tok.chars().any(|c| c.is_ascii_digit());
@@ -399,7 +400,10 @@ async fn arcgis_find_candidate(
     Ok(best.map(|b| (ESRI_FIND_CANDIDATES.to_string(), b)))
 }
 
-async fn nominatim_find_candidate(http: &HttpClient, addr: &str) -> Result<Option<(String, Value)>> {
+async fn nominatim_find_candidate(
+    http: &HttpClient,
+    addr: &str,
+) -> Result<Option<(String, Value)>> {
     let mut u = Url::parse("https://nominatim.openstreetmap.org/search")?;
     {
         let mut qp = u.query_pairs_mut();
@@ -548,7 +552,11 @@ pub async fn geocode_address(http: &HttpClient, address: &str) -> Result<ModuleO
                 let lon = cand["location"]["x"].as_f64().unwrap_or(0.0);
                 let attrs = cand.get("attributes");
                 let match_addr = str_field(attrs, "Match_addr")
-                    .or_else(|| cand.get("address").and_then(|v| v.as_str()).map(|s| s.to_string()))
+                    .or_else(|| {
+                        cand.get("address")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string())
+                    })
                     .unwrap_or_else(|| trimmed.to_string());
                 let (disp_full, _, _) = split_us_address(&match_addr);
                 let city = str_field(attrs, "City").map(|s| title_case(&s));
@@ -557,10 +565,7 @@ pub async fn geocode_address(http: &HttpClient, address: &str) -> Result<ModuleO
 
                 let mut coords_geos: Option<Value> = None;
                 if let Ok((coords_url, cj)) = census_coordinates(http, lat, lon).await {
-                    coords_geos = cj
-                        .get("result")
-                        .and_then(|r| r.get("geographies"))
-                        .cloned();
+                    coords_geos = cj.get("result").and_then(|r| r.get("geographies")).cloned();
                     sources.push(SourceItem::new(
                         "U.S. Census Bureau Geography Coordinates API (Public_AR_Current / Current_Current)",
                         coords_url,
@@ -624,7 +629,15 @@ pub async fn geocode_address(http: &HttpClient, address: &str) -> Result<ModuleO
         let disp_full = [
             Some(format!("{house_num} {road}").trim().to_string()),
             city.clone(),
-            Some(format!("{} {}", state.as_deref().unwrap_or(""), zip.as_deref().unwrap_or("")).trim().to_string()),
+            Some(
+                format!(
+                    "{} {}",
+                    state.as_deref().unwrap_or(""),
+                    zip.as_deref().unwrap_or("")
+                )
+                .trim()
+                .to_string(),
+            ),
         ]
         .into_iter()
         .flatten()
@@ -634,10 +647,7 @@ pub async fn geocode_address(http: &HttpClient, address: &str) -> Result<ModuleO
 
         let mut coords_geos: Option<Value> = None;
         if let Ok((coords_url, cj)) = census_coordinates(http, lat, lon).await {
-            coords_geos = cj
-                .get("result")
-                .and_then(|r| r.get("geographies"))
-                .cloned();
+            coords_geos = cj.get("result").and_then(|r| r.get("geographies")).cloned();
             sources.push(SourceItem::new(
                 "U.S. Census Bureau Geography Coordinates API (Public_AR_Current / Current_Current)",
                 coords_url,
@@ -671,6 +681,43 @@ pub async fn geocode_address(http: &HttpClient, address: &str) -> Result<ModuleO
             sources,
             warnings,
         });
+    }
+
+    // 2c. Authoritative municipal GIS address fallback for new-construction streets not yet
+    // indexed in Census TIGER or OSM (City of Campbell Enterprise GIS Addresses Layer).
+    let lower_addr = trimmed.to_ascii_lowercase();
+    let campbell_hint = lower_addr.contains("campbell")
+        || ["95008", "95009", "95011"]
+            .iter()
+            .any(|z| lower_addr.contains(z));
+    if campbell_hint {
+        if let Some(pt) =
+            crate::property::permit_pipeline::fetch_campbell_address_point(http, trimmed).await
+        {
+            let canon_addr = if trimmed.contains(',') {
+                trimmed.to_string()
+            } else {
+                format!("{}, Campbell, CA 95008", title_case(&pt.full_address))
+            };
+            let mut out = geocode_from_coordinates(
+                http,
+                &canon_addr,
+                pt.lat,
+                pt.lon,
+                "City of Campbell Enterprise GIS Addresses Layer",
+            )
+            .await?;
+            out.sources.push(SourceItem::new(
+                "City of Campbell Enterprise GIS Addresses Layer",
+                crate::property::permit_pipeline::CAMPBELL_ADDRESSES_LAYER,
+            ));
+            if let Some(obj) = out.data.as_object_mut() {
+                if let Some(apn) = pt.apn.filter(|s| !s.is_empty()) {
+                    obj.insert("apn".to_string(), json!(apn));
+                }
+            }
+            return Ok(out);
+        }
     }
 
     sources.push(SourceItem::new("U.S. Census Geocoder", primary_url));
@@ -742,10 +789,7 @@ pub async fn geocode_from_coordinates(
     let mut sources = Vec::new();
     let mut coords_geos: Option<Value> = None;
     if let Ok((coords_url, cj)) = census_coordinates(http, lat, lon).await {
-        coords_geos = cj
-            .get("result")
-            .and_then(|r| r.get("geographies"))
-            .cloned();
+        coords_geos = cj.get("result").and_then(|r| r.get("geographies")).cloned();
         sources.push(SourceItem::new(
             "U.S. Census Bureau Geography Coordinates API (Public_AR_Current / Current_Current)",
             coords_url,

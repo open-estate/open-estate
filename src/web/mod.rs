@@ -1,4 +1,5 @@
 pub mod admin_console;
+pub mod admin_settings;
 pub mod ai_routes;
 pub mod alerts_ui;
 pub mod cdn_cache;

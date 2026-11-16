@@ -32,6 +32,7 @@ pub const TABLE_NAMES: &[&str] = &[
     "app_users",
     "admin_audit_log",
     "alert_manage_tokens",
+    "admin_settings",
 ];
 
 const SQLITE_DDL_STMTS: &[&str] = &[
@@ -447,6 +448,15 @@ const SQLITE_DDL_STMTS: &[&str] = &[
         created_at VARCHAR(32) NOT NULL
     )"#,
     "CREATE INDEX IF NOT EXISTS idx_alert_manage_email ON alert_manage_tokens (email)",
+    r#"CREATE TABLE IF NOT EXISTS admin_settings (
+        setting_key VARCHAR(128) PRIMARY KEY,
+        setting_value TEXT NOT NULL,
+        category VARCHAR(64) NOT NULL DEFAULT 'ai_prompts',
+        description VARCHAR(512) NOT NULL DEFAULT '',
+        updated_by VARCHAR(160),
+        updated_at VARCHAR(64) NOT NULL
+    )"#,
+    "CREATE INDEX IF NOT EXISTS idx_admin_settings_category ON admin_settings (category)",
 ];
 
 const MYSQL_DDL_STMTS: &[&str] = &[
@@ -861,6 +871,15 @@ const MYSQL_DDL_STMTS: &[&str] = &[
         expires_at VARCHAR(32) NOT NULL,
         created_at VARCHAR(32) NOT NULL,
         INDEX idx_alert_manage_email (email)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci"#,
+    r#"CREATE TABLE IF NOT EXISTS admin_settings (
+        setting_key VARCHAR(128) NOT NULL PRIMARY KEY,
+        setting_value LONGTEXT NOT NULL,
+        category VARCHAR(64) NOT NULL DEFAULT 'ai_prompts',
+        description VARCHAR(512) NOT NULL DEFAULT '',
+        updated_by VARCHAR(160) NULL,
+        updated_at VARCHAR(64) NOT NULL,
+        INDEX idx_admin_settings_category (category)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci"#,
 ];
 

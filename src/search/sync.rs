@@ -58,7 +58,10 @@ pub fn sync_connector_status(env: &EnvConfig) -> Value {
         },
         {
             "id": "public_feed",
-            "name": "Public Feed / Open Estate Report & Comp Harvester",
+            "name": format!(
+                "Public Feed / {} Report & Comp Harvester",
+                crate::shared::effective_brand_name(&env.brand_name())
+            ),
             "active": true,
         }
     ])

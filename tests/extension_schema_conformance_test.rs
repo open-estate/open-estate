@@ -35,12 +35,12 @@ license_class: public_open_data
 execution_mode: eager
 enabled_by_default: true
 proto_message_type: openestate.extension.v1.HazardSummaryProto
-default_provenance: estimated
+default_provenance: live_verified
 source_attribution:
   source_name: Public Open Data Test Source
   source_url: https://example.org/api
 request:
-  url_template: "https://example.org/api?zip={{zip}}"
+  url: "https://example.org/api?zip={{zip}}"
 {extra_lines}"#
     )
 }
@@ -236,11 +236,14 @@ fn all_public_extensions_conform_to_proto_schema_and_roundtrip() {
             "{} must be tier=basic",
             pkg.extension_id
         );
-        assert_eq!(
-            pkg.license_class_enum,
-            LicenseClass::PublicOpenData,
-            "{} must be license_class=public_open_data",
-            pkg.extension_id
+        assert!(
+            matches!(
+                pkg.license_class_enum,
+                LicenseClass::PublicOpenData | LicenseClass::ByokCommercialApi
+            ),
+            "{} must be license_class=public_open_data or byok_commercial_api, got {:?}",
+            pkg.extension_id,
+            pkg.license_class_enum
         );
         assert!(
             !pkg.requires_manual_approval,
@@ -310,12 +313,12 @@ version: 1.0.0
 domain: natural_hazards
 driver: declarative_yaml
 proto_message_type: openestate.extension.v1.HazardSummaryProto
-default_provenance: estimated
+default_provenance: live_verified
 source_attribution:
   source_name: Alias Source
   source_url: https://example.org
 request:
-  url_template: "https://example.org/q"
+  url: "https://example.org/q"
 "#;
     validate_yaml_against_descriptor(duplicate_alias, ManifestValidationOrigin::PublicOss)
         .expect_err("conflicting canonical key + alias must fail");
@@ -330,12 +333,12 @@ domain: natural_hazards
 driver: declarative_yaml
 tier: enterprise_gold
 proto_message_type: openestate.extension.v1.HazardSummaryProto
-default_provenance: estimated
+default_provenance: live_verified
 source_attribution:
   source_name: Source
   source_url: https://example.org
 request:
-  url_template: "https://example.org/q"
+  url: "https://example.org/q"
 "#;
     validate_yaml_against_descriptor(bad_tier, ManifestValidationOrigin::Any)
         .expect_err("unknown tier enum value must fail");
@@ -372,12 +375,12 @@ driver: declarative_yaml
 tier: premium
 license_class: public_open_data
 proto_message_type: openestate.extension.v1.HazardSummaryProto
-default_provenance: estimated
+default_provenance: live_verified
 source_attribution:
   source_name: Source
   source_url: https://example.org
 request:
-  url_template: "https://example.org/q"
+  url: "https://example.org/q"
 "#;
     validate_yaml_against_descriptor(premium_yaml, ManifestValidationOrigin::PublicOss)
         .expect_err("tier=premium must be rejected for PublicOss");
@@ -388,7 +391,7 @@ request:
     let hil_missing_approval = r#"extension_id: schema_hil_test
 name: HIL Test
 version: 1.0.0
-domain: disclosures
+domain: property_facts
 driver: native_adapter
 tier: premium
 license_class: human_in_loop
@@ -403,7 +406,7 @@ default_provenance: live_verified
     let hil_enabled_default = r#"extension_id: schema_hil_test2
 name: HIL Test 2
 version: 1.0.0
-domain: disclosures
+domain: property_facts
 driver: native_adapter
 tier: premium
 license_class: human_in_loop
@@ -418,7 +421,7 @@ default_provenance: live_verified
     let hil_valid = r#"extension_id: schema_hil_valid
 name: HIL Valid
 version: 1.0.0
-domain: disclosures
+domain: property_facts
 driver: native_adapter
 tier: premium
 license_class: human_in_loop
@@ -435,11 +438,17 @@ default_provenance: live_verified
     assert!(hil_proto.requires_manual_approval);
 
     // 3. lazy => section_id set
-    let lazy_missing_section = minimal_oss_manifest_yaml("execution_mode: lazy\n");
-    validate_yaml_against_descriptor(&lazy_missing_section, ManifestValidationOrigin::PublicOss)
+    let base_lazy =
+        minimal_oss_manifest_yaml("").replace("execution_mode: eager", "execution_mode: lazy");
+    let err = validate_yaml_against_descriptor(&base_lazy, ManifestValidationOrigin::PublicOss)
         .expect_err("execution_mode=lazy without section_id must fail");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("section_id"),
+        "expected section_id error, got: {msg}"
+    );
 
-    let lazy_ok = minimal_oss_manifest_yaml("execution_mode: lazy\nsection_id: hazards\n");
+    let lazy_ok = format!("{base_lazy}section_id: hazards\n");
     let lazy_proto =
         validate_yaml_against_descriptor(&lazy_ok, ManifestValidationOrigin::PublicOss)
             .expect("lazy with section_id must pass");

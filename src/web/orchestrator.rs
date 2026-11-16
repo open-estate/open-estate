@@ -2,7 +2,7 @@
 // Zero Cloudflare subrequest or 30s wall-clock limits: all 50+ data connectors run concurrently
 // in-process, deterministic HTML renders immediately, and AI synthesis completes in the background.
 
-use crate::ai::run_ai_analyst_with_store;
+use crate::ai::run_ai_analyst_with_prompt;
 use crate::cre::attach_cre_section_with_live_hydration; // [feat/cre-mode]
 use crate::db::{report_has_osrm_router_down, BuildQueueJobInput, CachedReportRecord, DbStore};
 use crate::modules::{
@@ -1433,13 +1433,15 @@ where
         on_progress("Synthesizing AI analyst insights…");
         let tai = Instant::now();
         let llm_cache = DbLlmCache(db.clone());
-        match run_ai_analyst_with_store(
+        let ai_prompts = db.load_ai_prompt_settings().await;
+        match run_ai_analyst_with_prompt(
             http,
             env,
             Some(db),
             &report,
             Some(&llm_cache),
             http.is_cache_bypassed(),
+            ai_prompts.analyst_system_prompt.as_deref(),
         )
         .await
         {
@@ -1507,7 +1509,17 @@ pub async fn complete_report_ai_only(
         return Ok(report);
     }
     let llm_cache = DbLlmCache(db.clone());
-    let ai_out = run_ai_analyst_with_store(http, env, Some(db), &report, Some(&llm_cache), false).await?;
+    let ai_prompts = db.load_ai_prompt_settings().await;
+    let ai_out = run_ai_analyst_with_prompt(
+        http,
+        env,
+        Some(db),
+        &report,
+        Some(&llm_cache),
+        false,
+        ai_prompts.analyst_system_prompt.as_deref(),
+    )
+    .await?;
     if !ai_out.data.is_null() {
         merge_ai_into_report(&mut report, ai_out.data);
     }

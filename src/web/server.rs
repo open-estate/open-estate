@@ -1,9 +1,9 @@
 // Production Axum HTTP Server, Edge DDoS/Guardrail Middleware & Detached Continuation Router for Open Estate.
 
 use crate::ai::{
-    analyze_disclosure_packet, analyze_hoa_documents, analyze_inspection, analyze_title_report,
-    ask_property_question, generate_repair_addendum, translate_report, RepairAddendumInput,
-    UploadedDocInput,
+    analyze_disclosure_packet, analyze_hoa_documents, analyze_inspection_with_prompt,
+    analyze_title_report, ask_property_question_with_config, generate_repair_addendum,
+    translate_report, AskPromptConfig, RepairAddendumInput, UploadedDocInput,
 };
 use crate::cre::{
     analyze_cre_documents, analyze_cre_trade_area, analyze_location_business_profit,
@@ -73,7 +73,7 @@ use crate::web::{
         NoopExtensionHooks, ServerExtensionHooks,
     },
     house3d_api::handle_house3d_get,
-    i18n::{resolve_lang, t},
+    i18n::{resolve_lang, t, t_brand},
     internal_auth::{
         attach_optional_set_cookie, has_valid_batch_or_internal_key,
         has_valid_cron_or_internal_key, has_valid_internal_api_key,
@@ -95,7 +95,8 @@ use crate::web::{
     },
     profile_api::{handle_get_my_profile, handle_post_match_feedback, handle_put_my_profile},
     render::{
-        apply_runtime_module_filter, normalize_stored_report, render_report_html_with_brand,
+        apply_runtime_module_filter, localize_i18n_json_for_brand,
+        localize_report_value_for_brand, normalize_stored_report, render_report_html_with_brand,
         I18NEXT_JS, I18N_EN_JSON, I18N_ES_JSON, I18N_ZH_JSON,
     },
     ui::{
@@ -682,7 +683,7 @@ async fn edge_defense_middleware(
             Json(json!({
                 "ok": false,
                 "code": "DIRECT_LLM_BLOCKED",
-                "error": t(&lang, "api-direct-llm-blocked"),
+                "error": t_brand(&lang, "api-direct-llm-blocked", &state.env.brand_name()),
             })),
         )
             .into_response();
@@ -1904,19 +1905,27 @@ async fn handle_vendor_i18next() -> Response {
     resp
 }
 
-async fn handle_i18n_bundle(AxumPath(raw_lang): AxumPath<String>) -> Response {
+async fn handle_i18n_bundle(
+    State(state): State<AppState>,
+    AxumPath(raw_lang): AxumPath<String>,
+) -> Response {
     let clean_lang = raw_lang
         .strip_suffix(".json")
         .unwrap_or(&raw_lang)
         .trim()
         .to_ascii_lowercase();
-    let body = if clean_lang.starts_with("zh") {
+    let raw_body = if clean_lang.starts_with("zh") {
         I18N_ZH_JSON
     } else if clean_lang.starts_with("es") {
         I18N_ES_JSON
     } else {
         I18N_EN_JSON
     };
+    let body = localize_i18n_json_for_brand(
+        raw_body,
+        &state.env.brand_name(),
+        &state.env.brand_domain(),
+    );
     let mut resp = (StatusCode::OK, body).into_response();
     resp.headers_mut().insert(
         header::CONTENT_TYPE,
@@ -2683,7 +2692,10 @@ async fn handle_report_enqueue(
         if is_automated_scraper_ua(&headers) {
             return Err(map_guardrail(GuardrailError::new(
                 "AUTOMATED_SCRAPER_BLOCKED",
-                "Automated scripts and scrapers are prohibited on Open Estate AI endpoints.",
+                format!(
+                    "Automated scripts and scrapers are prohibited on {} AI endpoints.",
+                    state.env.brand_name()
+                ),
                 403,
             )));
         }
@@ -3092,13 +3104,14 @@ async fn attach_live_report_ux_fields(
     let zip_opt = report.pointer("/geo/zip").and_then(Value::as_str);
     let facts_val = report.get("facts").cloned().unwrap_or_else(|| json!({}));
     let mkt_val = report.pointer("/modules/market/data").cloned();
-    let engagement = crate::modules::engagement::build_engagement_for_report(
+    let engagement = crate::modules::engagement::build_engagement_for_report_with_brand(
         db,
         slug,
         display_addr,
         zip_opt,
         &facts_val,
         mkt_val.as_ref(),
+        &env.brand_name(),
     )
     .await;
     if let Some(robj) = report.as_object_mut() {
@@ -3407,6 +3420,11 @@ async fn handle_report_json(
             }
         }
     }
+    localize_report_value_for_brand(
+        &mut rec.report,
+        &state.env.brand_name(),
+        &state.env.brand_domain(),
+    );
     let mut resp = (StatusCode::OK, Json(rec.report)).into_response();
     resp.headers_mut().insert(
         header::HeaderName::from_static("x-openestate-cache"),
@@ -3919,6 +3937,11 @@ async fn execute_api_report(
         disp_addr,
     )
     .await;
+    localize_report_value_for_brand(
+        &mut report,
+        &state.env.brand_name(),
+        &state.env.brand_domain(),
+    );
     let mut resp = json_response_with_cache(
         StatusCode::OK,
         json!({
@@ -4057,8 +4080,13 @@ async fn handle_ask(
         (None, None)
     };
 
+    let ai_prompts = state.db.load_ai_prompt_settings().await;
+    let ask_prompt_cfg = AskPromptConfig {
+        system_prompt: ai_prompts.chatbox_system_prompt,
+        max_words: ai_prompts.chatbox_max_words,
+    };
     let llm_cache = DbLlmCache(state.db.clone());
-    let out = ask_property_question(
+    let out = ask_property_question_with_config(
         &state.http,
         &state.env,
         &rec.report,
@@ -4067,6 +4095,7 @@ async fn handle_ask(
         saved_insp.as_ref(),
         saved_title.as_ref(),
         Some(&llm_cache),
+        &ask_prompt_cfg,
     )
     .await
     .map_err(map_anyhow)?;
@@ -4555,9 +4584,19 @@ async fn handle_doc_review_post(
             .await
             .map_err(map_anyhow)?
         }
-        _ => analyze_inspection(&state.http, &state.env, &rec.report, docs, Some(&llm_cache))
+        _ => {
+            let ai_prompts = state.db.load_ai_prompt_settings().await;
+            analyze_inspection_with_prompt(
+                &state.http,
+                &state.env,
+                &rec.report,
+                docs,
+                Some(&llm_cache),
+                ai_prompts.inspect_system_prompt.as_deref(),
+            )
             .await
-            .map_err(map_anyhow)?,
+            .map_err(map_anyhow)?
+        }
     };
 
     if let Some(cid) = resolve_trusted_client_id(state, headers).await {
@@ -7223,13 +7262,14 @@ async fn build_live_engagement_for_slug(
     } else {
         (slug.to_string(), None, json!({}), None)
     };
-    Ok(crate::modules::engagement::build_engagement_for_report(
+    Ok(crate::modules::engagement::build_engagement_for_report_with_brand(
         &state.db,
         slug,
         &display_addr,
         zip_opt.as_deref(),
         &facts_val,
         mkt_val.as_ref(),
+        &state.env.brand_name(),
     )
     .await)
 }

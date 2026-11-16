@@ -3,10 +3,10 @@
 //! than inside domain modules under `crate::ai`.
 
 use crate::ai::artifact_canvas::{
-    detect_lang, generate_llm_artifact_with_client, validate_artifact_prompt,
+    detect_lang, generate_llm_artifact_with_prompt, validate_artifact_prompt,
 };
 use crate::ai::slides::{
-    generate_llm_walkthrough_slides_with_client, is_valid_walkthrough_deck,
+    generate_llm_walkthrough_slides_with_prompt, is_valid_walkthrough_deck,
     scrub_walkthrough_deck_value,
 };
 use crate::db::CachedReportRecord;
@@ -89,7 +89,8 @@ pub async fn handle_report_slides_post(
 
     if !refresh {
         if let Some(existing) = rec.report.get("walkthroughSlides") {
-            let is_ai = existing.get("synthesisMode").and_then(|v| v.as_str()) == Some("ai_enhanced");
+            let is_ai =
+                existing.get("synthesisMode").and_then(|v| v.as_str()) == Some("ai_enhanced");
             if is_ai && is_valid_walkthrough_deck(existing) {
                 let mut deck = existing.clone();
                 scrub_walkthrough_deck_value(&mut deck);
@@ -105,13 +106,15 @@ pub async fn handle_report_slides_post(
         }
     }
 
+    let ai_prompts = state.db.load_ai_prompt_settings().await;
     let llm_cache = DbLlmCache(state.db.clone());
-    let mut deck = generate_llm_walkthrough_slides_with_client(
+    let mut deck = generate_llm_walkthrough_slides_with_prompt(
         &state.http,
         &state.env,
         &rec.report,
         Some(&llm_cache),
         refresh,
+        ai_prompts.slides_system_prompt.as_deref(),
     )
     .await;
     scrub_walkthrough_deck_value(&mut deck);
@@ -120,11 +123,8 @@ pub async fn handle_report_slides_post(
     if let Some(obj) = updated.as_object_mut() {
         obj.insert("walkthroughSlides".to_string(), deck.clone());
     }
-    let html = render_report_html_with_brand(
-        &updated,
-        &state.env.brand_name(),
-        &state.env.brand_domain(),
-    );
+    let html =
+        render_report_html_with_brand(&updated, &state.env.brand_name(), &state.env.brand_domain());
     let _ = state
         .db
         .put_cached_report(&rec.slug, &updated, Some(&html))
@@ -187,14 +187,16 @@ pub async fn handle_report_artifact_post(
         Err(ge) => return guardrail_error_to_response(ge),
     };
 
+    let ai_prompts = state.db.load_ai_prompt_settings().await;
     let cache = DbLlmCache(state.db.clone());
-    let artifact = generate_llm_artifact_with_client(
+    let artifact = generate_llm_artifact_with_prompt(
         &state.http,
         &state.env,
         &rec.report,
         &clean_prompt,
         lang.code(),
         Some(&cache),
+        ai_prompts.artifact_system_prompt.as_deref(),
     )
     .await;
 

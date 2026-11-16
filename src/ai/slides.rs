@@ -357,6 +357,7 @@ fn extract_avm_snippets(report: &Value, val_data: Option<&Value>) -> Vec<(String
 /// localized across English (root slide fields), Simplified Chinese (`zh`), and Spanish (`es`).
 /// Never fabricates missing numbers; gaps are stated explicitly as items to verify.
 pub fn build_deterministic_walkthrough_slides(report: &Value) -> Value {
+    let (brand_name, _) = crate::shared::report_brand(report);
     let address = ptr_str(
         report,
         &[
@@ -593,8 +594,8 @@ pub fn build_deterministic_walkthrough_slides(report: &Value) -> Value {
         _ => "info",
     };
     let verdict_hero_lbl = match overall_score {
-        Some(sc) => format!("Open Estate Value ({sc}/100 Overall Score)"),
-        None => "Open Estate Blended Value Estimate".to_string(),
+        Some(sc) => format!("{brand_name} Value ({sc}/100 Overall Score)"),
+        None => format!("{brand_name} Blended Value Estimate"),
     };
     let strengths = pick_str_list(
         summary.and_then(|s| s.pointer("/findings/strengths")),
@@ -605,7 +606,7 @@ pub fn build_deterministic_walkthrough_slides(report: &Value) -> Value {
     let mut s1_pts = Vec::new();
     if est_val.is_some() {
         s1_pts.push(format!(
-            "Open Estate statistical value centers at {val_str} ({range_str}, {psf_str}; {est_conf} confidence)."
+            "{brand_name} statistical value centers at {val_str} ({range_str}, {psf_str}; {est_conf} confidence)."
         ));
     } else {
         s1_pts.push(
@@ -662,8 +663,8 @@ pub fn build_deterministic_walkthrough_slides(report: &Value) -> Value {
             "title": "房产执行摘要与交易总评",
             "subtitle": format!("{address} · {config_zh}"),
             "heroStatLabel": overall_score
-                .map(|sc| format!("Open Estate 融合估值（综合尽调评分 {sc}/100）"))
-                .unwrap_or_else(|| "Open Estate 统计融合估值".to_string()),
+                .map(|sc| format!("{brand_name} 融合估值（综合尽调评分 {sc}/100）"))
+                .unwrap_or_else(|| format!("{brand_name} 统计融合估值")),
             "criticalPoints": [
                 if est_val.is_some() {
                     format!("统计混合估值中枢为 {val_str}（置信区间 {range_str}，折合单价 {psf_str}，置信度：{est_conf}）。")
@@ -690,8 +691,8 @@ pub fn build_deterministic_walkthrough_slides(report: &Value) -> Value {
             "title": "Resumen Ejecutivo y Veredicto",
             "subtitle": format!("{address} · {config_es}"),
             "heroStatLabel": overall_score
-                .map(|sc| format!("Valor Open Estate (Puntaje {sc}/100)"))
-                .unwrap_or_else(|| "Valor Estadístico Open Estate".to_string()),
+                .map(|sc| format!("Valor {brand_name} (Puntaje {sc}/100)"))
+                .unwrap_or_else(|| format!("Valor Estadístico {brand_name}")),
             "criticalPoints": [
                 if est_val.is_some() {
                     format!("El valor estadístico combinado se sitúa en {val_str} (rango {range_str}, {psf_str}; confianza {est_conf}).")
@@ -975,12 +976,12 @@ pub fn build_deterministic_walkthrough_slides(report: &Value) -> Value {
             "Third-party estimates"
         };
         format!(
-            "{label}: {} vs Open Estate blend {val_str} ({psf_str}).",
+            "{label}: {} vs {brand_name} blend {val_str} ({psf_str}).",
             joined.join(" · ")
         )
     } else {
         format!(
-            "Neighborhood benchmark: Open Estate {psf_str}{} (no third-party estimates cited in this record).",
+            "Neighborhood benchmark: {brand_name} {psf_str}{} (no third-party estimates cited in this record).",
             comp_med_psf
                 .map(|p| format!(" vs comp median ${}/sf", fmt_commas(p.round() as i64)))
                 .unwrap_or_default()
@@ -993,7 +994,7 @@ pub fn build_deterministic_walkthrough_slides(report: &Value) -> Value {
     }
     let s3_hero_lbl = match comp_med_psf {
         Some(cp) if est_psf.is_some() => format!(
-            "Open Estate $/Sq Ft vs ${}/sf Comp Median ({est_conf})",
+            "{brand_name} $/Sq Ft vs ${}/sf Comp Median ({est_conf})",
             fmt_commas(cp.round() as i64)
         ),
         _ => format!("Estimated Price / Sq Ft ({est_conf} Confidence)"),
@@ -1038,7 +1039,7 @@ pub fn build_deterministic_walkthrough_slides(report: &Value) -> Value {
             "title": "多维估值基准对标与周边成交拆解",
             "subtitle": "重售指数、特征修正可比成交与第三方估值对照",
             "heroStatLabel": comp_med_psf
-                .map(|cp| format!("Open Estate 预估单价 vs 可比成交中位 ${}/平尺", fmt_commas(cp.round() as i64)))
+                .map(|cp| format!("{brand_name} 预估单价 vs 可比成交中位 ${}/平尺", fmt_commas(cp.round() as i64)))
                 .unwrap_or_else(|| format!("预估每平尺单价（置信度：{est_conf}）")),
             "criticalPoints": [
                 if let Some(rv) = repeat_val {
@@ -1057,9 +1058,9 @@ pub fn build_deterministic_walkthrough_slides(report: &Value) -> Value {
                 },
                 if !avm_list.is_empty() {
                     let joined: Vec<String> = avm_list.iter().take(3).map(|(_, val)| fmt_usd_compact(Some(*val))).collect();
-                    format!("第三方估值：{}（对比 Open Estate 混合估值 {val_str}）。", joined.join(" · "))
+                    format!("第三方估值：{}（对比 {brand_name} 混合估值 {val_str}）。", joined.join(" · "))
                 } else {
-                    format!("单价对标：Open Estate 估算 {psf_str}（本报告暂无第三方估值记录）。")
+                    format!("单价对标：{brand_name} 估算 {psf_str}（本报告暂无第三方估值记录）。")
                 }
             ],
             "watchout": "线上估值与挂牌记录无法穿透室内实际翻新成色、采光与隐蔽缺陷，实地看房后建议结合装修差异预留 ±5%–8% 调整空间。",
@@ -1070,7 +1071,7 @@ pub fn build_deterministic_walkthrough_slides(report: &Value) -> Value {
             "title": "Referencia de Valoración y Ventas Comparables",
             "subtitle": "Índice de ventas repetidas, comparables ajustados y estimaciones de terceros",
             "heroStatLabel": comp_med_psf
-                .map(|cp| format!("Open Estate $/p² vs Mediana Comps ${}/p²", fmt_commas(cp.round() as i64)))
+                .map(|cp| format!("{brand_name} $/p² vs Mediana Comps ${}/p²", fmt_commas(cp.round() as i64)))
                 .unwrap_or_else(|| format!("Precio Estimado / Pie² (Confianza {est_conf})")),
             "criticalPoints": [
                 if let Some(rv) = repeat_val {
@@ -1094,9 +1095,9 @@ pub fn build_deterministic_walkthrough_slides(report: &Value) -> Value {
                     } else {
                         "Estimaciones de terceros"
                     };
-                    format!("{label}: {} frente a mezcla Open Estate {val_str}.", joined.join(" · "))
+                    format!("{label}: {} frente a mezcla {brand_name} {val_str}.", joined.join(" · "))
                 } else {
-                    format!("Referencia por pie²: Open Estate {psf_str} (sin estimaciones de terceros citadas).")
+                    format!("Referencia por pie²: {brand_name} {psf_str} (sin estimaciones de terceros citadas).")
                 }
             ],
             "watchout": "Los modelos estadísticos no inspeccionan acabados interiores ni permisos; ajuste ±5–8% tras la visita.",
@@ -2129,7 +2130,7 @@ pub fn ensure_walkthrough_slides_on_report(report: &mut Value) {
 
 // ------------------------- LLM Walkthrough Synthesis -------------------------
 
-const SLIDES_INSTRUCTIONS: &str = r#"You are a Open Estate Residential Real-Estate Walkthrough Advisor sharpening an 8-slide Home Walkthrough Briefing strictly grounded in PROPERTY_DIGEST_JSON.
+pub const SLIDES_INSTRUCTIONS: &str = r#"You are a Open Estate Residential Real-Estate Walkthrough Advisor sharpening an 8-slide Home Walkthrough Briefing strictly grounded in PROPERTY_DIGEST_JSON.
 
 STRICT GROUNDING & BREVITY RULES:
 1. ZERO FABRICATION: Every dollar figure, square footage, lot measurement, year built, tax/insurance amount, seismic PGA, flood zone, school score, and distance MUST come directly from PROPERTY_DIGEST_JSON. Never invent numbers.
@@ -2547,6 +2548,18 @@ pub async fn generate_llm_walkthrough_slides_with_client(
     cache: Option<&dyn LlmCache>,
     refresh: bool,
 ) -> Value {
+    generate_llm_walkthrough_slides_with_prompt(http, env, report, cache, refresh, None).await
+}
+
+/// Variant of [`generate_llm_walkthrough_slides_with_client`] allowing optional admin-tuned system instructions.
+pub async fn generate_llm_walkthrough_slides_with_prompt(
+    http: &HttpClient,
+    env: &EnvConfig,
+    report: &Value,
+    cache: Option<&dyn LlmCache>,
+    refresh: bool,
+    custom_instructions: Option<&str>,
+) -> Value {
     let baseline = build_deterministic_walkthrough_slides(report);
     if !env.llm_configured() {
         return baseline;
@@ -2560,10 +2573,19 @@ pub async fn generate_llm_walkthrough_slides_with_client(
     let prompt = format!(
         "Synthesize the 8-slide buyer walkthrough presentation strictly grounded in this property digest.\n\nPROPERTY_DIGEST_JSON:\n{digest_json}"
     );
+    let base_instructions = custom_instructions
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(SLIDES_INSTRUCTIONS);
+    let instructions = crate::shared::apply_brand_to_str(
+        base_instructions,
+        &env.brand_name(),
+        &env.brand_domain(),
+    );
     let mut opts = LlmCallOptions::new(
         "report_synthesis",
         "open_estate_slides_brief",
-        SLIDES_INSTRUCTIONS,
+        instructions,
         prompt,
         fast_slides_llm_schema(),
     )

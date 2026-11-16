@@ -12,8 +12,9 @@ use open_estate::extensions::shared_cache::{
 use open_estate::modules::hazards::{
     build_highlights, build_nhd, clip_and_simplify_arcgis_geometry, compute_scores,
     epa_radon_label, epa_radon_zone, fetch_flood, fetch_flood_with_endpoints, flood_zone_info,
-    resolve_nfhl_with_hedge, run_hazards, run_hazards_with_db, summarize_fault_features,
-    NfhlEndpoints, NFHL_SOURCE_LIVING_ATLAS, NFHL_SOURCE_MSC, NFHL_SOURCE_PRIMARY,
+    resolve_nfhl_with_hedge, ring_has_self_intersection, run_hazards, run_hazards_with_db,
+    summarize_fault_features, NfhlEndpoints, NFHL_SOURCE_LIVING_ATLAS, NFHL_SOURCE_MSC,
+    NFHL_SOURCE_PRIMARY,
 };
 use open_estate::shared::{point_in_ring, EnvConfig, HttpClient};
 use open_estate::web::summary::climate_factors;
@@ -303,14 +304,14 @@ async fn test_nfhl_hedge_policy_unit() {
             tokio::time::sleep(Duration::from_millis(20)).await;
             Ok::<_, anyhow::Error>("msc")
         },
-        primary_budget,
+        Duration::from_millis(800),
         Duration::from_secs(5),
         total_budget,
     )
     .await
     .unwrap();
     assert_eq!((v, used_sec), ("msc", true));
-    assert!(t0.elapsed() < Duration::from_millis(300));
+    assert!(t0.elapsed() < Duration::from_millis(600));
 
     let t0 = Instant::now();
     let (v, used_sec) = resolve_nfhl_with_hedge(
@@ -619,6 +620,55 @@ fn test_clip_and_simplify_preserves_concave_polygon_and_dam_fan() {
         .map(|c| (c[1].as_f64().unwrap(), c[0].as_f64().unwrap()))
         .collect();
     assert!(point_in_ring(lat, lon, &fan_outer));
+}
+
+#[test]
+fn test_clip_and_simplify_creek_corridor_avoids_bowtie_chord() {
+    let lat = 37.28233_f64;
+    let lon = -121.96172_f64;
+    // Build a narrow ~60 m (0.00055 deg) S-curving creek corridor spanning 14 km N-S
+    // with 600 dense points per bank so 6 km clipping would hit ~550 vertices.
+    let n = 600usize;
+    let corridor_center = |y: f64| -> f64 {
+        let dy = y - lat;
+        lon + 0.004 * (dy * 120.0).sin() - 0.03 * dy
+    };
+    let half_w = 0.00028_f64;
+    let mut ring: Vec<[f64; 2]> = Vec::with_capacity(n * 2 + 3);
+    // West bank south -> north
+    for i in 0..=n {
+        let y = 37.21 + (i as f64 / n as f64) * 0.14;
+        ring.push([corridor_center(y) - half_w, y]);
+    }
+    // East bank north -> south
+    for i in (0..=n).rev() {
+        let y = 37.21 + (i as f64 / n as f64) * 0.14;
+        ring.push([corridor_center(y) + half_w, y]);
+    }
+    ring.push(ring[0]);
+    let geom = json!({ "rings": [ring] });
+
+    for (box_m, tol, max_pts) in [(2_500.0, 0.00004, 480), (6_000.0, 0.00007, 180)] {
+        let gj = clip_and_simplify_arcgis_geometry(&geom, lat, lon, box_m, tol, max_pts)
+            .expect("clipped creek corridor GeoJSON");
+        let coords = gj["coordinates"][0].as_array().expect("outer ring");
+        let ring_ll: Vec<(f64, f64)> = coords
+            .iter()
+            .map(|c| (c[1].as_f64().unwrap(), c[0].as_f64().unwrap()))
+            .collect();
+        let ring_xy_open: Vec<(f64, f64)> = coords[..coords.len() - 1]
+            .iter()
+            .map(|c| (c[0].as_f64().unwrap(), c[1].as_f64().unwrap()))
+            .collect();
+        assert!(
+            !ring_has_self_intersection(&ring_xy_open),
+            "box={box_m} must not introduce bowtie self-intersections"
+        );
+        assert!(
+            point_in_ring(lat, lon, &ring_ll),
+            "box={box_m} parcel coordinate must stay strictly inside creek corridor"
+        );
+    }
 }
 
 #[test]

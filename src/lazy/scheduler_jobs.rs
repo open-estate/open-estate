@@ -61,55 +61,61 @@ fn resolve_sweep_specs(ctx: &SchedulerContext) -> Vec<PeriodicLazyExtensionSpec>
 }
 
 async fn handle_scanner_periodic_lazy_sweep(ctx: SchedulerContext) -> Result<JobRunOutput> {
-    let specs = resolve_sweep_specs(&ctx);
-    let limit = ctx.param_i64("limit").unwrap_or(200).clamp(1, 500);
-    if specs.is_empty() {
-        return Ok(JobRunOutput::ok(
-            "Periodic lazy sweep skipped (no lazy extension specs configured)",
-            json!({ "targetsExamined": 0, "queued": 0, "specs": 0 }),
-        ));
-    }
+    Box::pin(async move {
+        let specs = resolve_sweep_specs(&ctx);
+        let limit = ctx.param_i64("limit").unwrap_or(200).clamp(1, 500);
+        if specs.is_empty() {
+            return Ok(JobRunOutput::ok(
+                "Periodic lazy sweep skipped (no lazy extension specs configured)",
+                json!({ "targetsExamined": 0, "queued": 0, "specs": 0 }),
+            ));
+        }
 
-    let summary = enqueue_periodic_lazy_sweep_from_cached_reports(
-        &ctx.db,
-        Some(&ctx.extension_hub),
-        &specs,
-        limit,
-    )
-    .await?;
+        let summary = enqueue_periodic_lazy_sweep_from_cached_reports(
+            &ctx.db,
+            Some(&ctx.extension_hub),
+            &specs,
+            limit,
+        )
+        .await?;
 
-    Ok(JobRunOutput::ok(
-        format!(
-            "Swept {} cached reports ({} queued, {} deduplicated)",
-            summary.targets_examined, summary.queued, summary.deduplicated
-        ),
-        serde_json::to_value(&summary).unwrap_or_else(|_| json!({})),
-    ))
+        Ok(JobRunOutput::ok(
+            format!(
+                "Swept {} cached reports ({} queued, {} deduplicated)",
+                summary.targets_examined, summary.queued, summary.deduplicated
+            ),
+            serde_json::to_value(&summary).unwrap_or_else(|_| json!({})),
+        ))
+    })
+    .await
 }
 
 async fn handle_lazy_worker_poll(ctx: SchedulerContext) -> Result<JobRunOutput> {
-    let max_jobs = ctx.param_u64("maxJobs").unwrap_or(32).clamp(1, 500) as usize;
-    let mut executor = LazyExecutor::new(
-        ctx.db.clone(),
-        ctx.http.clone(),
-        ctx.env.clone(),
-        Arc::clone(&ctx.extension_hub),
-    );
-    if let Some(ref state) = ctx.app_state {
-        executor = executor.with_hook_state(state.clone());
-    }
-    let mut worker_cfg = LazyWorkerConfig::from_env(&ctx.env);
-    worker_cfg.worker_id = format!("sched-lazy-{}", &ctx.run_id);
-    let worker = LazyWorker::new(executor, worker_cfg);
-    let processed = worker.drain_due_jobs(max_jobs).await?;
+    Box::pin(async move {
+        let max_jobs = ctx.param_u64("maxJobs").unwrap_or(32).clamp(1, 500) as usize;
+        let mut executor = LazyExecutor::new(
+            ctx.db.clone(),
+            ctx.http.clone(),
+            ctx.env.clone(),
+            Arc::clone(&ctx.extension_hub),
+        );
+        if let Some(ref state) = ctx.app_state {
+            executor = executor.with_hook_state(state.clone());
+        }
+        let mut worker_cfg = LazyWorkerConfig::from_env(&ctx.env);
+        worker_cfg.worker_id = format!("sched-lazy-{}", &ctx.run_id);
+        let worker = LazyWorker::new(executor, worker_cfg);
+        let processed = Box::pin(worker.drain_due_jobs(max_jobs)).await?;
 
-    Ok(JobRunOutput::ok(
-        format!("Lazy worker poll processed {} due jobs", processed),
-        json!({
-            "processed": processed,
-            "maxJobs": max_jobs,
-        }),
-    ))
+        Ok(JobRunOutput::ok(
+            format!("Lazy worker poll processed {} due jobs", processed),
+            json!({
+                "processed": processed,
+                "maxJobs": max_jobs,
+            }),
+        ))
+    })
+    .await
 }
 
 /// Idempotently seeds default `scanner_periodic_lazy_sweep` and `lazy_worker_poll` DB schedules

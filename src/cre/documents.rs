@@ -2232,7 +2232,8 @@ pub async fn analyze_cre_documents(
         data: parsed,
         sources: vec![SourceItem::new(
             format!(
-                "Open Estate CRE Document AI Reconciler & ASTM E1527-21 Cross-Checker over {}",
+                "{} CRE Document AI Reconciler & ASTM E1527-21 Cross-Checker over {}",
+                env.brand_name(),
                 file_names.join(", ")
             ),
             "https://www.astm.org/e1527-21.html",

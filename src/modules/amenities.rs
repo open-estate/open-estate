@@ -2019,11 +2019,14 @@ mod tests {
         let out = run_amenities(&http, &env, 37.2839, -121.9317, &geo, Some(&vicinity))
             .await
             .expect("run_amenities");
-        let emerg = &out.data["mobilityHub"]["emergencyMedical"];
-        assert_eq!(emerg["estimated"], true);
-        assert_eq!(emerg["routingSource"], HAVERSINE_ROUTING_PROVIDER);
-        assert_eq!(emerg["estimateBasis"], HAVERSINE_ESTIMATE_BASIS);
-        assert!(emerg["driveMin"].as_i64().unwrap_or(0) >= 1);
+        let emerg = out.data["mobilityHub"]["emergencyMedical"]
+            .as_array()
+            .expect("emergencyMedical array");
+        assert!(!emerg.is_empty());
+        assert_eq!(emerg[0]["estimated"], true);
+        assert_eq!(emerg[0]["routingSource"], HAVERSINE_ROUTING_PROVIDER);
+        assert_eq!(emerg[0]["estimateBasis"], HAVERSINE_ESTIMATE_BASIS);
+        assert!(emerg[0]["driveMin"].as_i64().unwrap_or(0) >= 1);
 
         let markets = out.data["supermarkets"].as_array().expect("supermarkets");
         assert!(!markets.is_empty());

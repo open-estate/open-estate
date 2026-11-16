@@ -606,36 +606,39 @@ pub async fn check_fcc_fixed_broadband(
         );
     };
 
-    let mut req = client
-        .get(url.clone())
-        .header("Accept", "application/json")
-        .timeout(Duration::from_millis(2_500));
-    if let (Some(user), Some(tok)) = (username, api_token) {
-        req = req.header("username", user).header("hash_value", tok);
-    }
+    let max_attempts: usize = if is_loopback_host(fcc_host) { 1 } else { 2 };
+    let mut resp_opt = None;
+    let mut last_fail_reason = "fcc_request_failed";
+    for attempt in 0..max_attempts {
+        if attempt > 0 {
+            tokio::time::sleep(Duration::from_millis(150)).await;
+        }
+        let mut req = client
+            .get(url.clone())
+            .header("Accept", "application/json")
+            .timeout(Duration::from_millis(8_000));
+        if let (Some(user), Some(tok)) = (username, api_token) {
+            req = req.header("username", user).header("hash_value", tok);
+        }
 
-    let resp = match tokio::time::timeout(Duration::from_millis(2_800), req.send()).await {
-        Ok(Ok(r)) => r,
-        Ok(Err(_)) => {
-            return FccFixedBroadbandResult::unavailable(
-                fcc_map_url,
-                true,
-                has_creds,
-                None,
-                FccLookupStatus::Unavailable,
-                "fcc_request_failed",
-            );
+        match tokio::time::timeout(Duration::from_millis(8_500), req.send()).await {
+            Ok(Ok(r)) => {
+                resp_opt = Some(r);
+                break;
+            }
+            Ok(Err(_)) => last_fail_reason = "fcc_request_failed",
+            Err(_) => last_fail_reason = "fcc_request_timeout",
         }
-        Err(_) => {
-            return FccFixedBroadbandResult::unavailable(
-                fcc_map_url,
-                true,
-                has_creds,
-                None,
-                FccLookupStatus::Unavailable,
-                "fcc_request_timeout",
-            );
-        }
+    }
+    let Some(resp) = resp_opt else {
+        return FccFixedBroadbandResult::unavailable(
+            fcc_map_url,
+            true,
+            has_creds,
+            None,
+            FccLookupStatus::Unavailable,
+            last_fail_reason,
+        );
     };
 
     let code = resp.status().as_u16();
@@ -805,8 +808,8 @@ impl DataExtensionAdapter for FccBroadbandBdcAdapter {
             rate_limit: Some(RateLimitSpecProto {
                 requests_per_second: 5,
                 burst: 10,
-                timeout_ms: 3_000,
-                max_retries: 0,
+                timeout_ms: 8_500,
+                max_retries: 1,
             }),
             cache_ttl_secs: FCC_CACHE_TTL_SECS as u64,
             priority: 300,

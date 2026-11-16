@@ -3319,6 +3319,16 @@ fn build_ongoing_costs(
             0
         };
 
+    let nem_self_credit = if ctx.state == "CA" && ctx.year_built.unwrap_or(2020) >= 2023 {
+        0.65
+    } else {
+        0.85
+    };
+    let solar_off_raw = solar_kw_opt
+        .map(|kw| kw * state_solar_yield_kwh_per_kw_mo(&ctx.state) * nem_self_credit)
+        .unwrap_or(0.0);
+    let standalone_solar_off_i = (solar_off_raw > 1.0).then(|| solar_off_raw.round() as i64);
+
     let (
         gross_monthly_kwh,
         solar_offset_kwh,
@@ -3343,15 +3353,7 @@ fn build_ongoing_costs(
         if kwh_rate > 0.0 {
             let gross_kwh_mo = (420.0 + (sqft * 0.22) + (cdd as f64 * 0.14)) * age_factor;
             let gross_kwh_i = gross_kwh_mo.round() as i64;
-            let nem_self_credit = if ctx.state == "CA" && ctx.year_built.unwrap_or(2020) >= 2023 {
-                0.65
-            } else {
-                0.85
-            };
-            let solar_off_f = solar_kw_opt
-                .map(|kw| kw * state_solar_yield_kwh_per_kw_mo(&ctx.state) * nem_self_credit)
-                .unwrap_or(0.0)
-                .min(gross_kwh_mo * 0.85);
+            let solar_off_f = solar_off_raw.min(gross_kwh_mo * 0.85);
             let solar_off_i = (solar_off_f > 1.0).then(|| solar_off_f.round() as i64);
             let net_kwh_mo = (gross_kwh_mo - solar_off_f).max(0.0);
             let kwh_i = net_kwh_mo.round() as i64;
@@ -3427,10 +3429,30 @@ fn build_ongoing_costs(
                 Some(total_i),
             )
         } else {
-            (None, None, None, None, None, None, None, None, None)
+            (
+                None,
+                standalone_solar_off_i,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
         }
     } else {
-        (None, None, None, None, None, None, None, None, None)
+        (
+            None,
+            standalone_solar_off_i,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
     };
 
     let gas_rate_str = match gas_quote.rate_per_therm_usd {
@@ -3605,6 +3627,13 @@ fn build_ongoing_costs(
             elec_quote.rate_schedule,
             kwh_rate,
             kwh_i
+        ),
+        (_, None, Some(kw), Some(off)) => format!(
+            "Living area (sq ft) was not reported in parcel records; showing {} ({}) unit tariffs without fabricated monthly usage totals (permitted {:.2} kW solar PV offsets ~{} kWh/mo).",
+            elec_quote.short_name,
+            elec_quote.rate_schedule,
+            kw,
+            off
         ),
         _ => format!(
             "Living area (sq ft) was not reported in parcel records; showing {} ({}) unit tariffs without fabricated monthly usage totals.",
@@ -5616,6 +5645,31 @@ mod tests {
                 .buyer_diligence
                 .pointer("/connectivity/broadbandCatalog/fiberAvailable"),
             Some(&json!(false))
+        );
+
+        let mut no_sqft_solar_rep = sample_campbell_townhome(450, true);
+        if let Some(obj) = no_sqft_solar_rep
+            .get_mut("facts")
+            .and_then(Value::as_object_mut)
+        {
+            obj.insert("livingAreaSqFt".to_string(), Value::Null);
+            obj.insert("sqft".to_string(), Value::Null);
+        }
+        let no_sqft_out = build_buyer_diligence_and_hoa_deterministic(&no_sqft_solar_rep);
+        let standalone_offset = no_sqft_out
+            .buyer_diligence
+            .pointer("/ongoingCosts/monthlyUtilities/estimatedSolarOffsetKwh")
+            .and_then(Value::as_i64)
+            .unwrap_or(0);
+        assert!(
+            standalone_offset > 200,
+            "2.870 kW PV offset must still surface without parcel sqft, got {standalone_offset}"
+        );
+        assert_eq!(
+            no_sqft_out
+                .buyer_diligence
+                .pointer("/ongoingCosts/monthlyUtilities/grossMonthlyKwh"),
+            Some(&Value::Null)
         );
     }
 }

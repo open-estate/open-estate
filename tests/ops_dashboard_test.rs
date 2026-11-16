@@ -2,11 +2,7 @@ mod common;
 
 use axum::{
     body::to_bytes,
-    extract::Path as AxumPath,
     http::{Request, StatusCode},
-    middleware,
-    routing::{get, post},
-    Json, Router,
 };
 use open_estate::db::{BuildQueueJobInput, DbBackend, DbStore};
 use open_estate::guardrails::HttpDefenseShield;
@@ -14,11 +10,10 @@ use open_estate::search::{upsert_listings_batch, ListingInput};
 use open_estate::shared::{now_iso, now_unix_secs, EnvConfig, HttpClient};
 use open_estate::web::ops_dashboard::{
     build_connector_catalog, build_ops_telemetry_snapshot, classify_route_bucket,
-    handle_ops_dashboard_page, handle_ops_telemetry_json, ops_telemetry_middleware,
     render_ops_dashboard_html, sanitize_telemetry_path, OpsTelemetryRegistry, RouteBucket,
     OPS_RECENT_EVENTS_CAP, OPS_ROUTE_LATENCY_RING_CAP,
 };
-use open_estate::web::server::AppState;
+use open_estate::web::server::{build_router, AppState};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -312,11 +307,7 @@ async fn ops_endpoints_return_live_telemetry_and_responsive_html() {
     let mia_remod = load_holdout_home("synth-fl-33134-remod-sfr");
 
     for (slug, addr, status) in [
-        (
-            SECONDARY_SLUG,
-            common::SYNTH_SECONDARY_ADDRESS,
-            "complete",
-        ),
+        (SECONDARY_SLUG, common::SYNTH_SECONDARY_ADDRESS, "complete"),
         (
             "540-synthcohort15-st-seattle-wa-98103",
             sea_adu["address"].as_str().unwrap(),
@@ -450,55 +441,35 @@ async fn ops_endpoints_return_live_telemetry_and_responsive_html() {
         .await
         .expect("upsert listings");
 
-    let app = Router::new()
-        .route("/ops", get(handle_ops_dashboard_page))
-        .route("/api/ops/telemetry", get(handle_ops_telemetry_json))
-        .route(
-            "/r/:slug",
-            get(|AxumPath(_slug): AxumPath<String>| async { StatusCode::OK }),
-        )
-        .route(
-            "/api/report/:slug",
-            get(|AxumPath(_slug): AxumPath<String>| async { Json(json!({"ok": true})) }),
-        )
-        .route(
-            "/api/report/:slug/slides",
-            get(|AxumPath(_slug): AxumPath<String>| async { StatusCode::OK }),
-        )
-        .route(
-            "/api/ask",
-            post(|| async { StatusCode::INTERNAL_SERVER_ERROR }),
-        )
-        .route("/api/search", get(|| async { StatusCode::OK }))
-        .route("/deal-room", get(|| async { StatusCode::OK }))
-        .route("/healthz", get(|| async { StatusCode::OK }))
-        .layer(middleware::from_fn(ops_telemetry_middleware))
-        .with_state(state.clone());
+    let app = build_router(state.clone());
 
     let campbell_report_uri = format!("/r/{SECONDARY_SLUG}?token=leaked_query_secret");
-    let campbell_api_uri = format!("/api/report/{SECONDARY_SLUG}");
-    let campbell_slides_uri = format!("/api/report/{SECONDARY_SLUG}/slides");
+    let campbell_report_json_uri = format!("/r/{SECONDARY_SLUG}/report.json");
 
-    // Drive varied traffic through middleware (including query secret & 404 & 500)
+    // Drive varied traffic through real router middleware (including query secret, 400, & 404)
     for (method, uri, expected) in [
         ("GET", campbell_report_uri.as_str(), StatusCode::OK),
-        ("GET", campbell_api_uri.as_str(), StatusCode::OK),
-        ("GET", campbell_slides_uri.as_str(), StatusCode::OK),
-        ("POST", "/api/ask", StatusCode::INTERNAL_SERVER_ERROR),
+        ("GET", campbell_report_json_uri.as_str(), StatusCode::OK),
         (
             "GET",
-            "/api/search?email=alice@open-estate.local",
+            "/api/listings?zip=94303&email=alice@open-estate.local",
             StatusCode::OK,
         ),
+        ("POST", "/api/ask", StatusCode::BAD_REQUEST),
         ("GET", "/deal-room", StatusCode::OK),
+        ("GET", "/healthz", StatusCode::OK),
         ("GET", "/missing-route-check", StatusCode::NOT_FOUND),
     ] {
-        let req = Request::builder()
+        let mut req_builder = Request::builder()
             .method(method)
             .uri(uri)
-            .header("cookie", "session=cookie_secret_must_never_appear")
-            .body(axum::body::Body::empty())
-            .unwrap();
+            .header("cookie", "session=cookie_secret_must_never_appear");
+        if method == "POST" {
+            req_builder = req_builder
+                .header("content-type", "application/json")
+                .header("sec-fetch-site", "same-origin");
+        }
+        let req = req_builder.body(axum::body::Body::empty()).unwrap();
         let resp = app.clone().oneshot(req).await.expect("dispatch route");
         assert_eq!(resp.status(), expected, "unexpected status for {uri}");
     }

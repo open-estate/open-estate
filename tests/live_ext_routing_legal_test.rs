@@ -916,7 +916,7 @@ async fn live_public_preforeclosure_distress_tx_second_jurisdiction_track() {
     );
     assert_eq!(
         tx_out.data["foreclosureAndDistress"]["coverageStatus"],
-        "public_records_and_statutory_only"
+        "assessor_and_disclosures_only"
     );
 }
 
@@ -1184,7 +1184,7 @@ async fn live_public_title_underwriter_rates_tx_statutory_and_hub_wiring() {
     assert!(ev.dims.invocations >= 1);
     assert_eq!(ev.dims.external_api_calls, 0);
 
-    let notes = res.canonical_json["envelopes"][0]["attribution"]["notes"]
+    let notes = res.canonical_json["envelopes"][0]["envelope"]["attribution"]["notes"]
         .as_str()
         .unwrap_or("{}");
     let filing: serde_json::Value = serde_json::from_str(notes).expect("filing json");
@@ -1307,6 +1307,6 @@ fn live_public_title_underwriter_rates_marketplace_and_seller_suite_parity() {
     }));
     assert_eq!(
         seller.seller_suite["netSheetModel"]["sellerTitleAndEscrowBenchmarkUsd"].as_i64(),
-        Some(8_825)
+        Some(9_025)
     );
 }

@@ -482,6 +482,18 @@ const MIGRATION_TABLES: &[TableSpec] = &[
             ("created_at", ColKind::Str),
         ],
     },
+    TableSpec {
+        name: "admin_settings",
+        pk: "setting_key",
+        cols: &[
+            ("setting_key", ColKind::Str),
+            ("setting_value", ColKind::Str),
+            ("category", ColKind::Str),
+            ("description", ColKind::Str),
+            ("updated_by", ColKind::Str),
+            ("updated_at", ColKind::Str),
+        ],
+    },
 ];
 
 // [feat/report-ux-likes]

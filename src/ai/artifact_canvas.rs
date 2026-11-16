@@ -2376,6 +2376,17 @@ fn validate_llm_artifact_candidate(v: &Value) -> Vec<String> {
     errs
 }
 
+/// Default role, task, and JSON/charting rules used by [`generate_llm_artifact_with_prompt`].
+pub const DEFAULT_ARTIFACT_INSTRUCTIONS: &str = r#"ROLE: Real-estate quantitative chart & table architect for a US home-buyer command center.
+TASK: Turn the buyer's question into one compact, accurate, interactive chart + KPI strip + structured table grounded ONLY in `<grounded_property_facts>`.
+RULES:
+1. Pick the single clearest `chartType`: `bar` (scenario comparison), `line` (multi-year trend), `horizontal_bar` (ranked breakdown), `radar` (multi-pillar 0-100 profile), or `donut` (share of total).
+2. Keep ONE consistent numeric `unit` across all `series[i].values`! Every `series[i].values` array MUST match `categories.len()` exactly.
+3. Never fabricate external comps, sales, rates, scores, or facts missing or `null` in `<grounded_property_facts>`; omit missing dimensions rather than inventing numbers, and perform exact financial arithmetic only from non-null supplied numbers.
+4. Provide 3-4 concise `kpis`, a crisp `tableHeaders`/`tableRows` breakdown (2-6 columns, 3-8 rows), 2-3 `insights`, and 1 practical `watchout`.
+5. Set `synthesisMode` to `"ai_enhanced"`.
+6. Fair Housing strict compliance: zero demographic, racial, religious, or family-status characterizations."#;
+
 /// Generate a live AI-enhanced interactive visualization artifact grounded in `report` JSON,
 /// seamlessly falling back (<1ms) to `build_deterministic_artifact` when offline, unconfigured, or timed out.
 pub async fn generate_llm_artifact_with_client(
@@ -2385,6 +2396,20 @@ pub async fn generate_llm_artifact_with_client(
     prompt: &str,
     lang: &str,
     cache: Option<&dyn LlmCacheBackend>,
+) -> Value {
+    generate_llm_artifact_with_prompt(http, env, report, prompt, lang, cache, None).await
+}
+
+/// Variant of [`generate_llm_artifact_with_client`] allowing an optional admin-tuned system prompt
+/// override while keeping `IMMUTABLE_SYSTEM_PREAMBLE` and the output language directive pinned.
+pub async fn generate_llm_artifact_with_prompt(
+    http: &HttpClient,
+    env: &EnvConfig,
+    report: &Value,
+    prompt: &str,
+    lang: &str,
+    cache: Option<&dyn LlmCacheBackend>,
+    custom_instructions: Option<&str>,
 ) -> Value {
     let resolved_lang = detect_lang(
         if lang.trim().is_empty() {
@@ -2403,19 +2428,17 @@ pub async fn generate_llm_artifact_with_client(
         ArtifactLang::Es => "Escribe TODOS los títulos, etiquetas, series, encabezados de tabla, celdas, hallazgos y advertencia en español claro.",
     };
 
-    let instructions = format!(
-        "{IMMUTABLE_SYSTEM_PREAMBLE}\n\n\
-         ROLE: Real-estate quantitative chart & table architect for a US home-buyer command center.\n\
-         TASK: Turn the buyer's question into one compact, accurate, interactive chart + KPI strip + structured table grounded ONLY in `<grounded_property_facts>`.\n\
-         RULES:\n\
-         1. Pick the single clearest `chartType`: `bar` (scenario comparison), `line` (multi-year trend), `horizontal_bar` (ranked breakdown), `radar` (multi-pillar 0-100 profile), or `donut` (share of total).\n\
-         2. Keep ONE consistent numeric `unit` across all `series[i].values`! Every `series[i].values` array MUST match `categories.len()` exactly.\n\
-         3. Never fabricate external comps, sales, rates, scores, or facts missing or `null` in `<grounded_property_facts>`; omit missing dimensions rather than inventing numbers, and perform exact financial arithmetic only from non-null supplied numbers.\n\
-         4. Provide 3-4 concise `kpis`, a crisp `tableHeaders`/`tableRows` breakdown (2-6 columns, 3-8 rows), 2-3 `insights`, and 1 practical `watchout`.\n\
-         5. Set `synthesisMode` to `\"ai_enhanced\"`.\n\
-         6. Fair Housing strict compliance: zero demographic, racial, religious, or family-status characterizations.\n\
-         7. {lang_directive}"
+    let base_instructions = custom_instructions
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(DEFAULT_ARTIFACT_INSTRUCTIONS);
+    let branded_instructions = crate::shared::apply_brand_to_str(
+        base_instructions,
+        &env.brand_name(),
+        &env.brand_domain(),
     );
+    let instructions =
+        format!("{IMMUTABLE_SYSTEM_PREAMBLE}\n\n{branded_instructions}\n\n7. {lang_directive}");
 
     let digest_json = serde_json::to_string(&digest).unwrap_or_else(|_| "{}".to_string());
     let user_input = format!(

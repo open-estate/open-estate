@@ -401,6 +401,7 @@ impl StyleEvidence {
 impl HomeFactors {
     /// Extracts every scoring input from a report. Never panics; missing data stays `None`.
     pub fn from_report(report: &Value) -> HomeFactors {
+        let (brand_name, _) = crate::shared::report_brand(report);
         let facts = report.get("facts").filter(|v| v.is_object()).unwrap_or(&NULL);
         let as_of_year = report_year(report);
         let home = extract_home(report, facts, as_of_year);
@@ -423,20 +424,38 @@ impl HomeFactors {
             crime: extract_crime(report),
             convenience: extract_convenience(report),
             hazards: module_num(report, "hazards", "/scores/overall").map(|v| {
-                Factor::new(v, "Open Estate natural-hazard score (FEMA flood, USGS seismic, wildfire, FEMA NRI)", Grade::Report)
+                Factor::new(
+                    v,
+                    format!("{brand_name} natural-hazard score (FEMA flood, USGS seismic, wildfire, FEMA NRI)"),
+                    Grade::Report,
+                )
             }),
             environment: module_num(report, "environment", "/scores/overall").map(|v| {
-                Factor::new(v, "Open Estate environment score (contamination, air, water, noise)", Grade::Report)
+                Factor::new(
+                    v,
+                    format!("{brand_name} environment score (contamination, air, water, noise)"),
+                    Grade::Report,
+                )
             }),
             investment: report
                 .pointer("/summary/scores/investment")
                 .and_then(|v| num(Some(v)))
                 .map(|v| {
-                    Factor::new(v, "Open Estate investment score (ZIP appreciation, yield, price-to-income)", Grade::Area)
+                    Factor::new(
+                        v,
+                        format!("{brand_name} investment score (ZIP appreciation, yield, price-to-income)"),
+                        Grade::Area,
+                    )
                 }),
             fengshui: module_num(report, "fengshui", "/scores/overall")
                 .or_else(|| module_num(report, "fengshui", "/score"))
-                .map(|v| Factor::new(v, "Open Estate feng shui reading (form and flying stars)", Grade::Report)),
+                .map(|v| {
+                    Factor::new(
+                        v,
+                        format!("{brand_name} feng shui reading (form and flying stars)"),
+                        Grade::Report,
+                    )
+                }),
             gates: extract_gates(report, facts),
             home,
             style,
@@ -805,13 +824,14 @@ fn school_year(v: Option<&Value>) -> Option<i32> {
 // ----- cost -----------------------------------------------------------------------------------
 
 fn extract_cost(report: &Value, facts: &Value) -> CostFactors {
+    let (brand_name, _) = crate::shared::report_brand(report);
     let val = module(report, "valuation");
     let own = val.and_then(|v| v.get("ownership")).filter(|o| o.is_object());
     let rate_year = own.and_then(|o| str_at(o, "/rateDate")).and_then(year_prefix);
     let down = own.and_then(|o| num(o.get("downPaymentPct")));
     let monthly_source = match (down, own.and_then(|o| num(o.get("rate30")))) {
-        (Some(d), Some(r)) => format!("Open Estate cost model ({d}% down, 30-year fixed at {r}%)"),
-        _ => "Open Estate cost model".to_string(),
+        (Some(d), Some(r)) => format!("{brand_name} cost model ({d}% down, 30-year fixed at {r}%)"),
+        _ => format!("{brand_name} cost model"),
     };
     let monthly_by_loan = own.and_then(|o| {
         let conv = num(o.pointer("/scenarios/conventional/total")).filter(|v| *v > 0.0);
@@ -837,12 +857,12 @@ fn extract_cost(report: &Value, facts: &Value) -> CostFactors {
         price: own
             .and_then(|o| num(o.get("price")))
             .filter(|p| *p > 0.0)
-            .map(|p| Factor::new(p, "Open Estate cost-model price", Grade::Report)),
+            .map(|p| Factor::new(p, format!("{brand_name} cost-model price"), Grade::Report)),
         estimate: val
             .and_then(|v| num(v.pointer("/estimate/value")))
             .filter(|e| *e > 0.0)
             .map(|e| {
-                Factor::new(e, "Open Estate value estimate", Grade::Report)
+                Factor::new(e, format!("{brand_name} value estimate"), Grade::Report)
                     .with_year(val.and_then(|v| str_at(v, "/estimate/asOf")).and_then(year_prefix))
             }),
         list_price: num(facts.pointer("/mlsListing/listPrice"))
@@ -854,7 +874,7 @@ fn extract_cost(report: &Value, facts: &Value) -> CostFactors {
             .or_else(|| {
                 own.and_then(|o| num(o.pointer("/monthly/hoa")))
                     .filter(|h| *h >= 0.0)
-                    .map(|h| Factor::new(h, "Open Estate cost model", Grade::Report))
+                    .map(|h| Factor::new(h, format!("{brand_name} cost model"), Grade::Report))
             }),
         cash_to_close: own.and_then(|o| num(o.pointer("/closingAndSupplemental/cashToClose"))),
         monthly_by_loan,
@@ -1295,7 +1315,12 @@ fn extract_home(report: &Value, facts: &Value, as_of_year: i32) -> HomeFitFactor
         effective_year,
         adu: extract_adu(facts),
         adu_feasibility: str_at(report, "/decisionFactors/lotAndAdu/feasibility").map(|s| {
-            Factor::new(s.to_string(), "Open Estate lot and ADU screen (open lot area, state ADU law)", Grade::Report)
+            let (brand_name, _) = crate::shared::report_brand(report);
+            Factor::new(
+                s.to_string(),
+                format!("{brand_name} lot and ADU screen (open lot area, state ADU law)"),
+                Grade::Report,
+            )
         }),
         main_level_bedrooms: num(facts.get("mainLevelBedrooms"))
             .or_else(|| num(facts.get("groundFloorBedrooms")))
@@ -1580,19 +1605,19 @@ fn fire_flag(hz: Option<&Value>) -> Option<Factor<bool>> {
 
 /// T-junction: the structured `tJunction` block when present, else the form entries
 /// (`lu-chong`, "points straight at the house").
-fn t_junction_flag(fs: Option<&Value>) -> Option<Factor<bool>> {
+fn t_junction_flag(fs: Option<&Value>, brand_name: &str) -> Option<Factor<bool>> {
     let fs = fs?;
-    const SOURCE: &str = "Open Estate feng shui form reading (OpenStreetMap streets)";
+    let source = format!("{brand_name} feng shui form reading (OpenStreetMap streets)");
     if let Some(tj) = fs.get("tJunction").filter(|t| t.is_object()) {
         if let Some(hits) = tj.get("hits").and_then(Value::as_array) {
-            return Some(Factor::new(!hits.is_empty(), SOURCE, Grade::Report));
+            return Some(Factor::new(!hits.is_empty(), source, Grade::Report));
         }
         if let Some(b) = tj.get("hasAlignment").and_then(Value::as_bool) {
-            return Some(Factor::new(b, SOURCE, Grade::Report));
+            return Some(Factor::new(b, source, Grade::Report));
         }
     }
     if let Some(b) = fs.pointer("/quickScreens/tJunction/hit").and_then(Value::as_bool) {
-        return Some(Factor::new(b, SOURCE, Grade::Report));
+        return Some(Factor::new(b, source, Grade::Report));
     }
     let form = fs.get("form").and_then(Value::as_array)?;
     let hit = form.iter().any(|x| {
@@ -1601,7 +1626,7 @@ fn t_junction_flag(fs: Option<&Value>) -> Option<Factor<bool>> {
                 .and_then(Value::as_str)
                 .map_or(false, |s| s.contains("points straight at the house"))
     });
-    Some(Factor::new(hit, SOURCE, Grade::Report))
+    Some(Factor::new(hit, source, Grade::Report))
 }
 
 fn house_number(report: &Value) -> Option<String> {
@@ -1635,13 +1660,14 @@ fn extract_gates(report: &Value, _facts: &Value) -> GateInputs {
         None if lines_known => Some(Factor::new(false, "OpenStreetMap road network (no freeway nearby)", Grade::Report)),
         None => None,
     };
+    let (brand_name, _) = crate::shared::report_brand(report);
     GateInputs {
         sfha,
         flood_zone,
         very_high_fire: fire_flag(hz),
         freeway_distance_m,
         freeway_within_500ft,
-        t_junction: t_junction_flag(module(report, "fengshui")),
+        t_junction: t_junction_flag(module(report, "fengshui"), brand_name),
         house_number: house_number(report),
     }
 }

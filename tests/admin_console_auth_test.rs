@@ -6,14 +6,12 @@
 use axum::{
     body::{to_bytes, Body},
     http::{header, Request, StatusCode},
-    routing::get,
     Router,
 };
 use open_estate::db::SqlParam;
 use open_estate::search::CURRENT_FILTER_SCHEMA_VERSION;
 use open_estate::shared::{now_iso, EnvConfig};
-use open_estate::web::admin_console::{admin_host_redirect_layer, admin_routes};
-use open_estate::web::server::AppState;
+use open_estate::web::server::{build_router, AppState};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use tower::ServiceExt;
@@ -25,18 +23,16 @@ async fn setup_admin_test_app(
     let dir = std::env::temp_dir().join(format!("oe-admin-auth-test-{}", Uuid::new_v4()));
     std::fs::create_dir_all(&dir).unwrap();
     let db_path = dir.join("test.sqlite");
-    extra_env.insert("SQLITE_DB_PATH".into(), db_path.to_string_lossy().into_owned());
+    extra_env.insert(
+        "SQLITE_DB_PATH".into(),
+        db_path.to_string_lossy().into_owned(),
+    );
     extra_env.insert("SQLITE_PATH".into(), db_path.to_string_lossy().into_owned());
     let env = EnvConfig::from_map(extra_env);
     let state = AppState::from_env(env).await.expect("AppState::from_env");
     state.db.ensure_schema().await.expect("ensure_schema");
 
-    let app = Router::new()
-        .route("/", get(|| async { (StatusCode::OK, "public-home") }))
-        .route("/healthz", get(|| async { (StatusCode::OK, "ok") }))
-        .merge(admin_routes())
-        .with_state(state.clone())
-        .layer(admin_host_redirect_layer(state.clone()));
+    let app = build_router(state.clone());
 
     (dir, state, app)
 }
@@ -59,7 +55,11 @@ async fn send_json_req(
         }
         None => Body::empty(),
     };
-    let resp = app.clone().oneshot(builder.body(body).unwrap()).await.unwrap();
+    let resp = app
+        .clone()
+        .oneshot(builder.body(body).unwrap())
+        .await
+        .unwrap();
     let status = resp.status();
     let resp_headers = resp.headers().clone();
     let bytes = to_bytes(resp.into_body(), 2 * 1024 * 1024).await.unwrap();
@@ -85,7 +85,11 @@ async fn send_raw_req(
     let status = resp.status();
     let resp_headers = resp.headers().clone();
     let bytes = to_bytes(resp.into_body(), 2 * 1024 * 1024).await.unwrap();
-    (status, resp_headers, String::from_utf8_lossy(&bytes).into_owned())
+    (
+        status,
+        resp_headers,
+        String::from_utf8_lossy(&bytes).into_owned(),
+    )
 }
 
 #[tokio::test]
@@ -209,7 +213,11 @@ async fn reverse_proxy_auth_secret_headers_allowlist_only_mode_and_logout() {
         None,
     )
     .await;
-    assert_eq!(st_ok, StatusCode::OK, "expected valid proxy auth to pass: {body_ok}");
+    assert_eq!(
+        st_ok,
+        StatusCode::OK,
+        "expected valid proxy auth to pass: {body_ok}"
+    );
     assert_eq!(body_ok["operator"]["actor"], "proxy:op@example.org");
     assert_eq!(body_ok["operator"]["viaProxyAuth"], true);
     assert_eq!(body_ok["operator"]["viaToken"], false);
@@ -386,12 +394,17 @@ async fn reverse_proxy_auth_secret_headers_allowlist_only_mode_and_logout() {
     )
     .await;
     assert_eq!(st_html, StatusCode::OK);
-    assert!(admin_html.contains("id=\"signOutBtn\""), "Sign out button missing");
+    assert!(
+        admin_html.contains("id=\"signOutBtn\""),
+        "Sign out button missing"
+    );
     assert!(admin_html.contains("Sign out"));
     assert!(admin_html.contains("console-shell") && admin_html.contains("nav-rail"));
     assert!(admin_html.contains("id=\"navRailToggleBtn\""));
     assert!(admin_html.contains("prefers-color-scheme: dark"));
-    assert!(admin_html.contains("data-theme=\"light\"") && admin_html.contains("data-theme=\"dark\""));
+    assert!(
+        admin_html.contains("data-theme=\"light\"") && admin_html.contains("data-theme=\"dark\"")
+    );
     assert!(admin_html.contains("id=\"themeSelect\""));
     assert!(admin_html.contains("Proxy Auth:"));
     assert!(admin_html.contains("SSO Proxy") && admin_html.contains("Operator Token"));
@@ -517,16 +530,13 @@ async fn admin_host_routing_and_strict_isolation() {
     let auth_hdr = format!("Bearer {token}");
 
     // On ADMIN_HOST, `/` redirects to `/admin` (preserving query string)
-    let (st_root, hdrs_root, _) = send_raw_req(
-        &app,
-        "GET",
-        "/?tab=users",
-        &[("Host", "admin.example.com")],
-    )
-    .await;
+    let (st_root, hdrs_root, _) =
+        send_raw_req(&app, "GET", "/?tab=users", &[("Host", "admin.example.com")]).await;
     assert_eq!(st_root, StatusCode::FOUND);
     assert_eq!(
-        hdrs_root.get(header::LOCATION).and_then(|v| v.to_str().ok()),
+        hdrs_root
+            .get(header::LOCATION)
+            .and_then(|v| v.to_str().ok()),
         Some("/admin?tab=users")
     );
 
@@ -534,7 +544,10 @@ async fn admin_host_routing_and_strict_isolation() {
     let (st_pub_home, _, pub_body) =
         send_raw_req(&app, "GET", "/", &[("Host", "app.example.com")]).await;
     assert_eq!(st_pub_home, StatusCode::OK);
-    assert_eq!(pub_body, "public-home");
+    assert!(
+        pub_body.to_ascii_lowercase().contains("<!doctype html>"),
+        "expected real public home HTML"
+    );
 
     let (st_pub_adm, _, _) = send_json_req(
         &app,
@@ -564,7 +577,9 @@ async fn admin_host_routing_and_strict_isolation() {
     .await;
     assert_eq!(st_redir, StatusCode::FOUND);
     assert_eq!(
-        hdrs_redir.get(header::LOCATION).and_then(|v| v.to_str().ok()),
+        hdrs_redir
+            .get(header::LOCATION)
+            .and_then(|v| v.to_str().ok()),
         Some("https://admin.example.com/admin?view=subs")
     );
 
@@ -579,10 +594,16 @@ async fn admin_host_routing_and_strict_isolation() {
     assert_eq!(st_api_404, StatusCode::NOT_FOUND);
     assert_eq!(body_404["code"], "ADMIN_HOST_REQUIRED");
 
-    let (st_health, _, health_body) =
-        send_raw_req(&app_strict, "GET", "/healthz", &[("Host", "app.example.com")]).await;
+    let (st_health, _, health_body) = send_raw_req(
+        &app_strict,
+        "GET",
+        "/healthz",
+        &[("Host", "app.example.com")],
+    )
+    .await;
     assert_eq!(st_health, StatusCode::OK);
-    assert_eq!(health_body, "ok");
+    let health_json: Value = serde_json::from_str(&health_body).expect("valid /healthz json");
+    assert_eq!(health_json["ok"], true);
 
     // Admin host works cleanly (both Host and TRUST_PROXY_HEADERS X-Forwarded-Host)
     let (st_admin_ok, _, _) = send_json_req(
@@ -599,7 +620,10 @@ async fn admin_host_routing_and_strict_isolation() {
         &app_strict,
         "GET",
         "/",
-        &[("Host", "internal.svc.local:8080"), ("X-Forwarded-Host", "admin.example.com")],
+        &[
+            ("Host", "internal.svc.local:8080"),
+            ("X-Forwarded-Host", "admin.example.com"),
+        ],
     )
     .await;
     assert_eq!(st_xfh_root, StatusCode::FOUND);
@@ -703,7 +727,10 @@ async fn admin_users_crud_filtering_inspection_deactivate_and_csv() {
         })),
     )
     .await;
-    let sub_id = sub_created["subscription"]["id"].as_str().unwrap().to_string();
+    let sub_id = sub_created["subscription"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     let now = now_iso();
     state
@@ -791,7 +818,13 @@ async fn admin_users_crud_filtering_inspection_deactivate_and_csv() {
     assert_eq!(st_insp, StatusCode::OK, "inspect response: {insp}");
     assert_eq!(insp["subscriptionCounts"]["active"], 1);
     assert_eq!(insp["reportActivity"]["viewedReportsCount"], 1);
-    assert_eq!(insp["reportActivity"]["agentMatchRequests"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        insp["reportActivity"]["agentMatchRequests"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
     assert_eq!(insp["notificationsRecent"].as_array().unwrap().len(), 1);
 
     // 5. Patch user: clear maxActiveNlAlerts override -> falls back to plan tier cap (pro_monthly=25)
@@ -813,8 +846,13 @@ async fn admin_users_crud_filtering_inspection_deactivate_and_csv() {
     assert_eq!(patched["user"]["effectiveMaxActiveNlAlerts"], 25);
 
     // 6. Export CSV before deactivation
-    let (st_csv, csv_hdrs, csv_body) =
-        send_raw_req(&app, "GET", "/api/admin/users/export.csv?plan_tier=pro_monthly", &hdrs).await;
+    let (st_csv, csv_hdrs, csv_body) = send_raw_req(
+        &app,
+        "GET",
+        "/api/admin/users/export.csv?plan_tier=pro_monthly",
+        &hdrs,
+    )
+    .await;
     assert_eq!(st_csv, StatusCode::OK);
     assert!(csv_hdrs
         .get(header::CONTENT_TYPE)
@@ -837,17 +875,37 @@ async fn admin_users_crud_filtering_inspection_deactivate_and_csv() {
     assert_eq!(st_deact, StatusCode::OK);
     assert_eq!(deact_res["pausedSubscriptions"], 1);
 
-    let sub_after = state.db.fetch_subscription_by_id(&sub_id).await.unwrap().unwrap();
-    assert_eq!(sub_after.active, 0, "deactivation should pause user's active alert");
+    let sub_after = state
+        .db
+        .fetch_subscription_by_id(&sub_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        sub_after.active, 0,
+        "deactivation should pause user's active alert"
+    );
 
     // 8. Hard delete u2 and confirm 404 on subsequent GET
-    let (st_del, _, del_res) =
-        send_json_req(&app, "DELETE", &format!("/api/admin/users/{u2_id}"), &hdrs, None).await;
+    let (st_del, _, del_res) = send_json_req(
+        &app,
+        "DELETE",
+        &format!("/api/admin/users/{u2_id}"),
+        &hdrs,
+        None,
+    )
+    .await;
     assert_eq!(st_del, StatusCode::OK);
     assert_eq!(del_res["mode"], "deleted");
 
-    let (st_gone, _, _) =
-        send_json_req(&app, "GET", &format!("/api/admin/users/{u2_id}"), &hdrs, None).await;
+    let (st_gone, _, _) = send_json_req(
+        &app,
+        "GET",
+        &format!("/api/admin/users/{u2_id}"),
+        &hdrs,
+        None,
+    )
+    .await;
     assert_eq!(st_gone, StatusCode::NOT_FOUND);
 
     let _ = std::fs::remove_dir_all(&dir);
@@ -985,9 +1043,8 @@ async fn admin_subscriptions_crud_frequency_retranslate_delivery_logs_and_csv() 
     assert_eq!(st_logs, StatusCode::OK);
     assert_eq!(logs_res["total"], 2);
     let items = logs_res["items"].as_array().unwrap();
-    assert!(items
-        .iter()
-        .any(|n| n["deliveryStatus"] == "failed" && n["deliveryError"] == "SMTP relay 421 temporary deferral"));
+    assert!(items.iter().any(|n| n["deliveryStatus"] == "failed"
+        && n["deliveryError"] == "SMTP relay 421 temporary deferral"));
 
     // 5. Edit sub2: change ZIPs, requirements, frequency, notify flags, resume active
     let (st_ed, _, ed_res) = send_json_req(
@@ -1043,8 +1100,16 @@ async fn admin_subscriptions_crud_frequency_retranslate_delivery_logs_and_csv() 
     assert_eq!(st_rtb, StatusCode::OK, "batch stale retranslate: {rtb_res}");
     assert!(rtb_res["summary"]["retranslated"].as_u64().unwrap_or(0) >= 1);
 
-    let sub2_after = state.db.fetch_subscription_by_id(&sub2_id).await.unwrap().unwrap();
-    assert_eq!(sub2_after.filter_schema_version, CURRENT_FILTER_SCHEMA_VERSION as i64);
+    let sub2_after = state
+        .db
+        .fetch_subscription_by_id(&sub2_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        sub2_after.filter_schema_version,
+        CURRENT_FILTER_SCHEMA_VERSION as i64
+    );
 
     // 7. Export subscriptions CSV
     let (st_csv, _, csv_body) = send_raw_req(

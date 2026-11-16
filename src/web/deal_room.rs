@@ -6,7 +6,10 @@ use crate::guardrails::{
     is_automated_scraper_ua, validate_slug_param, validate_street_address_input, verify_same_origin,
     GuardrailError,
 };
-use crate::shared::{compass_zh, format_brand_wordmark_styled_html, slugify, EnvConfig};
+use crate::shared::{
+    compass_zh, effective_brand_domain, effective_brand_name, format_brand_wordmark_styled_html,
+    slugify, EnvConfig,
+};
 use crate::web::hooks::{authorize_cached_report, inject_script_before_body_end};
 use crate::web::i18n::{
     is_es, is_zh, resolve_lang, resolve_lang_str, t, t_args, t_brand, LANG_COOKIE_NAME, LANG_EN,
@@ -17,8 +20,8 @@ use crate::web::internal_auth::{
     prepare_oe_session_for_html, resolve_verified_oe_session,
 };
 use crate::web::render::{
-    safe_open_estate_core_js, safe_inline_js, safe_inline_json, I18NEXT_JS, I18N_EN_JSON,
-    I18N_ES_JSON, I18N_ZH_JSON,
+    localize_i18n_json_for_brand, safe_inline_js, safe_inline_json, safe_open_estate_core_js,
+    I18NEXT_JS, I18N_EN_JSON, I18N_ES_JSON, I18N_ZH_JSON,
 };
 use crate::web::server::{
     get_cached_or_disk_report, html_response, json_response, json_response_with_cache,
@@ -2316,7 +2319,10 @@ fn verify_history_mutation_origin(
         if is_automated_scraper_ua(headers) {
             return Err(map_guardrail(GuardrailError::new(
                 "AUTOMATED_SCRAPER_BLOCKED",
-                "Automated scripts and scrapers are prohibited on Open Estate endpoints.",
+                format!(
+                    "Automated scripts and scrapers are prohibited on {} endpoints.",
+                    env.brand_name()
+                ),
                 403,
             )));
         }
@@ -2706,8 +2712,8 @@ pub fn render_deal_room_html_with_brand(
     brand_name: &str,
     brand_domain: &str,
 ) -> String {
-    let eff_brand = if brand_name.trim().is_empty() { "Open Estate" } else { brand_name.trim() };
-    let eff_domain = if brand_domain.trim().is_empty() { "open-estate.local" } else { brand_domain.trim() };
+    let eff_brand = effective_brand_name(brand_name);
+    let eff_domain = effective_brand_domain(brand_domain);
     let winners = if items.len() >= 2 {
         compute_deal_room_winners(items)
     } else {
@@ -3203,10 +3209,32 @@ pub fn render_deal_room_html_with_brand(
     let quick_en = t(&LANG_EN, "deal-room-quick-add");
     let quick_zh = t(&LANG_ZH, "deal-room-quick-add");
     let quick_es = t(&LANG_ES, "deal-room-quick-add");
+    let brand_slug = slugify(eff_brand);
+    let default_csv_name = if brand_slug.is_empty() {
+        "deal-room-comparison.csv".to_string()
+    } else {
+        format!("{brand_slug}-deal-room-comparison.csv")
+    };
+    let default_csv_name_js = safe_inline_json(
+        &serde_json::to_string(&default_csv_name)
+            .unwrap_or_else(|_| "\"deal-room-comparison.csv\"".into()),
+    );
     let safe_i18next = safe_inline_js(I18NEXT_JS);
-    let safe_i18n_en = safe_inline_json(I18N_EN_JSON);
-    let safe_i18n_zh = safe_inline_json(I18N_ZH_JSON);
-    let safe_i18n_es = safe_inline_json(I18N_ES_JSON);
+    let safe_i18n_en = safe_inline_json(&localize_i18n_json_for_brand(
+        I18N_EN_JSON,
+        eff_brand,
+        eff_domain,
+    ));
+    let safe_i18n_zh = safe_inline_json(&localize_i18n_json_for_brand(
+        I18N_ZH_JSON,
+        eff_brand,
+        eff_domain,
+    ));
+    let safe_i18n_es = safe_inline_json(&localize_i18n_json_for_brand(
+        I18N_ES_JSON,
+        eff_brand,
+        eff_domain,
+    ));
 
     let raw_json = serde_json::to_string(items).unwrap_or_else(|_| "[]".to_string());
     let safe_script_json = raw_json
@@ -3433,15 +3461,17 @@ pub fn render_deal_room_html_with_brand(
       'zh-CN': {{ translation: {safe_i18n_zh} }},
       es: {{ translation: {safe_i18n_es} }}
     }};
-    if (BRAND_NAME !== 'Open Estate' || BRAND_DOMAIN !== 'open-estate.local') {{
+    const resBrand = (resMap.en && resMap.en.translation && resMap.en.translation.brand && resMap.en.translation.brand.name) || '';
+    const resDom = (resMap.en && resMap.en.translation && resMap.en.translation.brand && resMap.en.translation.brand.domain) || '';
+    if ((resBrand && resBrand !== BRAND_NAME) || (resDom && resDom !== BRAND_DOMAIN)) {{
       const patch = (n) => {{
         if (!n || typeof n !== 'object') return;
         for (const k of Object.keys(n)) {{
           const v = n[k];
           if (typeof v === 'string') {{
             let out = v;
-            if (BRAND_NAME !== 'Open Estate') out = out.split('Open Estate').join(BRAND_NAME);
-            if (BRAND_DOMAIN !== 'open-estate.local') out = out.split('open-estate.local').join(BRAND_DOMAIN);
+            if (resBrand && resBrand !== BRAND_NAME) out = out.split(resBrand).join(BRAND_NAME);
+            if (resDom && resDom !== BRAND_DOMAIN) out = out.split(resDom).join(BRAND_DOMAIN);
             n[k] = out;
           }} else if (v && typeof v === 'object') patch(v);
         }}
@@ -3512,7 +3542,7 @@ pub fn render_deal_room_html_with_brand(
       const blob = new Blob([csv], {{ type: 'text/csv;charset=utf-8;' }});
       const a = document.createElement('a');
       a.href = URL.createObjectURL(blob);
-      a.download = (window.i18next && window.i18next.t('dealRoom.exportFilename')) || 'open-estate-deal-room-comparison.csv';
+      a.download = (window.i18next && window.i18next.t('dealRoom.exportFilename')) || {default_csv_name_js};
       a.click();
     }});
 

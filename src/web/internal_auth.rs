@@ -588,7 +588,10 @@ pub async fn internal_auth_middleware(
     {
         return guardrail_error_to_response(GuardrailError::new(
             "AUTOMATED_SCRAPER_BLOCKED",
-            "Automated scripts and scrapers are prohibited on Open Estate AI endpoints.",
+            format!(
+                "Automated scripts and scrapers are prohibited on {} AI endpoints.",
+                state.env.brand_name()
+            ),
             403,
         ));
     }

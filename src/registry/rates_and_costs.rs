@@ -1700,7 +1700,7 @@ pub fn build_transfer_tax_table_proto(input: &RatesAndCostsPersistInput) -> Tran
         "CA" => "https://www.boe.ca.gov/proptaxes/proptax.htm",
         "NY" => "https://www.tax.ny.gov/pit/property/transfer/",
         "WA" => "https://dor.wa.gov/taxes-rates/other-taxes/real-estate-excise-tax",
-        _ => "https://www.ncsl.org/fiscal/real-estate-transfer-taxes",
+        _ => "https://www.taxadmin.org/state-tax-agencies",
     };
     TransferTaxTableProto {
         state: st,

@@ -335,6 +335,9 @@ rate_limit:
   requests_per_second: 5
   burst: 10
   timeout_ms: 1500
+source_attribution:
+  name: "U.S. Census Bureau Geocoder Unreachable Probe"
+  url: "https://geocoding.geo.census.gov/"
 request:
   method: GET
   url: "{dead_base}/geocoder/geographies/onelineaddress"

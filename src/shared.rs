@@ -141,6 +141,67 @@ pub fn normalize_retired_brand(s: &str) -> String {
         .into_owned()
 }
 
+/// Normalizes a candidate brand display name, falling back to `"Open Estate"` when blank.
+pub fn effective_brand_name(raw: &str) -> &str {
+    let t = raw.trim();
+    if t.is_empty() {
+        "Open Estate"
+    } else {
+        t
+    }
+}
+
+/// Normalizes a candidate brand domain, falling back to `"open-estate.local"` when blank.
+pub fn effective_brand_domain(raw: &str) -> &str {
+    let t = raw.trim();
+    if t.is_empty() {
+        "open-estate.local"
+    } else {
+        t
+    }
+}
+
+/// Rewrites default `"Open Estate"` / `"open-estate.local"` occurrences in a string when
+/// a custom white-label brand name or domain is active.
+pub fn apply_brand_to_str(raw: &str, brand_name: &str, brand_domain: &str) -> String {
+    let eff_name = effective_brand_name(brand_name);
+    let eff_domain = effective_brand_domain(brand_domain);
+    let mut out = raw.to_string();
+    if eff_domain != "open-estate.local" && out.contains("open-estate.local") {
+        out = out.replace("open-estate.local", eff_domain);
+    }
+    if eff_name != "Open Estate" && out.contains("Open Estate") {
+        out = out.replace("Open Estate", eff_name);
+    }
+    if eff_name != "Open Estate" && out.contains("open-estate-deal-room-comparison.csv") {
+        let brand_slug = slugify(eff_name);
+        if !brand_slug.is_empty() {
+            out = out.replace(
+                "open-estate-deal-room-comparison.csv",
+                &format!("{brand_slug}-deal-room-comparison.csv"),
+            );
+        }
+    }
+    out
+}
+
+/// Extracts the normalized `(name, domain)` configured on a report JSON value (`brand` or `meta.brand`).
+pub fn report_brand(report: &Value) -> (&str, &str) {
+    let name = report
+        .pointer("/brand/name")
+        .or_else(|| report.pointer("/meta/brand/name"))
+        .and_then(Value::as_str)
+        .map(effective_brand_name)
+        .unwrap_or("Open Estate");
+    let domain = report
+        .pointer("/brand/domain")
+        .or_else(|| report.pointer("/meta/brand/domain"))
+        .and_then(Value::as_str)
+        .map(effective_brand_domain)
+        .unwrap_or("open-estate.local");
+    (name, domain)
+}
+
 /// Renders a two-tone HTML wordmark (`Open <b>Estate</b>` or CamelCase split) from `brand_name`.
 pub fn format_brand_wordmark_html(brand_name: &str) -> String {
     format_brand_wordmark_styled_html(brand_name, None)

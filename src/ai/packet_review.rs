@@ -1888,15 +1888,24 @@ pub async fn analyze_disclosure_packet(
     }
 
     let file_names: Vec<String> = batch.documents.iter().map(|d| d.name.clone()).collect();
+    let packet_src_url = {
+        let dom = env.brand_domain();
+        if dom == "open-estate.local" {
+            "https://openestate.org/packet-review".to_string()
+        } else {
+            format!("https://{dom}/packet-review")
+        }
+    };
     Ok(ModuleOutput {
         data: parsed,
         sources: vec![SourceItem::new(
             format!(
-                "Open Estate Multi-Document Disclosure Packet & Contradiction Engine over {} file(s) ({})",
+                "{} Multi-Document Disclosure Packet & Contradiction Engine over {} file(s) ({})",
+                env.brand_name(),
                 file_names.len(),
                 file_names.iter().take(6).cloned().collect::<Vec<_>>().join(", ")
             ),
-            "https://openestate.org/packet-review",
+            packet_src_url,
         )],
         warnings,
     })
