@@ -1,0 +1,51 @@
+id: fcc_broadband_bdc
+name: "FCC National Broadband Map (BDC Live API)"
+version: "1.0.0"
+description: "Federal Communications Commission Broadband Data Collection (BDC) location availability lookup; requires FCC_BDC_USERNAME/FCC_BDC_API_TOKEN or verified browser/portal session (never fabricates fallback carriers when HTTP 401/405 occurs)."
+domain: broadband
+domains:
+  - broadband
+driver: openapi_yaml
+proto_message_type: "openestate.extension.v1.BroadbandCatalogProto"
+priority: 290
+enabled_by_default: true
+provenance: live_verified
+homepage_url: "https://broadbandmap.fcc.gov/"
+documentation_url: "https://www.fcc.gov/BroadbandData"
+codeowners:
+  - "@openestate/core"
+geo_scope:
+  country: "US"
+  nationwide: true
+  states: []
+  counties: []
+  zip_prefixes: []
+  zip_codes: []
+  cities: []
+auth:
+  auth_type: none
+rate_limit:
+  requests_per_second: 3
+  burst: 6
+  timeout_ms: 2500
+cache_ttl_secs: 604800
+source_attribution:
+  name: "FCC National Broadband Map / Broadband Data Collection (BDC)"
+  url: "https://broadbandmap.fcc.gov/"
+  notes: "Public map JSON endpoints may return HTTP 405 from automated server clients; see fcc_broadband_bdc_live for authenticated BDC queries and honest unverified reporting."
+openapi:
+  spec_file: "openapi.yaml"
+  operation_id: "listAvailableFixedCarriersByLocation"
+  query_params:
+    latitude: "{{ lat }}"
+    longitude: "{{ lon }}"
+response_mapping:
+  items_path: "$.data[*]"
+  require_non_empty: true
+  fields:
+    carrier_name: "$.brand_name"
+    fallback_carrier_name: "$.holding_company_name"
+    technology_code: "$.technology_code"
+    technology_desc: "$.technology_code_desc"
+    max_download_mbps: "$.max_advertised_download_speed"
+    max_upload_mbps: "$.max_advertised_upload_speed"

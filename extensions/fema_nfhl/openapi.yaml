@@ -1,0 +1,61 @@
+openapi: "3.0.3"
+info:
+  title: "FEMA National Flood Hazard Layer (NFHL) ArcGIS REST API"
+  version: "1.0.0"
+  description: "Official FEMA National Flood Hazard Layer (MapServer Layer 28) flood zone point query."
+servers:
+  - url: "https://hazards.fema.gov/arcgis/rest/services/public/NFHL/MapServer"
+paths:
+  /28/query:
+    get:
+      operationId: queryNfhlFloodZone
+      summary: "Point-in-polygon flood hazard zone query on FEMA NFHL Layer 28."
+      parameters:
+        - name: geometry
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: geometryType
+          in: query
+          required: true
+          schema:
+            type: string
+            default: "esriGeometryPoint"
+        - name: inSR
+          in: query
+          required: true
+          schema:
+            type: string
+            default: "4326"
+        - name: spatialRel
+          in: query
+          required: true
+          schema:
+            type: string
+            default: "esriSpatialRelIntersects"
+        - name: outFields
+          in: query
+          required: true
+          schema:
+            type: string
+            default: "FLD_ZONE,ZONE_SUBTY,SFHA_TF,STATIC_BFE"
+        - name: returnGeometry
+          in: query
+          required: true
+          schema:
+            type: string
+            default: "false"
+        - name: f
+          in: query
+          required: true
+          schema:
+            type: string
+            default: "json"
+      responses:
+        "200":
+          description: "FEMA NFHL ArcGIS feature attributes"
+          content:
+            application/json:
+              schema:
+                type: object

@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust:
+    name: Rust Check & Offline Test Suite
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo registry and build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check all targets
+        run: cargo check --all-targets --locked
+
+      - name: Verify downstream-brand independence
+        run: cargo test --locked --test brand_independence_test
+
+      - name: Run unit and offline integration tests
+        run: cargo test --locked -- --skip live_ --skip e2e_suite --skip e2e_browser
+
+      - name: Validate Docker Compose manifests & Chrome Extension packaging
+        run: |
+          docker compose config >/dev/null
+          docker compose --profile osrm --profile mysql config >/dev/null
+          bash scripts/package_extension.sh

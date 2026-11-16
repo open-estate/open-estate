@@ -1,0 +1,39 @@
+id: title_underwriter_rates
+name: "50-State + DC Statutory & State-Filed Title Insurance Rate Schedules"
+version: "1.0.0"
+description: "50-state + DC title insurance rate engine implementing promulgated statutory formulas (TX TDI Basic Manual R-1/R-5/R-8, FL OIR F.A.C. 69O-186.003, NM OSI 13.14.9 NMAC, IA Title Guaranty), filed bureau manuals (NY TIRSA, PA TIRBOP, NJ NJLTIRB, OH PR-1, NC), and clearly labeled estimated/benchmark schedules elsewhere."
+domain: insurance
+domains:
+  - insurance
+  - tax_mandates
+driver: native_adapter
+proto_message_type: "openestate.extension.v1.InsuranceQuoteProto"
+priority: 250
+enabled_by_default: true
+builtin: true
+provenance: official_tariff
+homepage_url: "https://www.tdi.texas.gov/title/titleman.html"
+documentation_url: "https://www.floir.com/sections/pandc/title"
+codeowners:
+  - "@openestate/core"
+geo_scope:
+  country: "US"
+  nationwide: true
+  states: []
+  counties: []
+  zip_prefixes: []
+  zip_codes: []
+  cities: []
+auth:
+  auth_type: none
+rate_limit:
+  requests_per_second: 50
+  burst: 100
+  timeout_ms: 1000
+  max_retries: 0
+cache_ttl_secs: 604800
+source_attribution:
+  name: "State Insurance Regulators & Title Rating Bureaus (TX TDI, FL OIR, NM OSI, NY TIRSA, PA TIRBOP, NJ NJLTIRB, OH PR-1)"
+  url: "https://www.tdi.texas.gov/title/titleman.html"
+  schedule_or_version: "2025–2026 Promulgated, Bureau-Filed & Estimated Benchmark Schedules"
+  notes: "Distinguishes promulgated/filed schedules from modeled estimated benchmarks (CA & parametric states); returns null dollar fields whenever subject price/estimate is unavailable."

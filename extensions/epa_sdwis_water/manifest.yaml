@@ -1,0 +1,54 @@
+id: epa_sdwis_water
+name: "US EPA SDWIS Community Water System Boundaries"
+version: "1.0.0"
+description: "Keyless US EPA Safe Drinking Water Information System (SDWIS) spatial boundary lookup resolving the serving public water system PWSID, system name, and population served."
+domain: environmental
+domains:
+  - environmental
+  - water_sewer_trash
+driver: openapi_yaml
+proto_message_type: "openestate.extension.v1.EnvironmentalSummaryProto"
+priority: 260
+enabled_by_default: true
+provenance: live_verified
+homepage_url: "https://www.epa.gov/ground-water-and-drinking-water/safe-drinking-water-information-system-sdwis-federal-reporting"
+documentation_url: "https://services.arcgis.com/cJ9YHowT8TU7DUyn/ArcGIS/rest/services/Water_System_Boundaries/FeatureServer/0"
+codeowners:
+  - "@openestate/core"
+geo_scope:
+  country: "US"
+  nationwide: true
+  states: []
+  counties: []
+  zip_prefixes: []
+  zip_codes: []
+  cities: []
+auth:
+  auth_type: none
+rate_limit:
+  requests_per_second: 4
+  burst: 8
+  timeout_ms: 8000
+cache_ttl_secs: 604800
+source_attribution:
+  name: "US EPA SDWIS — Community Water System Service Area Boundaries"
+  url: "https://services.arcgis.com/cJ9YHowT8TU7DUyn/ArcGIS/rest/services/Water_System_Boundaries/FeatureServer/0"
+  notes: "Excludes Wholesaler of Water entities (e.g. wholesale districts) so features[0] resolves the parcel's retail community water system."
+openapi:
+  spec_file: "openapi.yaml"
+  operation_id: "queryWaterSystemByPoint"
+  query_params:
+    geometry: "{{ lon }},{{ lat }}"
+    geometryType: "esriGeometryPoint"
+    inSR: "4326"
+    spatialRel: "esriSpatialRelIntersects"
+    where: "Service_Area_Type <> 'Wholesaler of Water'"
+    outFields: "PWSID,PWS_Name,Population_Served_Count,Service_Connections_Count,Service_Area_Type"
+    returnGeometry: "false"
+    f: "json"
+response_mapping:
+  root_path: "$.features[0].attributes"
+  require_non_empty: true
+  fields:
+    water_system_pwsid: "$.PWSID"
+    water_system_name: "$.PWS_Name"

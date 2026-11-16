@@ -1,0 +1,53 @@
+openapi: "3.0.3"
+info:
+  title: "FreeRoute Matrix API"
+  version: "1.0.0"
+  description: "FreeRoute Matrix API v1 driving-car duration and distance matrices on OpenStreetMap road data (max 25 coordinates per request; requires FREEROUTE_API_KEY)."
+servers:
+  - url: "https://api.maps.freeroute.org"
+paths:
+  /v1/matrix/driving-car:
+    post:
+      operationId: postFreeRouteDrivingMatrix
+      summary: "Compute driving-car duration and distance matrices from JSON coordinate arrays."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - locations
+              properties:
+                locations:
+                  type: array
+                  items:
+                    type: array
+                    items:
+                      type: number
+                sources:
+                  type: array
+                  items:
+                    type: integer
+                destinations:
+                  type: array
+                  items:
+                    type: integer
+                metrics:
+                  type: array
+                  items:
+                    type: string
+      security:
+        - BearerAuth: []
+      responses:
+        "200":
+          description: "FreeRoute Matrix response"
+          content:
+            application/json:
+              schema:
+                type: object
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer

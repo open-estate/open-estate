@@ -1,0 +1,50 @@
+id: preforeclosure_distress
+name: "NYC DOF Tax-Lien Distress Index (Socrata Zero-PII)"
+version: "1.0.0"
+description: "Public New York City Department of Finance Tax Lien Sale List feed (strictly scoped to NYC's 5 boroughs) paired with native distress screening."
+domain: property_facts
+domains:
+  - property_facts
+  - tax_mandates
+driver: declarative_yaml
+proto_message_type: "openestate.extension.v1.PropertyFactsProto"
+priority: 210
+enabled_by_default: true
+builtin: true
+provenance: live_verified
+homepage_url: "https://data.cityofnewyork.us/City-Government/DOF-Tax-Lien-Sale-List/9f9k-226w"
+documentation_url: "https://dev.socrata.com/foundry/data.cityofnewyork.us/9f9k-226w"
+codeowners:
+  - "@openestate/core"
+geo_scope:
+  country: "US"
+  states: ["NY"]
+  counties: ["36005", "36047", "36061", "36081", "36085"]
+  zip_prefixes: []
+  zip_codes: []
+  cities: []
+auth:
+  auth_type: none
+  optional_key: true
+rate_limit:
+  requests_per_second: 4
+  burst: 8
+  timeout_ms: 4000
+  max_retries: 1
+cache_ttl_secs: 43200
+source_attribution:
+  name: "NYC Department of Finance Tax Lien Sale Open Data"
+  url: "https://data.cityofnewyork.us/resource/9f9k-226w.json"
+  schedule_or_version: "Socrata Open Tax-Lien Distress Index"
+  notes: "Strictly NYC boroughs only; never overwrites MLS listing_status or parcel APN with municipal tax class codes."
+request:
+  method: "GET"
+  url: "https://data.cityofnewyork.us/resource/9f9k-226w.json"
+  query_params:
+    "$limit": "5"
+    "$q": "{{ street }}"
+response_mapping:
+  root_path: "$[0]"
+  require_non_empty: true
+  fields:
+    city: "$.borough"

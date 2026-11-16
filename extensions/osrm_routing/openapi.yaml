@@ -1,0 +1,47 @@
+openapi: "3.0.3"
+info:
+  title: "Self-Hosted OSRM Table Service API"
+  version: "5.24.0"
+  description: "Self-hosted Open Source Routing Machine (OSRM) road-network driving table service (configured via OSRM_REGIONS_JSON and OSRM_BASE_URL)."
+servers:
+  - url: "http://osrm"
+paths:
+  /table/v1/driving/{coordinates}:
+    get:
+      operationId: getOsrmDrivingTable
+      summary: "Compute driving duration and distance matrices across road-snapped coordinates."
+      parameters:
+        - name: coordinates
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: sources
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: destinations
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: annotations
+          in: query
+          required: false
+          schema:
+            type: string
+            default: "duration,distance"
+        - name: generate_hints
+          in: query
+          required: false
+          schema:
+            type: boolean
+            default: false
+      responses:
+        "200":
+          description: "OSRM driving duration and distance matrix"
+          content:
+            application/json:
+              schema:
+                type: object

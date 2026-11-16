@@ -1,0 +1,39 @@
+id: osrm_routing
+name: "Self-Hosted OSRM Routing Matrix"
+version: "1.0.0"
+description: "Primary Tier-1 self-hosted OSRM road-network driving table service (configured via OSRM_REGIONS_JSON and/or OSRM_BASE_URL; public demo router is never called)."
+domain: routing
+driver: openapi_yaml
+proto_message_type: "openestate.extension.v1.RoutingMatrixProto"
+priority: 200
+enabled_by_default: true
+provenance: live_verified
+homepage_url: "https://project-osrm.org/"
+documentation_url: "https://project-osrm.org/docs/v5.24.0/api/#table-service"
+codeowners:
+  - "@openestate/core"
+geo_scope:
+  country: "US"
+  nationwide: true
+auth:
+  type: none
+  env_var: "OSRM_REGIONS_JSON"
+  optional_key: true
+rate_limit:
+  requests_per_second: 50
+  burst: 100
+  timeout_ms: 8000
+  max_retries: 0
+cache_ttl_secs: 604800
+source_attribution:
+  name: "OpenStreetMap road network (OSRM)"
+  url: "https://project-osrm.org/"
+openapi:
+  spec_file: "openapi.yaml"
+  operation_id: "getOsrmDrivingTable"
+response_mapping:
+  root_path: "$"
+  require_non_empty: true
+  fields:
+    sample_duration_sec: "$.durations[0][1]"
+    sample_distance_m: "$.distances[0][1]"

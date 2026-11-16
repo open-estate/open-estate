@@ -1,0 +1,578 @@
+id: us_iou_electric
+name: "US Investor-Owned Electric Utility (IOU) & EIA State Tariffs"
+version: "1.0.0"
+description: "Published CPUC/PUCT/NYPSC/FPSC/WUTC residential electric rate schedules, Community Choice Aggregation (CCA) generation overlays, and EIA state residential tariff schedules."
+domain: electric_utility
+domains:
+  - electric_utility
+driver: declarative_yaml
+proto_message_type: "openestate.extension.v1.ElectricUtilityProto"
+priority: 120
+enabled_by_default: true
+provenance: unverified
+homepage_url: "https://www.eia.gov/electricity/state/"
+documentation_url: "https://www.eia.gov/electricity/monthly/"
+codeowners:
+  - "@openestate/utilities"
+geo_scope:
+  country: "US"
+  nationwide: true
+  states: []
+auth:
+  auth_type: none
+cache_ttl_secs: 604800
+source_attribution:
+  name: "State PUC & US EIA Published Residential Electric Tariffs"
+  url: "https://www.eia.gov/electricity/state/"
+tariff_catalog:
+  electric_rules:
+    - id: sdge_california
+      geo_scope:
+        states: ["CA"]
+        counties: ["06073"]
+        cities: ["san diego", "chula vista", "oceanside", "carlsbad", "escondido", "encinitas", "la jolla", "poway", "san clemente", "dana point", "san juan capistrano"]
+      carrier_name: "San Diego Gas & Electric (SDG&E)"
+      short_name: "SDG&E"
+      utility_type: "iou"
+      cca_program: "San Diego Community Power / Clean Energy Alliance"
+      rate_schedule: "Residential Time-of-Use TOU-DR1 (4–9 p.m. Peak)"
+      rate_per_kwh_usd: 0.465
+      off_peak_kwh_usd: 0.382
+      peak_kwh_usd: 0.618
+      monthly_base_fee_usd: 16.00
+      solar_nem_policy: "CPUC Net Billing Tariff (NEM 3.0 — home battery strongly recommended)"
+      tariff_url: "https://www.sdge.com/residential/pricing-plans"
+      rate_source: "SDG&E CPUC Residential Tariff TOU-DR1"
+
+    - id: sce_ocpa_irvine
+      geo_scope:
+        states: ["CA"]
+        cities: ["irvine"]
+      carrier_name: "Southern California Edison (SCE)"
+      short_name: "SCE"
+      utility_type: "iou"
+      cca_program: "Orange County Power Authority (OCPA)"
+      rate_schedule: "Residential TOU-D-4-9PM"
+      rate_per_kwh_usd: 0.378
+      off_peak_kwh_usd: 0.332
+      peak_kwh_usd: 0.538
+      monthly_base_fee_usd: 15.00
+      solar_nem_policy: "CPUC Net Billing Tariff (NEM 3.0 — home battery strongly recommended)"
+      tariff_url: "https://www.sce.com/residential/rates"
+      rate_source: "SCE CPUC Residential Tariff TOU-D-4-9PM"
+
+    - id: sce_cpa_la_ventura
+      geo_scope:
+        states: ["CA"]
+        counties: ["06037", "06111"]
+      carrier_name: "Southern California Edison (SCE)"
+      short_name: "SCE"
+      utility_type: "iou"
+      cca_program: "Clean Power Alliance (CPA)"
+      rate_schedule: "Residential TOU-D-4-9PM"
+      rate_per_kwh_usd: 0.378
+      off_peak_kwh_usd: 0.332
+      peak_kwh_usd: 0.538
+      monthly_base_fee_usd: 15.00
+      solar_nem_policy: "CPUC Net Billing Tariff (NEM 3.0 — home battery strongly recommended)"
+      tariff_url: "https://www.sce.com/residential/rates"
+      rate_source: "SCE CPUC Residential Tariff TOU-D-4-9PM"
+
+    - id: sce_socal
+      geo_scope:
+        states: ["CA"]
+        counties: ["06059", "06065", "06071", "06083"]
+      carrier_name: "Southern California Edison (SCE)"
+      short_name: "SCE"
+      utility_type: "iou"
+      rate_schedule: "Residential TOU-D-4-9PM"
+      rate_per_kwh_usd: 0.378
+      off_peak_kwh_usd: 0.332
+      peak_kwh_usd: 0.538
+      monthly_base_fee_usd: 15.00
+      solar_nem_policy: "CPUC Net Billing Tariff (NEM 3.0 — home battery strongly recommended)"
+      tariff_url: "https://www.sce.com/residential/rates"
+      rate_source: "SCE CPUC Residential Tariff TOU-D-4-9PM"
+
+    - id: pge_sjce
+      geo_scope:
+        states: ["CA"]
+        cities: ["san jose"]
+      carrier_name: "Pacific Gas & Electric (PG&E)"
+      short_name: "PG&E"
+      utility_type: "iou"
+      cca_program: "San Jose Clean Energy (SJCE)"
+      rate_schedule: "Residential Time-of-Use E-TOU-C (4–9 p.m. Peak)"
+      rate_per_kwh_usd: 0.448
+      off_peak_kwh_usd: 0.402
+      peak_kwh_usd: 0.538
+      monthly_base_fee_usd: 15.00
+      solar_nem_policy: "CPUC Net Billing Tariff (NEM 3.0 — battery storage strongly boosts solar value)"
+      tariff_url: "https://www.pge.com/tariffs/en.html"
+      rate_source: "PG&E CPUC Residential Tariff E-TOU-C"
+
+    - id: pge_svce
+      geo_scope:
+        states: ["CA"]
+        counties: ["06085"]
+      carrier_name: "Pacific Gas & Electric (PG&E)"
+      short_name: "PG&E"
+      utility_type: "iou"
+      cca_program: "Silicon Valley Clean Energy (SVCE)"
+      rate_schedule: "Residential Time-of-Use E-TOU-C (4–9 p.m. Peak)"
+      rate_per_kwh_usd: 0.448
+      off_peak_kwh_usd: 0.402
+      peak_kwh_usd: 0.538
+      monthly_base_fee_usd: 15.00
+      solar_nem_policy: "CPUC Net Billing Tariff (NEM 3.0 — battery storage strongly boosts solar value)"
+      tariff_url: "https://www.pge.com/tariffs/en.html"
+      rate_source: "PG&E CPUC Residential Tariff E-TOU-C"
+
+    - id: pge_cleanpowersf
+      geo_scope:
+        states: ["CA"]
+        counties: ["06075"]
+      carrier_name: "Pacific Gas & Electric (PG&E)"
+      short_name: "PG&E"
+      utility_type: "iou"
+      cca_program: "CleanPowerSF"
+      rate_schedule: "Residential Time-of-Use E-TOU-C (4–9 p.m. Peak)"
+      rate_per_kwh_usd: 0.448
+      off_peak_kwh_usd: 0.402
+      peak_kwh_usd: 0.538
+      monthly_base_fee_usd: 15.00
+      solar_nem_policy: "CPUC Net Billing Tariff (NEM 3.0 — battery storage strongly boosts solar value)"
+      tariff_url: "https://www.pge.com/tariffs/en.html"
+      rate_source: "PG&E CPUC Residential Tariff E-TOU-C"
+
+    - id: pge_ava_alameda
+      geo_scope:
+        states: ["CA"]
+        counties: ["06001"]
+      carrier_name: "Pacific Gas & Electric (PG&E)"
+      short_name: "PG&E"
+      utility_type: "iou"
+      cca_program: "Ava Community Energy"
+      rate_schedule: "Residential Time-of-Use E-TOU-C (4–9 p.m. Peak)"
+      rate_per_kwh_usd: 0.448
+      off_peak_kwh_usd: 0.402
+      peak_kwh_usd: 0.538
+      monthly_base_fee_usd: 15.00
+      solar_nem_policy: "CPUC Net Billing Tariff (NEM 3.0 — battery storage strongly boosts solar value)"
+      tariff_url: "https://www.pge.com/tariffs/en.html"
+      rate_source: "PG&E CPUC Residential Tariff E-TOU-C"
+
+    - id: pge_pce_san_mateo
+      geo_scope:
+        states: ["CA"]
+        counties: ["06081"]
+      carrier_name: "Pacific Gas & Electric (PG&E)"
+      short_name: "PG&E"
+      utility_type: "iou"
+      cca_program: "Peninsula Clean Energy"
+      rate_schedule: "Residential Time-of-Use E-TOU-C (4–9 p.m. Peak)"
+      rate_per_kwh_usd: 0.448
+      off_peak_kwh_usd: 0.402
+      peak_kwh_usd: 0.538
+      monthly_base_fee_usd: 15.00
+      solar_nem_policy: "CPUC Net Billing Tariff (NEM 3.0 — battery storage strongly boosts solar value)"
+      tariff_url: "https://www.pge.com/tariffs/en.html"
+      rate_source: "PG&E CPUC Residential Tariff E-TOU-C"
+
+    - id: pge_mce_north_bay
+      geo_scope:
+        states: ["CA"]
+        counties: ["06013", "06041", "06055", "06095"]
+      carrier_name: "Pacific Gas & Electric (PG&E)"
+      short_name: "PG&E"
+      utility_type: "iou"
+      cca_program: "MCE Clean Energy"
+      rate_schedule: "Residential Time-of-Use E-TOU-C (4–9 p.m. Peak)"
+      rate_per_kwh_usd: 0.448
+      off_peak_kwh_usd: 0.402
+      peak_kwh_usd: 0.538
+      monthly_base_fee_usd: 15.00
+      solar_nem_policy: "CPUC Net Billing Tariff (NEM 3.0 — battery storage strongly boosts solar value)"
+      tariff_url: "https://www.pge.com/tariffs/en.html"
+      rate_source: "PG&E CPUC Residential Tariff E-TOU-C"
+
+    - id: pge_california_default
+      geo_scope:
+        states: ["CA"]
+      carrier_name: "Pacific Gas & Electric (PG&E)"
+      short_name: "PG&E"
+      utility_type: "iou"
+      rate_schedule: "Residential Time-of-Use E-TOU-C (4–9 p.m. Peak)"
+      rate_per_kwh_usd: 0.448
+      off_peak_kwh_usd: 0.402
+      peak_kwh_usd: 0.538
+      monthly_base_fee_usd: 15.00
+      solar_nem_policy: "CPUC Net Billing Tariff (NEM 3.0 — battery storage strongly boosts solar value)"
+      tariff_url: "https://www.pge.com/tariffs/en.html"
+      rate_source: "PG&E CPUC Residential Tariff E-TOU-C"
+
+    - id: el_paso_electric_tx
+      geo_scope:
+        states: ["TX"]
+        counties: ["48141"]
+        cities: ["el paso"]
+      carrier_name: "El Paso Electric"
+      short_name: "El Paso Electric"
+      utility_type: "iou"
+      rate_schedule: "Residential Rate Schedule 01 (Regulated non-ERCOT)"
+      rate_per_kwh_usd: 0.144
+      off_peak_kwh_usd: 0.118
+      peak_kwh_usd: 0.178
+      monthly_base_fee_usd: 10.25
+      solar_nem_policy: "Regulated Net Billing"
+      tariff_url: "https://www.epelectric.com/tx/residential/rates-and-tariffs"
+      rate_source: "El Paso Electric TX Tariff"
+
+    - id: pse_washington
+      geo_scope:
+        states: ["WA"]
+      carrier_name: "Puget Sound Energy (PSE)"
+      short_name: "Puget Sound Energy"
+      utility_type: "iou"
+      rate_schedule: "Residential Electric Schedule 7"
+      rate_per_kwh_usd: 0.148
+      off_peak_kwh_usd: 0.136
+      peak_kwh_usd: 0.165
+      monthly_base_fee_usd: 7.49
+      solar_nem_policy: "WA 1:1 Retail Net Metering"
+      tariff_url: "https://www.pse.com/en/pages/rates"
+      rate_source: "Puget Sound Energy WUTC Schedule 7"
+
+    - id: coned_nyc_westchester
+      geo_scope:
+        states: ["NY"]
+        counties: ["36061", "36047", "36081", "36005", "36085", "36119"]
+        cities: ["new york", "brooklyn", "queens", "bronx", "staten island", "yonkers", "white plains"]
+      carrier_name: "Con Edison (Consolidated Edison of NY)"
+      short_name: "Con Edison"
+      utility_type: "iou"
+      rate_schedule: "Residential Service Classification EL1 (Supply + Delivery)"
+      rate_per_kwh_usd: 0.318
+      off_peak_kwh_usd: 0.245
+      peak_kwh_usd: 0.415
+      monthly_base_fee_usd: 20.00
+      solar_nem_policy: "NY VDER / Net Metering with Customer Benefit Contribution"
+      tariff_url: "https://www.coned.com/en/accounts-billing/your-bill/time-of-use"
+      rate_source: "Con Edison NYPSC Residential Tariff EL1"
+
+    - id: pseg_long_island
+      geo_scope:
+        states: ["NY"]
+        counties: ["36059", "36103"]
+      carrier_name: "PSEG Long Island"
+      short_name: "PSEG Long Island"
+      utility_type: "iou"
+      rate_schedule: "Residential Rate 180 / Time-of-Day 194"
+      rate_per_kwh_usd: 0.258
+      off_peak_kwh_usd: 0.195
+      peak_kwh_usd: 0.335
+      monthly_base_fee_usd: 16.20
+      solar_nem_policy: "PSEG LI Net Metering"
+      tariff_url: "https://www.psegliny.com/myaccount/serviceandrates"
+      rate_source: "PSEG Long Island Residential Tariff"
+
+    - id: national_grid_upstate_ny
+      geo_scope:
+        states: ["NY"]
+      carrier_name: "National Grid / NYSEG (Upstate NY)"
+      short_name: "National Grid NY"
+      utility_type: "iou"
+      rate_schedule: "Residential Schedule SC-1"
+      rate_per_kwh_usd: 0.224
+      off_peak_kwh_usd: 0.188
+      peak_kwh_usd: 0.262
+      monthly_base_fee_usd: 19.00
+      solar_nem_policy: "NY Net Metering + Solar Tax Credit"
+      tariff_url: "https://www.nationalgridus.com/Upstate-NY-Home/Rates/"
+      rate_source: "NYPSC Upstate Residential Electric Benchmark"
+
+    - id: teco_duke_tampa
+      geo_scope:
+        states: ["FL"]
+        counties: ["12057", "12103"]
+        cities: ["tampa", "riverview", "brandon"]
+      carrier_name: "Tampa Electric (TECO) / Duke Energy FL"
+      short_name: "TECO / Duke FL"
+      utility_type: "iou"
+      rate_schedule: "Residential Rate Schedule RS"
+      rate_per_kwh_usd: 0.158
+      off_peak_kwh_usd: 0.144
+      peak_kwh_usd: 0.174
+      monthly_base_fee_usd: 21.30
+      solar_nem_policy: "FL FPSC 1:1 Retail Net Metering"
+      tariff_url: "https://www.tampaelectric.com/residential/paybill/rates/"
+      rate_source: "FPSC Tampa Bay Residential Tariff"
+
+    - id: fpl_florida
+      geo_scope:
+        states: ["FL"]
+      carrier_name: "Florida Power & Light (FPL)"
+      short_name: "FPL"
+      utility_type: "iou"
+      rate_schedule: "Residential Service RS-1 (1,000 kWh Tier)"
+      rate_per_kwh_usd: 0.149
+      off_peak_kwh_usd: 0.138
+      peak_kwh_usd: 0.165
+      monthly_base_fee_usd: 9.55
+      solar_nem_policy: "FL FPSC 1:1 Retail Net Metering (Tier 1 <=10 kW)"
+      tariff_url: "https://www.fpl.com/rates.html"
+      rate_source: "FPL FPSC Residential Schedule RS-1"
+
+    - id: pseg_nj
+      geo_scope: { states: ["NJ"] }
+      carrier_name: "PSE&G / JCP&L (New Jersey)"
+      short_name: "PSE&G"
+      utility_type: "iou"
+      rate_schedule: "Residential Rate RS (BGS + Delivery)"
+      rate_per_kwh_usd: 0.218
+      off_peak_kwh_usd: 0.185
+      peak_kwh_usd: 0.273
+      monthly_base_fee_usd: 14.00
+      solar_nem_policy: "State Net Metering / Distributed Generation Schedule"
+      tariff_url: "https://nj.pseg.com/myaccount/billandpaymentoptions/understandingmybill"
+      rate_source: "Published Residential Electric Tariff Reference"
+
+    - id: eversource_ma
+      geo_scope: { states: ["MA"] }
+      carrier_name: "Eversource / National Grid MA"
+      short_name: "Eversource MA"
+      utility_type: "iou"
+      rate_schedule: "Residential Rate R-1"
+      rate_per_kwh_usd: 0.305
+      off_peak_kwh_usd: 0.259
+      peak_kwh_usd: 0.381
+      monthly_base_fee_usd: 14.00
+      solar_nem_policy: "State Net Metering / Distributed Generation Schedule"
+      tariff_url: "https://www.eversource.com/content/residential/account-billing/manage-bill/about-your-bill/rates-tariffs"
+      rate_source: "Published Residential Electric Tariff Reference"
+
+    - id: eversource_ct
+      geo_scope: { states: ["CT"] }
+      carrier_name: "Eversource CT / United Illuminating"
+      short_name: "Eversource CT"
+      utility_type: "iou"
+      rate_schedule: "Residential Rate 1"
+      rate_per_kwh_usd: 0.298
+      off_peak_kwh_usd: 0.253
+      peak_kwh_usd: 0.373
+      monthly_base_fee_usd: 14.00
+      solar_nem_policy: "State Net Metering / Distributed Generation Schedule"
+      tariff_url: "https://www.eversource.com/"
+      rate_source: "Published Residential Electric Tariff Reference"
+
+    - id: new_england_regional
+      geo_scope: { states: ["NH", "RI", "VT", "ME"] }
+      carrier_name: "New England Regional Electric Utility (Eversource / Green Mountain / CMP)"
+      short_name: "Regional Electric"
+      utility_type: "iou"
+      rate_schedule: "Residential Standard Offer + Delivery"
+      rate_per_kwh_usd: 0.265
+      off_peak_kwh_usd: 0.225
+      peak_kwh_usd: 0.331
+      monthly_base_fee_usd: 14.00
+      solar_nem_policy: "State Net Metering / Distributed Generation Schedule"
+      tariff_url: "https://www.eia.gov/electricity/state/"
+      rate_source: "Published Residential Electric Tariff Reference"
+
+    - id: hawaiian_electric
+      geo_scope: { states: ["HI"] }
+      carrier_name: "Hawaiian Electric (HECO / Maui Electric / HELCO)"
+      short_name: "Hawaiian Electric"
+      utility_type: "iou"
+      rate_schedule: "Residential Schedule R / TOU-RI"
+      rate_per_kwh_usd: 0.428
+      off_peak_kwh_usd: 0.364
+      peak_kwh_usd: 0.535
+      monthly_base_fee_usd: 14.00
+      solar_nem_policy: "State Net Metering / Distributed Generation Schedule"
+      tariff_url: "https://www.hawaiianelectric.com/billing-and-payment/rates-and-regulations"
+      rate_source: "Published Residential Electric Tariff Reference"
+
+    - id: aps_arizona
+      geo_scope: { states: ["AZ"] }
+      carrier_name: "Arizona Public Service (APS)"
+      short_name: "APS"
+      utility_type: "iou"
+      rate_schedule: "Time-of-Use 4pm–7pm Weekdays"
+      rate_per_kwh_usd: 0.158
+      off_peak_kwh_usd: 0.134
+      peak_kwh_usd: 0.198
+      monthly_base_fee_usd: 14.00
+      solar_nem_policy: "State Net Metering / Distributed Generation Schedule"
+      tariff_url: "https://www.aps.com/en/Residential/Service-Plans/Compare-Service-Plans"
+      rate_source: "Published Residential Electric Tariff Reference"
+
+    - id: nv_energy
+      geo_scope: { states: ["NV"] }
+      carrier_name: "NV Energy"
+      short_name: "NV Energy"
+      utility_type: "iou"
+      rate_schedule: "Single-Family Residential Schedule D-1"
+      rate_per_kwh_usd: 0.162
+      off_peak_kwh_usd: 0.138
+      peak_kwh_usd: 0.203
+      monthly_base_fee_usd: 14.00
+      solar_nem_policy: "State Net Metering / Distributed Generation Schedule"
+      tariff_url: "https://www.nvenergy.com/account-services/energy-pricing-plans"
+      rate_source: "Published Residential Electric Tariff Reference"
+
+    - id: pge_oregon
+      geo_scope: { states: ["OR"] }
+      carrier_name: "Portland General Electric (PGE) / Pacific Power"
+      short_name: "PGE Oregon"
+      utility_type: "iou"
+      rate_schedule: "Residential Schedule 7"
+      rate_per_kwh_usd: 0.182
+      off_peak_kwh_usd: 0.155
+      peak_kwh_usd: 0.228
+      monthly_base_fee_usd: 14.00
+      solar_nem_policy: "State Net Metering / Distributed Generation Schedule"
+      tariff_url: "https://portlandgeneral.com/about/info/pricing-plans"
+      rate_source: "Published Residential Electric Tariff Reference"
+
+    - id: xcel_colorado
+      geo_scope: { states: ["CO"] }
+      carrier_name: "Xcel Energy Colorado"
+      short_name: "Xcel Energy"
+      utility_type: "iou"
+      rate_schedule: "Residential Time-of-Use Schedule RE-TOU"
+      rate_per_kwh_usd: 0.164
+      off_peak_kwh_usd: 0.139
+      peak_kwh_usd: 0.205
+      monthly_base_fee_usd: 14.00
+      solar_nem_policy: "State Net Metering / Distributed Generation Schedule"
+      tariff_url: "https://co.my.xcelenergy.com/s/billing-payment/residential-rates"
+      rate_source: "Published Residential Electric Tariff Reference"
+
+    - id: comed_illinois
+      geo_scope: { states: ["IL"] }
+      carrier_name: "ComEd (Commonwealth Edison) / Ameren IL"
+      short_name: "ComEd"
+      utility_type: "iou"
+      rate_schedule: "Residential Delivery + Hourly/BES Supply"
+      rate_per_kwh_usd: 0.168
+      off_peak_kwh_usd: 0.143
+      peak_kwh_usd: 0.210
+      monthly_base_fee_usd: 14.00
+      solar_nem_policy: "State Net Metering / Distributed Generation Schedule"
+      tariff_url: "https://www.comed.com/MyAccount/MyBillUsage/Pages/CurrentRates.aspx"
+      rate_source: "Published Residential Electric Tariff Reference"
+
+    - id: georgia_power
+      geo_scope: { states: ["GA"] }
+      carrier_name: "Georgia Power"
+      short_name: "Georgia Power"
+      utility_type: "iou"
+      rate_schedule: "Residential Service R-28 / Smart Usage"
+      rate_per_kwh_usd: 0.162
+      off_peak_kwh_usd: 0.138
+      peak_kwh_usd: 0.203
+      monthly_base_fee_usd: 14.00
+      solar_nem_policy: "State Net Metering / Distributed Generation Schedule"
+      tariff_url: "https://www.georgiapower.com/residential/billing-and-rate-plans/pricing-and-rate-plans.html"
+      rate_source: "Published Residential Electric Tariff Reference"
+
+    - id: duke_carolinas
+      geo_scope: { states: ["NC", "SC"] }
+      carrier_name: "Duke Energy (Carolinas / Progress)"
+      short_name: "Duke Energy"
+      utility_type: "iou"
+      rate_schedule: "Residential Service Schedule RS"
+      rate_per_kwh_usd: 0.146
+      off_peak_kwh_usd: 0.124
+      peak_kwh_usd: 0.183
+      monthly_base_fee_usd: 14.00
+      solar_nem_policy: "State Net Metering / Distributed Generation Schedule"
+      tariff_url: "https://www.duke-energy.com/home/billing/rates"
+      rate_source: "Published Residential Electric Tariff Reference"
+
+    - id: dominion_virginia
+      geo_scope: { states: ["VA"] }
+      carrier_name: "Dominion Energy Virginia"
+      short_name: "Dominion Energy"
+      utility_type: "iou"
+      rate_schedule: "Residential Schedule 1"
+      rate_per_kwh_usd: 0.148
+      off_peak_kwh_usd: 0.126
+      peak_kwh_usd: 0.185
+      monthly_base_fee_usd: 14.00
+      solar_nem_policy: "State Net Metering / Distributed Generation Schedule"
+      tariff_url: "https://www.dominionenergy.com/virginia/rates-and-tariffs/residential-rates"
+      rate_source: "Published Residential Electric Tariff Reference"
+
+    - id: pepco_bge
+      geo_scope: { states: ["DC", "MD"] }
+      carrier_name: "Pepco / BGE (Exelon)"
+      short_name: "Pepco / BGE"
+      utility_type: "iou"
+      rate_schedule: "Residential Schedule R (SOS + Delivery)"
+      rate_per_kwh_usd: 0.186
+      off_peak_kwh_usd: 0.158
+      peak_kwh_usd: 0.233
+      monthly_base_fee_usd: 14.00
+      solar_nem_policy: "State Net Metering / Distributed Generation Schedule"
+      tariff_url: "https://www.pepco.com/"
+      rate_source: "Published Residential Electric Tariff Reference"
+
+    - id: dte_michigan
+      geo_scope: { states: ["MI"] }
+      carrier_name: "DTE Energy / Consumers Energy"
+      short_name: "DTE / Consumers"
+      utility_type: "iou"
+      rate_schedule: "Residential Time-of-Day Rate D1.11"
+      rate_per_kwh_usd: 0.202
+      off_peak_kwh_usd: 0.172
+      peak_kwh_usd: 0.253
+      monthly_base_fee_usd: 14.00
+      solar_nem_policy: "State Net Metering / Distributed Generation Schedule"
+      tariff_url: "https://www.dteenergy.com/us/en/residential/service-request/pricing/rate-options.html"
+      rate_source: "Published Residential Electric Tariff Reference"
+
+    - id: xcel_minnesota
+      geo_scope: { states: ["MN"] }
+      carrier_name: "Xcel Energy Minnesota"
+      short_name: "Xcel Energy MN"
+      utility_type: "iou"
+      rate_schedule: "Residential Service A01"
+      rate_per_kwh_usd: 0.162
+      off_peak_kwh_usd: 0.138
+      peak_kwh_usd: 0.203
+      monthly_base_fee_usd: 14.00
+      solar_nem_policy: "State Net Metering / Distributed Generation Schedule"
+      tariff_url: "https://mn.my.xcelenergy.com/"
+      rate_source: "Published Residential Electric Tariff Reference"
+
+    - id: rocky_mountain_power
+      geo_scope: { states: ["UT", "ID", "WY"] }
+      carrier_name: "Rocky Mountain Power / Idaho Power"
+      short_name: "Rocky Mountain Power"
+      utility_type: "iou"
+      rate_schedule: "Residential Schedule 1"
+      rate_per_kwh_usd: 0.126
+      off_peak_kwh_usd: 0.107
+      peak_kwh_usd: 0.158
+      monthly_base_fee_usd: 14.00
+      solar_nem_policy: "State Net Metering / Distributed Generation Schedule"
+      tariff_url: "https://www.rockymountainpower.net/accounts-billing/rates-regulation.html"
+      rate_source: "Published Residential Electric Tariff Reference"
+
+    - id: us_eia_regional_default
+      geo_scope:
+        nationwide: true
+        states: []
+      carrier_name: "Regional Regulated Electric Utility"
+      short_name: "Regional Electric"
+      utility_type: "iou"
+      rate_schedule: "Regional Standard Residential Benchmark (Verify Utility)"
+      rate_per_kwh_usd: 0.162
+      off_peak_kwh_usd: 0.0
+      peak_kwh_usd: 0.0
+      monthly_base_fee_usd: 0.0
+      solar_nem_policy: "Utility-Specific (Check Tariff)"
+      tariff_url: "https://www.eia.gov/electricity/state/"
+      rate_source: "Unverified State Residential Average Benchmark (Verify Utility)"

@@ -1,0 +1,51 @@
+id: usgs_asce7_seismic
+name: "USGS ASCE 7-22 Seismic Design Shaking"
+version: "1.0.0"
+description: "Keyless USGS Earthquake Hazards Program ASCE 7-22 web service computing Peak Ground Acceleration (PGA), short-period Ss, 1-second S1, and Seismic Design Category."
+domain: natural_hazards
+domains:
+  - natural_hazards
+driver: openapi_yaml
+proto_message_type: "openestate.extension.v1.HazardSummaryProto"
+priority: 230
+enabled_by_default: true
+provenance: live_verified
+homepage_url: "https://earthquake.usgs.gov/ws/designmaps/"
+documentation_url: "https://earthquake.usgs.gov/ws/designmaps/asce7-22.html"
+codeowners:
+  - "@openestate/core"
+geo_scope:
+  country: "US"
+  nationwide: true
+  states: []
+  counties: []
+  zip_prefixes: []
+  zip_codes: []
+  cities: []
+auth:
+  auth_type: none
+rate_limit:
+  requests_per_second: 4
+  burst: 8
+  timeout_ms: 8000
+cache_ttl_secs: 604800
+source_attribution:
+  name: "USGS Earthquake Hazards Program — ASCE 7-22 Design Maps"
+  url: "https://earthquake.usgs.gov/ws/designmaps/asce7-22.html"
+openapi:
+  spec_file: "openapi.yaml"
+  operation_id: "getAsce722DesignShaking"
+  query_params:
+    latitude: "{{ lat }}"
+    longitude: "{{ lon }}"
+    riskCategory: "II"
+    siteClass: "D"
+    title: "Open Estate"
+response_mapping:
+  root_path: "$.response.data"
+  require_non_empty: true
+  fields:
+    seismic_pga_g: "$.pgam"
+    seismic_ss_g: "$.ss"
+    seismic_s1_g: "$.s1"
+    seismic_design_category: "$.sdc"

@@ -1,0 +1,38 @@
+{
+  "manifest_version": 3,
+  "name": "Open Estate — Self-Hosted Property & Deal Room Companion",
+  "short_name": "Open Estate",
+  "version": "2.0.0",
+  "description": "Quick US address due-diligence lookup, context-menu address research, and Deal Room shortlist companion for self-hosted Open Estate (personal research).",
+  "permissions": [
+    "storage",
+    "contextMenus"
+  ],
+  "host_permissions": [
+    "http://127.0.0.1/*",
+    "http://localhost/*"
+  ],
+  "optional_host_permissions": [
+    "https://*/*",
+    "http://*/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Open Estate Property & Deal Room Companion",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
+}

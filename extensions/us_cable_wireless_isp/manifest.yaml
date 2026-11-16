@@ -1,0 +1,205 @@
+id: us_cable_wireless_isp
+name: "US Cable DOCSIS, 5G Fixed Wireless & LEO Satellite Footprints"
+version: "1.0.0"
+description: "Published service territories, DOCSIS 3.1/4.0 cable tiers, 5G Fixed Wireless, and nationwide Starlink LEO satellite plans."
+domain: broadband
+domains:
+  - broadband
+driver: declarative_yaml
+proto_message_type: "openestate.extension.v1.BroadbandCatalogProto"
+priority: 120
+enabled_by_default: true
+provenance: unverified
+homepage_url: "https://broadbandmap.fcc.gov/"
+documentation_url: "https://broadbandmap.fcc.gov/"
+codeowners:
+  - "@openestate/broadband"
+geo_scope:
+  country: "US"
+  nationwide: true
+  states: []
+auth:
+  auth_type: none
+cache_ttl_secs: 604800
+source_attribution:
+  name: "Published Cable DOCSIS, 5G Fixed Wireless & LEO Satellite Footprints"
+  url: "https://broadbandmap.fcc.gov/"
+footprint_catalog:
+  broadband_rules:
+    - id: xfinity_norcal
+      exclude_rural: true
+      geo_scope:
+        states: ["CA"]
+        counties: ["06085", "06075", "06001", "06081", "06013", "06041", "06087", "06067", "06061"]
+      carrier_name: "Xfinity (Comcast)"
+      technology: "Cable (DOCSIS 3.1/4.0)"
+      tier_category: "cable"
+      max_download_mbps: 2000
+      max_upload_mbps: 200
+      symmetrical: false
+      typical_monthly_usd: "$65–$115/mo (400M–2Gbps DOCSIS)"
+      availability_status: "regional_footprint_unverified"
+      check_url: "https://www.xfinity.com/learn/internet-service"
+
+    - id: cox_spectrum_oc_sd
+      exclude_rural: true
+      geo_scope:
+        states: ["CA"]
+        counties: ["06059", "06073"]
+      carrier_name: "Cox / Spectrum Cable"
+      technology: "Cable (DOCSIS 3.1/4.0)"
+      tier_category: "cable"
+      max_download_mbps: 1000
+      max_upload_mbps: 35
+      symmetrical: false
+      typical_monthly_usd: "$65–$105/mo (500M–1Gbps)"
+      availability_status: "regional_footprint_unverified"
+      check_url: "https://www.cox.com/residential/internet.html"
+
+    - id: spectrum_socal
+      exclude_rural: true
+      geo_scope:
+        states: ["CA"]
+        counties: ["06037", "06065", "06071", "06111"]
+      carrier_name: "Spectrum Cable"
+      technology: "Cable (DOCSIS 3.1/4.0)"
+      tier_category: "cable"
+      max_download_mbps: 1000
+      max_upload_mbps: 35
+      symmetrical: false
+      typical_monthly_usd: "$70–$100/mo (500M–1Gbps)"
+      availability_status: "regional_footprint_unverified"
+      check_url: "https://www.spectrum.com/internet"
+
+    - id: xfinity_houston
+      exclude_rural: true
+      geo_scope:
+        states: ["TX"]
+        counties: ["48201", "48157"]
+        cities: ["houston"]
+      carrier_name: "Xfinity (Comcast)"
+      technology: "Cable (DOCSIS 3.1/4.0)"
+      tier_category: "cable"
+      max_download_mbps: 1200
+      max_upload_mbps: 100
+      symmetrical: false
+      typical_monthly_usd: "$65–$110/mo"
+      availability_status: "regional_footprint_unverified"
+      check_url: "https://www.xfinity.com/learn/internet-service"
+
+    - id: spectrum_texas
+      exclude_rural: true
+      only_when_category_empty: true
+      geo_scope:
+        states: ["TX"]
+      carrier_name: "Spectrum Cable"
+      technology: "Cable (DOCSIS 3.1/4.0)"
+      tier_category: "cable"
+      max_download_mbps: 1000
+      max_upload_mbps: 35
+      symmetrical: false
+      typical_monthly_usd: "$70–$100/mo"
+      availability_status: "regional_footprint_unverified"
+      check_url: "https://www.spectrum.com/internet"
+
+    - id: xfinity_east_pnw
+      exclude_rural: true
+      geo_scope:
+        states: ["PA", "NJ", "MD", "VA", "DC", "MA", "WA", "OR"]
+      carrier_name: "Xfinity (Comcast)"
+      technology: "Cable (DOCSIS 3.1/4.0)"
+      tier_category: "cable"
+      max_download_mbps: 1200
+      max_upload_mbps: 100
+      symmetrical: false
+      typical_monthly_usd: "$65–$110/mo"
+      availability_status: "regional_footprint_unverified"
+      check_url: "https://www.xfinity.com/learn/internet-service"
+
+    - id: spectrum_optimum_ny_ri_de
+      exclude_rural: true
+      geo_scope:
+        states: ["NY", "RI", "DE"]
+      carrier_name: "Spectrum / Optimum Cable"
+      technology: "Cable (DOCSIS 3.1/4.0)"
+      tier_category: "cable"
+      max_download_mbps: 1000
+      max_upload_mbps: 35
+      symmetrical: false
+      typical_monthly_usd: "$65–$100/mo"
+      availability_status: "regional_footprint_unverified"
+      check_url: "https://www.spectrum.com/internet"
+
+    - id: xfinity_spectrum_se_midwest
+      exclude_rural: true
+      only_when_category_empty: true
+      geo_scope:
+        states: ["CA", "FL", "GA", "NC", "SC", "TN", "IL", "MI", "OH", "IN", "KY", "WI"]
+      carrier_name: "Xfinity / Spectrum Cable"
+      technology: "Cable (DOCSIS 3.1/4.0)"
+      tier_category: "cable"
+      max_download_mbps: 1200
+      max_upload_mbps: 35
+      symmetrical: false
+      typical_monthly_usd: "$65–$105/mo"
+      availability_status: "regional_footprint_unverified"
+      check_url: "https://www.xfinity.com/learn/internet-service"
+
+    - id: xfinity_cox_mountain_west
+      exclude_rural: true
+      geo_scope:
+        states: ["CO", "UT", "AZ", "NV", "MN"]
+      carrier_name: "Xfinity / Cox Cable"
+      technology: "Cable (DOCSIS 3.1/4.0)"
+      tier_category: "cable"
+      max_download_mbps: 1200
+      max_upload_mbps: 35
+      symmetrical: false
+      typical_monthly_usd: "$65–$110/mo"
+      availability_status: "regional_footprint_unverified"
+      check_url: "https://www.xfinity.com/learn/internet-service"
+
+    - id: regional_cable_fallback
+      exclude_rural: true
+      only_when_category_empty: true
+      geo_scope:
+        states: []
+      carrier_name: "Xfinity / Spectrum / Cox Cable"
+      technology: "Cable (DOCSIS 3.1/4.0)"
+      tier_category: "cable"
+      max_download_mbps: 1000
+      max_upload_mbps: 35
+      symmetrical: false
+      typical_monthly_usd: "$65–$105/mo"
+      availability_status: "regional_footprint_unverified"
+      check_url: "https://www.xfinity.com/learn/internet-service"
+
+    - id: tmobile_5g_home
+      exclude_rural: true
+      geo_scope:
+        nationwide: true
+        states: []
+      carrier_name: "T-Mobile 5G Home Internet"
+      technology: "5G Fixed Wireless"
+      tier_category: "wireless"
+      max_download_mbps: 245
+      max_upload_mbps: 31
+      symmetrical: false
+      typical_monthly_usd: ""
+      availability_status: "regional_footprint_unverified"
+      check_url: "https://www.t-mobile.com/home-internet"
+
+    - id: starlink_residential
+      exclude_rural: false
+      geo_scope:
+        nationwide: true
+        states: []
+      carrier_name: "Starlink Residential"
+      technology: "LEO Satellite"
+      tier_category: "satellite"
+      max_download_mbps: 220
+      max_upload_mbps: 25
+      symmetrical: false
+      typical_monthly_usd: ""
+      availability_status: "nationwide_sky_view"
+      check_url: "https://www.starlink.com/"

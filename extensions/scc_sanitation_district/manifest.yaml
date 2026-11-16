@@ -1,0 +1,32 @@
+id: scc_sanitation_district
+name: "Santa Clara County Sanitation Districts & Municipal Trash"
+version: "1.0.0"
+description: "Queries Santa Clara County Sanitation District ArcGIS polygons (e.g. West Valley Sanitation District) and pairs exact municipality with official franchised trash hauler tariffs."
+domain: water_sewer_trash
+domains:
+  - water_sewer_trash
+driver: native_adapter
+proto_message_type: "openestate.extension.v1.WaterSewerTrashProto"
+priority: 340
+enabled_by_default: true
+builtin: true
+provenance: live_verified
+homepage_url: "https://geo.sanjoseca.gov/"
+documentation_url: "https://geo.sanjoseca.gov/server/rest/services/REF/REF_CountyReferenceLayers/MapServer/1"
+codeowners:
+  - "@openestate/utilities"
+geo_scope:
+  country: "US"
+  states: ["CA"]
+  counties: ["06085"]
+auth:
+  auth_type: none
+rate_limit:
+  requests_per_second: 4
+  burst: 8
+  timeout_ms: 8000
+  max_retries: 1
+cache_ttl_secs: 21600
+source_attribution:
+  name: "Santa Clara County Sanitation District GIS & West Valley Collection"
+  url: "https://geo.sanjoseca.gov/server/rest/services/REF/REF_CountyReferenceLayers/MapServer/1"

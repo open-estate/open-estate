@@ -1,0 +1,209 @@
+syntax = "proto3";
+
+package openestate.extension.v1;
+
+import "openestate/extension/v1/domains.proto";
+
+// Pluggable property-intelligence capability domains supported by `ExtensionHub`.
+enum CapabilityDomain {
+  DOMAIN_UNSPECIFIED = 0;
+  DOMAIN_GEOCODE = 1;
+  DOMAIN_PROPERTY_FACTS = 2;
+  DOMAIN_VALUATION = 3;
+  DOMAIN_MARKET_TRENDS = 4;
+  DOMAIN_ELECTRIC_UTILITY = 5;
+  DOMAIN_GAS_UTILITY = 6;
+  DOMAIN_WATER_SEWER_TRASH = 7;
+  DOMAIN_BROADBAND = 8;
+  DOMAIN_NATURAL_HAZARDS = 9;
+  DOMAIN_ENVIRONMENTAL = 10;
+  DOMAIN_LIVABILITY = 11;
+  DOMAIN_SCHOOLS = 12;
+  DOMAIN_CRIME = 13;
+  DOMAIN_HOUSE_3D = 14;
+  DOMAIN_LISTINGS_FEED = 15;
+  DOMAIN_INSURANCE = 16;
+  DOMAIN_TAX_MANDATES = 17;
+  DOMAIN_ROUTING = 18;
+  DOMAIN_PERMITS = 19;
+  DOMAIN_PERMIT_INTEL = 20;
+}
+
+// Execution driver backing an extension package (`extensions/<vendor_id>/manifest.yaml`).
+enum DriverKind {
+  DRIVER_UNSPECIFIED = 0;
+  // Pure declarative YAML (`request` HTTP template + JSONPath `response_mapping` or published `tariff_catalog` / `geo_rules`).
+  DRIVER_DECLARATIVE_YAML = 1;
+  // OpenAPI 3.x specification (`openapi.yaml` `operationId` / path + JSONPath `response_mapping`).
+  DRIVER_OPENAPI_YAML = 2;
+  // Compiled Rust `DataExtensionAdapter` trait implementation (reserved for binary/spatial protocols such as USGS 3DEP LAZ LiDAR).
+  DRIVER_NATIVE_ADAPTER = 3;
+}
+
+// Data honesty & verification tier attached to every emitted `SourceAttributionProto`.
+enum ProvenanceTier {
+  PROVENANCE_UNSPECIFIED = 0;
+  // Live parcel/coordinate/address response fetched from an authoritative upstream API.
+  PROVENANCE_LIVE_VERIFIED = 1;
+  // Published utility commission, municipal, or statutory tariff schedule with a cited `tariff_url`.
+  PROVENANCE_OFFICIAL_TARIFF = 2;
+  // Published carrier service-territory footprint (requires street-drop verification).
+  PROVENANCE_REGIONAL_FOOTPRINT = 3;
+  // Static hint or incomplete source without parcel-level verification.
+  PROVENANCE_UNVERIFIED = 4;
+}
+
+// Geographic coverage filter & deterministic specificity inputs for an extension or tariff rule.
+// Specificity ranking: exact `zip_codes` (500) > `cities` (400) > `zip_prefixes` (300) > `counties` FIPS (200) > `states` (100) > `nationwide` (10).
+message GeoScopeProto {
+  // 2-letter USPS state/territory codes (e.g., "CA", "TX") or "*" for nationwide.
+  repeated string states = 1;
+  // 5-digit county FIPS codes (e.g., "06085", "48453") or normalized county names.
+  repeated string counties = 2;
+  // 3-digit ZIP SCF prefixes (e.g., "950", "943").
+  repeated string zip_prefixes = 3;
+  // Exact 5-digit US ZIP codes (e.g., "95050", "94301").
+  repeated string zip_codes = 4;
+  // Normalized lowercase city names (e.g., "santa clara", "austin").
+  repeated string cities = 5;
+  // True when the connector covers all 50 US states + DC.
+  bool nationwide = 6;
+  // Optional explicit specificity override when sub-municipal polygon/district rules apply.
+  optional int32 specificity_override = 7;
+  // ISO-3166-1 alpha-2 country code (defaults to "US" when empty).
+  string country = 8;
+}
+
+// Declarative credential binding resolved from environment variables (never hardcoded secrets).
+message AuthSpecProto {
+  // "none", "api_key_header", "bearer_token", "api_key_query", or "basic".
+  string auth_type = 1;
+  // Environment variable holding the secret (e.g., "RENTCAST_API_KEY", "FCC_BDC_API_KEY").
+  string env_var = 2;
+  // HTTP request header name when `auth_type` uses headers (e.g., "X-Api-Key", "Authorization").
+  string header_name = 3;
+  // URL query parameter name when `auth_type` is "api_key_query" (e.g., "api_key", "key").
+  string query_param = 4;
+  // Optional header value prefix (e.g., "Bearer ").
+  optional string header_prefix = 5;
+  // When true, missing `env_var` cleanly skips live HTTP execution instead of failing startup.
+  bool optional_key = 6;
+}
+
+// Per-extension GCRA rate-limit (`governor`) and retry (`backon`) policy.
+message RateLimitSpecProto {
+  uint32 requests_per_second = 1;
+  uint32 burst = 2;
+  uint32 timeout_ms = 3;
+  uint32 max_retries = 4;
+}
+
+// Home-Assistant-style integration manifest (`extensions/<vendor_id>/manifest.yaml`).
+message ExtensionManifestProto {
+  string extension_id = 1;
+  string name = 2;
+  string version = 3;
+  string description = 4;
+  CapabilityDomain domain = 5;
+  repeated CapabilityDomain additional_domains = 6;
+  DriverKind driver = 7;
+  GeoScopeProto geo_scope = 8;
+  AuthSpecProto auth = 9;
+  RateLimitSpecProto rate_limit = 10;
+  uint64 cache_ttl_secs = 11;
+  int32 priority = 12;
+  bool enabled = 13;
+  bool builtin = 14;
+  // Fully-qualified Protobuf contract name (e.g., "openestate.extension.v1.ElectricUtilityProto").
+  string proto_message_type = 15;
+  optional string openapi_spec_file = 16;
+  optional string documentation_url = 17;
+  repeated string codeowners = 18;
+  ProvenanceTier default_provenance = 19;
+  // Upstream extension IDs that must run before this extension in DAG topological order.
+  repeated string depends_on = 20;
+  // Upstream capability domains whose produced envelopes are passed into this extension's `upstream_envelopes`.
+  repeated CapabilityDomain input_from_domains = 21;
+  // "any" (default: skip only when zero upstream sources produced usable envelopes) or "all".
+  string upstream_require_mode = 22;
+}
+
+// Mandatory citation & provenance metadata attached to every extension result.
+message SourceAttributionProto {
+  string extension_id = 1;
+  string source_name = 2;
+  string source_url = 3;
+  ProvenanceTier provenance_tier = 4;
+  string fetched_at_rfc3339 = 5;
+  optional string schedule_or_version = 6;
+  optional string notes = 7;
+}
+
+// Standardized parcel/location lookup input passed to declarative YAML, OpenAPI, and native extensions.
+message ExtensionQueryProto {
+  string address = 1;
+  string street = 2;
+  string city = 3;
+  string state = 4;
+  string zip = 5;
+  string county_fips = 6;
+  optional double lat = 7;
+  optional double lon = 8;
+  map<string, string> extra_params = 9;
+  // Optional parcel context signals for tariff & utility/broadband footprint rules.
+  optional string county_name = 10;
+  optional int64 sqft = 11;
+  optional int64 year_built = 12;
+  optional bool is_condo_or_attached = 13;
+  optional bool hoa_covers_water_trash = 14;
+  optional bool is_likely_private_well = 15;
+  optional bool is_likely_private_septic = 16;
+  optional string sdwis_water_name = 17;
+  optional string sdwis_pwsid = 18;
+  optional double gov_kwh_benchmark = 19;
+  optional bool has_solar = 20;
+  optional double acs_broadband_pct = 21;
+  optional bool is_rural_area = 22;
+  optional string apn = 23;
+  optional string parent_address = 24;
+  // Stage-1 / upstream envelopes passed to Stage-2 dependent extractors during DAG execution.
+  repeated ExtensionEnvelopeProto upstream_envelopes = 25;
+}
+
+// Wire-safe typed envelope emitted by any extension execution before deterministic aggregation.
+message ExtensionEnvelopeProto {
+  string extension_id = 1;
+  CapabilityDomain domain = 2;
+  int32 priority = 3;
+  int32 geo_specificity = 4;
+  SourceAttributionProto attribution = 5;
+  uint32 latency_ms = 6;
+  bool cached = 7;
+
+  oneof payload {
+    GeocodeResultProto geocode = 10;
+    ElectricUtilityProto electric_utility = 11;
+    GasUtilityProto gas_utility = 12;
+    WaterSewerTrashProto water_sewer_trash = 13;
+    BroadbandOptionProto broadband_option = 14;
+    BroadbandCatalogProto broadband_catalog = 15;
+    PropertyFactsProto property_facts = 16;
+    HazardSummaryProto hazard_summary = 17;
+    EnvironmentalSummaryProto environmental_summary = 18;
+    LivabilitySummaryProto livability_summary = 19;
+    MarketValuationProto market_valuation = 20;
+    ListingShoppingFacetsProto shopping_facets = 21;
+    InsuranceQuoteProto insurance_quote = 22;
+    TaxMandatesProto tax_mandates = 23;
+    House3dMetadataProto house_3d = 24;
+    ListingsFeedBatchProto listings_feed = 25;
+    RoutingMatrixProto routing_matrix = 26;
+    PermitsHistoryProto permits_history = 27;
+    RoofIntelProto roof_intel = 28;
+    SolarIntelProto solar_intel = 29;
+    string raw_json = 30;
+    MepIntelProto mep_intel = 31;
+    RemodelIntelProto remodel_intel = 32;
+    CodeEnforcementIntelProto code_enforcement_intel = 33;
+  }
+}

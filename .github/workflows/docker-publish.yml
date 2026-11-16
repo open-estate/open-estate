@@ -1,0 +1,157 @@
+name: Publish Multi-Arch Open Estate Image (Docker Hub & GHCR)
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build-push-arch:
+    name: Build (${{ matrix.platform }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            arch_slug: arm64
+          - platform: linux/amd64
+            runner: ubuntu-24.04
+            arch_slug: amd64
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Resolve lowercase GHCR image name
+        id: meta
+        run: |
+          repo_lc="$(printf '%s' "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')"
+          echo "image=ghcr.io/${repo_lc}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push digest (${{ matrix.platform }})
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          labels: |
+            org.opencontainers.image.title=Open Estate
+            org.opencontainers.image.description=Open Estate — Self-Hosted US Residential, CRE, Land & Farmland Research Server (Personal Research & Non-Commercial Edition)
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.licenses=LicenseRef-Open-Estate-Personal-Research-NC-1.0
+          outputs: type=image,name=${{ steps.meta.outputs.image }},push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha,scope=${{ matrix.arch_slug }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.arch_slug }}
+
+      - name: Export digest artifact
+        run: |
+          mkdir -p /tmp/digests
+          digest="${{ steps.build.outputs.digest }}"
+          touch "/tmp/digests/${digest#sha256:}"
+
+      - name: Upload digest
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ matrix.arch_slug }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  merge-manifest:
+    name: Publish Multi-Arch Manifest (GHCR & Docker Hub)
+    needs: build-push-arch
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Resolve image names
+        id: meta
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          repo_lc="$(printf '%s' "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')"
+          echo "ghcr_image=ghcr.io/${repo_lc}" >> "$GITHUB_OUTPUT"
+          echo "dockerhub_image=docker.io/openestate/openestate" >> "$GITHUB_OUTPUT"
+          if [ -n "${DOCKERHUB_USERNAME:-}" ] && [ -n "${DOCKERHUB_TOKEN:-}" ]; then
+            echo "has_dockerhub=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_dockerhub=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Download digests
+        uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests
+          pattern: digests-*
+          merge-multiple: true
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Log in to Docker Hub
+        if: steps.meta.outputs.has_dockerhub == 'true'
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Create and push GHCR multi-arch manifest
+        run: |
+          short_sha="${GITHUB_SHA::7}"
+          refs=""
+          for f in /tmp/digests/*; do
+            refs="$refs ${{ steps.meta.outputs.ghcr_image }}@sha256:$(basename "$f")"
+          done
+          tag_args=(-t "${{ steps.meta.outputs.ghcr_image }}:latest" -t "${{ steps.meta.outputs.ghcr_image }}:sha-${short_sha}")
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            tag_args+=(-t "${{ steps.meta.outputs.ghcr_image }}:${GITHUB_REF_NAME}")
+          fi
+          docker buildx imagetools create "${tag_args[@]}" $refs
+          docker buildx imagetools inspect "${{ steps.meta.outputs.ghcr_image }}:latest"
+
+      - name: Mirror multi-arch manifest to Docker Hub (openestate/openestate)
+        if: steps.meta.outputs.has_dockerhub == 'true'
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          sudo apt-get update && sudo apt-get install -y --no-install-recommends skopeo
+          short_sha="${GITHUB_SHA::7}"
+          src="${{ steps.meta.outputs.ghcr_image }}:sha-${short_sha}"
+          dst="${{ steps.meta.outputs.dockerhub_image }}"
+          tags=("latest" "sha-${short_sha}")
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            tags+=("${GITHUB_REF_NAME}")
+          fi
+          for tag in "${tags[@]}"; do
+            skopeo copy --all \
+              --src-creds "${{ github.actor }}:${GHCR_TOKEN}" \
+              --dest-creds "${DOCKERHUB_USERNAME}:${DOCKERHUB_TOKEN}" \
+              "docker://${src}" \
+              "docker://${dst}:${tag}"
+          done
+          docker buildx imagetools inspect "${dst}:latest"

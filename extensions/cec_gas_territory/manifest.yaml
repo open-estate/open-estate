@@ -1,0 +1,32 @@
+id: cec_gas_territory
+name: "CEC & HIFLD Natural Gas LDC Territory + EIA v2 Rates"
+version: "1.0.0"
+description: "Queries CA CEC Natural Gas Service Area & nationwide HIFLD LDC boundaries at parcel coordinates alongside EIA API v2 residential natural gas rate series."
+domain: gas_utility
+domains:
+  - gas_utility
+driver: native_adapter
+proto_message_type: "openestate.extension.v1.GasUtilityProto"
+priority: 320
+enabled_by_default: true
+builtin: true
+provenance: live_verified
+homepage_url: "https://www.energy.ca.gov/"
+documentation_url: "https://services3.arcgis.com/bWPjFyq029ChCGur/arcgis/rest/services/Natural_Gas_Service_Area/FeatureServer/0"
+codeowners:
+  - "@openestate/utilities"
+geo_scope:
+  country: "US"
+  nationwide: true
+  states: []
+auth:
+  auth_type: none
+rate_limit:
+  requests_per_second: 5
+  burst: 10
+  timeout_ms: 6000
+  max_retries: 1
+cache_ttl_secs: 86400
+source_attribution:
+  name: "CEC Natural Gas Service Areas / HIFLD Natural Gas Service Territories & US EIA"
+  url: "https://services3.arcgis.com/bWPjFyq029ChCGur/arcgis/rest/services/Natural_Gas_Service_Area/FeatureServer/0"

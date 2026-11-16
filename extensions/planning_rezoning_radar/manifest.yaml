@@ -1,0 +1,48 @@
+id: planning_rezoning_radar
+name: "Municipal Planning, Rezoning & Quarter-Mile Construction Radar"
+version: "1.0.0"
+description: "Active construction footprints, proposed roadways/transit, and municipal ArcGIS/Socrata planning & infill entitlement radar within 0.25–0.50 miles of a parcel."
+domain: livability
+domains:
+  - livability
+  - property_facts
+driver: declarative_yaml
+proto_message_type: "openestate.extension.v1.LivabilitySummaryProto"
+priority: 215
+enabled_by_default: true
+builtin: true
+provenance: live_verified
+homepage_url: "https://www.openstreetmap.org/copyright"
+documentation_url: "https://wiki.openstreetmap.org/wiki/Key:construction"
+codeowners:
+  - "@openestate/planning"
+geo_scope:
+  country: "US"
+  nationwide: true
+  states: []
+  counties: []
+  zip_prefixes: []
+  zip_codes: []
+  cities: []
+auth:
+  auth_type: none
+rate_limit:
+  requests_per_second: 3
+  burst: 6
+  timeout_ms: 4500
+  max_retries: 1
+cache_ttl_secs: 86400
+source_attribution:
+  name: "OpenStreetMap Overpass Construction Ways & Municipal Planning Open GIS"
+  url: "https://www.openstreetmap.org/copyright"
+  schedule_or_version: "ODbL Live Construction/Proposed Ways + Municipal Open Data"
+  notes: "Queries active building/landuse/highway construction and proposed features within 600m alongside city ArcGIS/Socrata planning records; never fabricates unmapped projects."
+request:
+  method: "GET"
+  url: "https://overpass-api.de/api/interpreter"
+  query_params:
+    data: "[out:json][timeout:6];(way[\"building\"=\"construction\"](around:600,{{ lat }},{{ lon }});way[\"landuse\"=\"construction\"](around:600,{{ lat }},{{ lon }});way[\"highway\"=\"construction\"](around:600,{{ lat }},{{ lon }});nw[\"proposed\"](around:600,{{ lat }},{{ lon }}););out center tags;"
+response_mapping:
+  root_path: "$.elements"
+  require_non_empty: false
+  fields: {}

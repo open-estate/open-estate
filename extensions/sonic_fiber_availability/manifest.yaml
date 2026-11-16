@@ -1,0 +1,32 @@
+id: sonic_fiber_availability
+name: "Sonic Official Address Availability"
+version: "1.0.0"
+description: "Live address-level Sonic Fiber verification via sonic.com/availability CSRF/session qualification flow; never infers availability from regional or county footprints."
+domain: broadband
+domains:
+  - broadband
+driver: native_adapter
+proto_message_type: "openestate.extension.v1.BroadbandOptionProto"
+priority: 450
+enabled_by_default: true
+builtin: true
+provenance: live_verified
+homepage_url: "https://www.sonic.com/"
+documentation_url: "https://www.sonic.com/availability"
+codeowners:
+  - "@openestate/broadband"
+geo_scope:
+  country: "US"
+  states: ["CA"]
+auth:
+  auth_type: none
+rate_limit:
+  requests_per_second: 2
+  burst: 4
+  timeout_ms: 8000
+  max_retries: 1
+cache_ttl_secs: 86400
+source_attribution:
+  name: "Sonic.com Official Address Pre-Qualification"
+  url: "https://www.sonic.com/availability"
+  notes: "Marks availability_status='confirmed_address' ONLY when live address verification confirms serviceability at the exact street/unit."

@@ -1,0 +1,48 @@
+openapi: "3.0.3"
+info:
+  title: "USGS ASCE 7-22 Seismic Design Maps Web Service"
+  version: "1.0.0"
+  description: "United States Geological Survey ASCE 7-22 probabilistic seismic ground motion parameters."
+servers:
+  - url: "https://earthquake.usgs.gov/ws/designmaps"
+paths:
+  /asce7-22.json:
+    get:
+      operationId: getAsce722DesignShaking
+      summary: "Retrieve ASCE 7-22 PGA, Ss, S1, and Seismic Design Category for a US coordinate."
+      parameters:
+        - name: latitude
+          in: query
+          required: true
+          schema:
+            type: number
+        - name: longitude
+          in: query
+          required: true
+          schema:
+            type: number
+        - name: riskCategory
+          in: query
+          required: true
+          schema:
+            type: string
+            default: "II"
+        - name: siteClass
+          in: query
+          required: true
+          schema:
+            type: string
+            default: "D"
+        - name: title
+          in: query
+          required: true
+          schema:
+            type: string
+            default: "Open Estate"
+      responses:
+        "200":
+          description: "USGS ASCE 7-22 design shaking JSON"
+          content:
+            application/json:
+              schema:
+                type: object

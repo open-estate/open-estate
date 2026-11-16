@@ -1,0 +1,35 @@
+id: campbell_mgo_permits
+name: "City of Campbell MGO Building, Planning & Code Enforcement GIS"
+version: "1.0.0"
+description: "Keyless Stage-1 fetcher querying City of Campbell ArcGIS BaseFeatureLayers/Addresses (exact APN resolution without neighbor snapping) and all MGO Building (2025/2026..1990), Planning, and Code Enforcement (Open/Closed) layers."
+domain: permits
+domains:
+  - permits
+driver: native_adapter
+proto_message_type: "openestate.extension.v1.PermitsHistoryProto"
+priority: 400
+enabled_by_default: true
+builtin: true
+provenance: live_verified
+homepage_url: "https://gis.campbellca.gov/"
+documentation_url: "https://gis.campbellca.gov/arcgis/rest/services/MGO"
+codeowners:
+  - "@openestate/permits"
+geo_scope:
+  country: "US"
+  states: ["CA"]
+  counties: ["06085"]
+  cities: ["campbell"]
+  zip_codes: ["95008", "95009", "95011"]
+auth:
+  auth_type: none
+rate_limit:
+  requests_per_second: 4
+  burst: 8
+  timeout_ms: 8000
+  max_retries: 1
+cache_ttl_secs: 86400
+source_attribution:
+  name: "City of Campbell GIS / MyGovernmentOnline (MGO) Permit Layers"
+  url: "https://gis.campbellca.gov/arcgis/rest/services/MGO"
+  notes: "Queries exact parcel addresses including hyphenated building/unit designations and parent-lot subdivision permits separately from subject-unit reroofs."

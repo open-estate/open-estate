@@ -1,0 +1,1895 @@
+{
+ "about": "Public, keyless parcel-polygon layers used to draw lot outlines where no bespoke connector supplies one. Every entry was verified live at two or more locations with the two query forms the server sends: point-intersects at the house, and a situs-address filter inside a small envelope. Only the parcel-id and situs-address fields named here are ever requested.",
+ "verifiedAt": "2026-11-12",
+ "layers": [
+  {
+   "state": "AK",
+   "counties": [],
+   "label": "Alaska DNR Division of Forestry & Fire Protection - Alaska Statewide Parcels — parcel boundaries",
+   "url": "https://services1.arcgis.com/7HDiw78fcUiM2BWn/arcgis/rest/services/AK_Parcels/FeatureServer/0",
+   "apn": "parcel_id",
+   "tests": [
+    [
+     61.196102,
+     -149.949012
+    ],
+    [
+     64.84196,
+     -147.740358
+    ],
+    [
+     58.302097,
+     -134.417032
+    ]
+   ],
+   "page": "https://www.arcgis.com/home/item.html?id=458be3d8aafa47cd882af05cee983f6b"
+  },
+  {
+   "state": "AL",
+   "counties": [
+    "01073"
+   ],
+   "label": "Jefferson County Commission GIS — parcel boundaries",
+   "url": "https://jccgis.jccal.org/server/rest/services/Basemap/Parcels/MapServer/0",
+   "apn": "PARCELID",
+   "addr": "ADDR_APR",
+   "num": "Bldg_Number",
+   "street": "Street_Name",
+   "where": "upper",
+   "tests": [
+    [
+     33.470199,
+     -86.798673
+    ],
+    [
+     33.403185,
+     -86.804603
+    ]
+   ],
+   "page": "https://jccgis.jccal.org/server/rest/services/Basemap/Parcels/MapServer"
+  },
+  {
+   "state": "AL",
+   "counties": [
+    "01097"
+   ],
+   "label": "City of Mobile GIS (ArcGIS Online) — parcel boundaries",
+   "url": "https://services3.arcgis.com/AcvBA1fcgucsFQvO/arcgis/rest/services/PARCEL_DETAILS/FeatureServer/0",
+   "apn": "parcel",
+   "addr": "address",
+   "where": "upper",
+   "tests": [
+    [
+     30.68573,
+     -88.098699
+    ],
+    [
+     30.66973,
+     -88.211383
+    ],
+    [
+     30.820375,
+     -88.083486
+    ]
+   ],
+   "page": "https://services3.arcgis.com/AcvBA1fcgucsFQvO/arcgis/rest/services/PARCEL_DETAILS/FeatureServer"
+  },
+  {
+   "state": "AR",
+   "counties": [],
+   "label": "Arkansas GIS Office (AGISO) — parcel boundaries",
+   "url": "https://gis.arkansas.gov/arcgis/rest/services/FEATURESERVICES/Planning_Cadastre/FeatureServer/6",
+   "apn": "parcelid",
+   "addr": "adrlabel",
+   "num": "adrnum",
+   "street": "pstrnam",
+   "where": "upper",
+   "tests": [
+    [
+     34.756953,
+     -92.320997
+    ],
+    [
+     36.075612,
+     -94.158182
+    ]
+   ],
+   "page": "https://gis.arkansas.gov/arcgis/rest/services/FEATURESERVICES/Planning_Cadastre/FeatureServer"
+  },
+  {
+   "state": "AZ",
+   "counties": [
+    "04013"
+   ],
+   "label": "Maricopa County Assessor — parcel boundaries",
+   "url": "https://gis.mcassessor.maricopa.gov/arcgis/rest/services/Parcels/MapServer/0",
+   "apn": "APN",
+   "addr": "PHYSICAL_ADDRESS",
+   "num": "PHYSICAL_STREET_NUM",
+   "street": "PHYSICAL_STREET_NAME",
+   "where": "upper",
+   "tests": [
+    [
+     33.390988,
+     -111.929671
+    ],
+    [
+     33.410841,
+     -111.799839
+    ]
+   ],
+   "page": "https://gis.mcassessor.maricopa.gov/arcgis/rest/services/Parcels/MapServer"
+  },
+  {
+   "state": "AZ",
+   "counties": [
+    "04019"
+   ],
+   "label": "Pima County GIS (Open Data) — parcel boundaries",
+   "url": "https://gisdata.pima.gov/arcgis1/rest/services/GISOpenData/LandRecords/MapServer/12",
+   "apn": "PARCEL",
+   "addr": "ADDRESS_OL",
+   "where": "upper",
+   "tests": [
+    [
+     32.230733,
+     -110.939384
+    ],
+    [
+     32.402647,
+     -110.95529
+    ]
+   ],
+   "page": "https://gisdata.pima.gov/arcgis1/rest/services/GISOpenData/LandRecords/MapServer"
+  },
+  {
+   "state": "CA",
+   "counties": [],
+   "label": "California Statewide Parcels Public GIS — parcel boundaries",
+   "url": "https://bz1uwWPKUInZBK94.svcs5.arcgis.com/bz1uwWPKUInZBK94/arcgis/rest/services/CA_Statewide_Parcels_Public_view/FeatureServer/0",
+   "apn": "PARCEL_APN",
+   "addr": "SITE_ADDR",
+   "num": "SITE_HOUSE_NUMBER",
+   "street": "SITE_STREET_NAME",
+   "where": "upper",
+   "tests": [
+    [
+     37.7457,
+     -122.436677
+    ],
+    [
+     33.832918,
+     -118.187648
+    ]
+   ]
+  },
+  {
+   "state": "CO",
+   "counties": [],
+   "label": "Colorado Governor's Office of Information Technology (OIT) GIS — parcel boundaries",
+   "url": "https://gis.colorado.gov/public/rest/services/Address_and_Parcel/Colorado_Public_Parcels/FeatureServer/0",
+   "apn": "parcel_id",
+   "addr": "situsAdd",
+   "where": "upper",
+   "tests": [
+    [
+     39.700068,
+     -104.964886
+    ],
+    [
+     38.860939,
+     -104.819687
+    ]
+   ],
+   "page": "https://gis.colorado.gov/public/rest/services/Address_and_Parcel/Colorado_Public_Parcels/FeatureServer"
+  },
+  {
+   "state": "CT",
+   "counties": [],
+   "label": "Connecticut GIS Office (CT OPM) — parcel boundaries",
+   "url": "https://services3.arcgis.com/3FL1kr7L4LvwA2Kb/arcgis/rest/services/Connecticut_CAMA_and_Parcel_Layer/FeatureServer/0",
+   "apn": "Parcel_ID",
+   "addr": "Location",
+   "where": "upper",
+   "tests": [
+    [
+     41.761937,
+     -72.740953
+    ],
+    [
+     41.329066,
+     -72.966886
+    ]
+   ],
+   "page": "https://www.arcgis.com/home/item.html?id=82a733423a244c43a9d4bf552954cea9"
+  },
+  {
+   "state": "DE",
+   "counties": [],
+   "label": "Delaware FirstMap (Office of State Planning Coordination) — parcel boundaries",
+   "url": "https://enterprise.firstmap.delaware.gov/arcgis/rest/services/PlanningCadastre/DE_StateParcels/FeatureServer/0",
+   "apn": "PIN",
+   "tests": [
+    [
+     39.801336,
+     -75.518139
+    ],
+    [
+     39.166772,
+     -75.536036
+    ]
+   ],
+   "page": "https://enterprise.firstmap.delaware.gov/arcgis/rest/services/PlanningCadastre/DE_StateParcels/FeatureServer"
+  },
+  {
+   "state": "FL",
+   "counties": [],
+   "label": "Florida Dept. of Revenue Statewide Cadastral — parcel boundaries",
+   "url": "https://services9.arcgis.com/Gh9awoU677aKree0/arcgis/rest/services/Florida_Statewide_Cadastral/FeatureServer/0",
+   "apn": "PARCEL_ID",
+   "addr": "PHY_ADDR1",
+   "where": "plain",
+   "tests": [
+    [
+     27.915389,
+     -82.500723
+    ],
+    [
+     26.028031,
+     -80.140439
+    ]
+   ],
+   "page": "https://floridarevenue.com/property/"
+  },
+  {
+   "state": "GA",
+   "counties": [
+    "13067"
+   ],
+   "label": "Cobb County GIS — parcel boundaries",
+   "url": "https://gis.cobbcounty.gov/gisserver/rest/services/cobbpublic/Parcels/MapServer/3",
+   "apn": "PIN",
+   "addr": "SITUS_ADDR",
+   "where": "upper",
+   "tests": [
+    [
+     33.953116,
+     -84.526763
+    ],
+    [
+     33.86912,
+     -84.520352
+    ]
+   ],
+   "page": "https://gis.cobbcounty.gov/gisserver/rest/services/cobbpublic/Parcels/MapServer"
+  },
+  {
+   "state": "GA",
+   "counties": [
+    "13089"
+   ],
+   "label": "DeKalb County GIS — parcel boundaries",
+   "url": "https://dcgis.dekalbcountyga.gov/hosted/rest/services/Parcels/MapServer/0",
+   "apn": "PARCELID",
+   "addr": "SITEADDRESS",
+   "where": "upper",
+   "tests": [
+    [
+     33.771029,
+     -84.2888
+    ],
+    [
+     33.853972,
+     -84.215201
+    ]
+   ],
+   "page": "https://dcgis.dekalbcountyga.gov/hosted/rest/services/Parcels/MapServer"
+  },
+  {
+   "state": "GA",
+   "counties": [
+    "13121"
+   ],
+   "label": "Fulton County GIS (ArcGIS Online) — parcel boundaries",
+   "url": "https://services1.arcgis.com/AQDHTHDrZzfsFsB5/arcgis/rest/services/Tax_Parcels/FeatureServer/0",
+   "apn": "ParcelID",
+   "addr": "Address",
+   "num": "AddrNumber",
+   "street": "AddrStreet",
+   "where": "upper",
+   "tests": [
+    [
+     33.784163,
+     -84.354396
+    ],
+    [
+     34.07001,
+     -84.279241
+    ]
+   ],
+   "page": "https://services1.arcgis.com/AQDHTHDrZzfsFsB5/arcgis/rest/services/Tax_Parcels/FeatureServer"
+  },
+  {
+   "state": "GA",
+   "counties": [
+    "13135"
+   ],
+   "label": "Gwinnett County GIS (ArcGIS Online) — parcel boundaries",
+   "url": "https://services3.arcgis.com/RfpmnkSAQleRbndX/arcgis/rest/services/Property_and_Tax/FeatureServer/0",
+   "apn": "PIN",
+   "tests": [
+    [
+     33.949062,
+     -83.990327
+    ],
+    [
+     33.999251,
+     -84.145496
+    ]
+   ],
+   "page": "https://services3.arcgis.com/RfpmnkSAQleRbndX/arcgis/rest/services/Property_and_Tax/FeatureServer"
+  },
+  {
+   "state": "HI",
+   "counties": [],
+   "label": "Hawaii Statewide GIS Program (Office of Planning & Sustainable Development) — parcel boundaries",
+   "url": "https://geodata.hawaii.gov/arcgis/rest/services/ParcelsZoning/MapServer/25",
+   "apn": "tmk_txt",
+   "tests": [
+    [
+     21.282058,
+     -157.80118
+    ],
+    [
+     19.711922,
+     -155.087119
+    ]
+   ],
+   "page": "https://geodata.hawaii.gov/arcgis/rest/services/ParcelsZoning/MapServer"
+  },
+  {
+   "state": "ID",
+   "counties": [],
+   "label": "State of Idaho, Governor's Office of Information Technology Services (ITS) - Public Idaho Parcels — parcel boundaries",
+   "url": "https://services1.arcgis.com/CNPdEkvnGl65jCX8/arcgis/rest/services/Public_Idaho_Parcels_/FeatureServer/7",
+   "apn": "PARCEL_ID",
+   "addr": "SITE_ADD",
+   "where": "upper",
+   "tests": [
+    [
+     43.630416,
+     -116.207903
+    ],
+    [
+     46.411091,
+     -117.010034
+    ]
+   ],
+   "page": "https://www.arcgis.com/home/item.html?id=65a3f7c6d4ca404ba6ab677913953b35"
+  },
+  {
+   "state": "ID",
+   "counties": [
+    "16001"
+   ],
+   "label": "Ada County Assessor GIS (ArcGIS Online) — parcel boundaries",
+   "url": "https://services2.arcgis.com/dgGjZc6xAH5m5JyP/arcgis/rest/services/Parcels/FeatureServer/5",
+   "apn": "PARCEL",
+   "addr": "ADDRESS",
+   "num": "PROPADDNUM",
+   "street": "PROPSTNM",
+   "where": "upper",
+   "tests": [
+    [
+     43.629972,
+     -116.206205
+    ],
+    [
+     43.615833,
+     -116.401066
+    ]
+   ],
+   "page": "https://services2.arcgis.com/dgGjZc6xAH5m5JyP/arcgis/rest/services/Parcels/FeatureServer"
+  },
+  {
+   "state": "IL",
+   "counties": [
+    "17031"
+   ],
+   "label": "Cook County GIS (Cook Viewer) — parcel boundaries",
+   "url": "https://gis.cookcountyil.gov/traditional/rest/services/cookVwrDynmc/MapServer/44",
+   "apn": "PIN14",
+   "addr": "Address",
+   "num": "HouseNo",
+   "street": "Street",
+   "where": "upper",
+   "tests": [
+    [
+     41.958029,
+     -87.766007
+    ],
+    [
+     42.045834,
+     -87.695448
+    ]
+   ],
+   "page": "https://gis.cookcountyil.gov/traditional/rest/services/cookVwrDynmc/MapServer"
+  },
+  {
+   "state": "IL",
+   "counties": [
+    "17043"
+   ],
+   "label": "DuPage County GIS — parcel boundaries",
+   "url": "https://gis.dupageco.org/arcgis/rest/services/DuPage_County_IL/ParcelsWithRealEstateCC/MapServer/0",
+   "apn": "PIN",
+   "addr": "PROPADDRL1",
+   "num": "PROPSTNUM",
+   "street": "PROPSTNAME",
+   "where": "upper",
+   "tests": [
+    [
+     41.767963,
+     -88.146649
+    ],
+    [
+     41.859998,
+     -88.105603
+    ]
+   ],
+   "page": "https://gis.dupageco.org/arcgis/rest/services/DuPage_County_IL/ParcelsWithRealEstateCC/MapServer"
+  },
+  {
+   "state": "IL",
+   "counties": [
+    "17089"
+   ],
+   "label": "Kane County GIS Technologies — parcel boundaries",
+   "url": "https://gistech.countyofkane.org/arcgis/rest/services/KanePINList/MapServer/0",
+   "apn": "PIN",
+   "addr": "SiteAddress",
+   "where": "upper",
+   "tests": [
+    [
+     41.755445,
+     -88.334096
+    ],
+    [
+     42.035952,
+     -88.300695
+    ]
+   ],
+   "page": "https://gistech.countyofkane.org/arcgis/rest/services/KanePINList/MapServer"
+  },
+  {
+   "state": "IL",
+   "counties": [
+    "17097"
+   ],
+   "label": "Lake County GIS / Chief County Assessment Office — parcel boundaries",
+   "url": "https://maps.lakecountyil.gov/arcgis/rest/services/GISMapping/WABParcels/MapServer/12",
+   "apn": "PIN",
+   "addr": "situs_addr_line_1",
+   "where": "upper",
+   "tests": [
+    [
+     42.370998,
+     -87.860529
+    ],
+    [
+     42.285394,
+     -87.961242
+    ]
+   ],
+   "page": "https://maps.lakecountyil.gov/arcgis/rest/services/GISMapping/WABParcels/MapServer"
+  },
+  {
+   "state": "IN",
+   "counties": [],
+   "label": "Indiana Geographic Information Office (IndianaMap) — parcel boundaries",
+   "url": "https://gisdata.in.gov/server/rest/services/Hosted/Parcel_Boundaries_of_Indiana_Current/FeatureServer/0",
+   "apn": "parcel_id",
+   "addr": "prop_add",
+   "where": "upper",
+   "tests": [
+    [
+     39.871077,
+     -86.147231
+    ],
+    [
+     41.060276,
+     -85.151062
+    ]
+   ],
+   "page": "https://gisdata.in.gov/server/rest/services/Hosted/Parcel_Boundaries_of_Indiana_Current/FeatureServer"
+  },
+  {
+   "state": "KS",
+   "counties": [
+    "20173"
+   ],
+   "label": "Sedgwick County GIS — parcel boundaries",
+   "url": "https://gismaps.sedgwickcounty.org/arcgis/rest/services/Map/Op_Parcel_Dynamic_SP/MapServer/0",
+   "apn": "PIN",
+   "tests": [
+    [
+     37.684415,
+     -97.284408
+    ],
+    [
+     37.550114,
+     -97.259131
+    ]
+   ],
+   "page": "https://gismaps.sedgwickcounty.org/arcgis/rest/services/Map/Op_Parcel_Dynamic_SP/MapServer"
+  },
+  {
+   "state": "KY",
+   "counties": [
+    "21067"
+   ],
+   "label": "Lexington-Fayette Urban County Government GIS — parcel boundaries",
+   "url": "https://maps.lexingtonky.gov/lfucggis/rest/services/property/MapServer/1",
+   "apn": "PVANUM",
+   "addr": "ADDRESS",
+   "where": "upper",
+   "tests": [
+    [
+     38.019057,
+     -84.489439
+    ],
+    [
+     38.029533,
+     -84.559033
+    ]
+   ],
+   "page": "https://maps.lexingtonky.gov/lfucggis/rest/services/property/MapServer"
+  },
+  {
+   "state": "KY",
+   "counties": [
+    "21111"
+   ],
+   "label": "LOJIC (Louisville/Jefferson County Information Consortium) — parcel boundaries",
+   "url": "https://gis.lojic.org/maps/rest/services/LojicSolutions/OpenDataPVA/MapServer/1",
+   "apn": "PARCELID",
+   "tests": [
+    [
+     38.235724,
+     -85.709793
+    ],
+    [
+     38.249713,
+     -85.639076
+    ]
+   ],
+   "page": "https://gis.lojic.org/maps/rest/services/LojicSolutions/OpenDataPVA/MapServer"
+  },
+  {
+   "state": "LA",
+   "counties": [
+    "22033"
+   ],
+   "label": "City of Baton Rouge / Parish of East Baton Rouge GIS — parcel boundaries",
+   "url": "https://maps.brla.gov/gis/rest/services/Cadastral/Tax_Parcel/MapServer/0",
+   "apn": "ASSESSMENT_NUM",
+   "addr": "PHYSICAL_ADDRESS",
+   "where": "upper",
+   "tests": [
+    [
+     30.435619,
+     -91.158898
+    ],
+    [
+     30.405948,
+     -91.001404
+    ]
+   ],
+   "page": "https://maps.brla.gov/gis/rest/services/Cadastral/Tax_Parcel/MapServer"
+  },
+  {
+   "state": "LA",
+   "counties": [
+    "22071"
+   ],
+   "label": "City of New Orleans GIS — parcel boundaries",
+   "url": "https://gis.nola.gov/arcgis/rest/services/LandBase/Parcels/MapServer/0",
+   "apn": "GEOPIN",
+   "tests": [
+    [
+     30.008222,
+     -90.101393
+    ],
+    [
+     30.008253,
+     -90.055816
+    ]
+   ],
+   "page": "https://gis.nola.gov/arcgis/rest/services/LandBase/Parcels/MapServer"
+  },
+  {
+   "state": "MD",
+   "counties": [],
+   "label": "MD iMAP (Maryland Dept. of Planning / SDAT) — parcel boundaries",
+   "url": "https://mdgeodata.md.gov/imap/rest/services/PlanningCadastre/MD_ParcelBoundaries/MapServer/0",
+   "apn": "ACCTID",
+   "addr": "ADDRESS",
+   "num": "STRTNUM",
+   "street": "STRTNAM",
+   "where": "upper",
+   "filter": "ACCTID <> 'ROW'",
+   "tests": [
+    [
+     39.358024,
+     -76.55538
+    ],
+    [
+     39.0751,
+     -77.121645
+    ]
+   ],
+   "page": "https://mdgeodata.md.gov/imap/rest/services/PlanningCadastre/MD_ParcelBoundaries/MapServer"
+  },
+  {
+   "state": "ME",
+   "counties": [],
+   "label": "Maine GeoLibrary / Maine Office of GIS (MEGIS) - Maine Parcels Organized Towns — parcel boundaries",
+   "url": "https://services1.arcgis.com/RbMX0mRVOFNTdLzd/arcgis/rest/services/Maine_Parcels_Organized_Towns/FeatureServer/10",
+   "apn": "MAP_BK_LOT",
+   "addr": "PROP_LOC",
+   "where": "upper",
+   "tests": [
+    [
+     43.680562,
+     -70.28987
+    ],
+    [
+     44.810906,
+     -68.77978
+    ],
+    [
+     44.321111,
+     -69.780913
+    ]
+   ],
+   "page": "https://www.arcgis.com/home/item.html?id=346131b710a645ffb624f448a9cba6d4"
+  },
+  {
+   "state": "MI",
+   "counties": [
+    "26081"
+   ],
+   "label": "City of Grand Rapids GIS (ArcGIS Online) — parcel boundaries",
+   "url": "https://services2.arcgis.com/L81TiOwAPO1ZvU9b/arcgis/rest/services/GRParcels_with_Condos/FeatureServer/0",
+   "apn": "Parcels_with_Condos_PPN_TEXT",
+   "addr": "Parcels_with_Condos_PROPERTYADD",
+   "num": "Parcels_with_Condos_PROPADDRE_2",
+   "street": "Parcels_with_Condos_PROPADDSTRE",
+   "where": "upper",
+   "tests": [
+    [
+     42.955686,
+     -85.629947
+    ],
+    [
+     42.99496,
+     -85.640195
+    ]
+   ],
+   "page": "https://services2.arcgis.com/L81TiOwAPO1ZvU9b/arcgis/rest/services/GRParcels_with_Condos/FeatureServer"
+  },
+  {
+   "state": "MI",
+   "counties": [
+    "26099"
+   ],
+   "label": "Macomb County, Michigan (MCMAP ArcGIS Online org) — parcel boundaries",
+   "url": "https://services6.arcgis.com/K0qS4r8AEJxrE8em/arcgis/rest/services/Macomb_County_Parcel_Data/FeatureServer/10",
+   "apn": "TAX_ID",
+   "addr": "propstreetcombined",
+   "where": "upper",
+   "tests": [
+    [
+     42.579342,
+     -83.028898
+    ],
+    [
+     42.495445,
+     -82.894226
+    ]
+   ],
+   "page": "https://services6.arcgis.com/K0qS4r8AEJxrE8em/arcgis/rest/services/Macomb_County_Parcel_Data/FeatureServer"
+  },
+  {
+   "state": "MI",
+   "counties": [
+    "26125"
+   ],
+   "label": "Oakland County GIS (Access Oakland open data) — parcel boundaries",
+   "url": "https://gisservices.oakgov.com/arcgis/rest/services/Enterprise/EnterpriseOpenParcelDataMapService/MapServer/1",
+   "apn": "KEYPIN",
+   "addr": "SITEADDRESS",
+   "where": "upper",
+   "tests": [
+    [
+     42.495631,
+     -83.149154
+    ],
+    [
+     42.578734,
+     -83.144476
+    ]
+   ],
+   "page": "https://gisservices.oakgov.com/arcgis/rest/services/Enterprise/EnterpriseOpenParcelDataMapService/MapServer"
+  },
+  {
+   "state": "MI",
+   "counties": [
+    "26163"
+   ],
+   "label": "City of Detroit Open Data (Office of the Assessor, ArcGIS Online) — parcel boundaries",
+   "url": "https://services2.arcgis.com/qvkbeam7Wirps6zC/arcgis/rest/services/parcel_file_current/FeatureServer/0",
+   "apn": "parcel_id",
+   "addr": "address",
+   "num": "street_number",
+   "street": "street_name",
+   "where": "upper",
+   "tests": [
+    [
+     42.420618,
+     -83.149836
+    ],
+    [
+     42.399076,
+     -82.929573
+    ]
+   ],
+   "page": "https://services2.arcgis.com/qvkbeam7Wirps6zC/arcgis/rest/services/parcel_file_current/FeatureServer"
+  },
+  {
+   "state": "MN",
+   "counties": [],
+   "label": "Minnesota Geospatial Information Office (MnGeo) - Parcels, Compiled from Opt-In Open Data Counties — parcel boundaries",
+   "url": "https://enterprise.gisdata.mn.gov/aghost/rest/services/us_mn_state_mngeo/plan_parcels_open/FeatureServer/0",
+   "apn": "county_pin",
+   "num": "anumber",
+   "street": "st_name",
+   "where": "street",
+   "tests": [
+    [
+     44.920299,
+     -93.315453
+    ],
+    [
+     46.810257,
+     -92.077055
+    ],
+    [
+     44.031793,
+     -92.479453
+    ]
+   ],
+   "page": "https://enterprise.gisdata.mn.gov/aghost/rest/services/us_mn_state_mngeo/plan_parcels_open/FeatureServer"
+  },
+  {
+   "state": "MN",
+   "counties": [
+    "27053"
+   ],
+   "label": "Hennepin County GIS — parcel boundaries",
+   "url": "https://gis.hennepin.us/arcgis/rest/services/HennepinData/LAND_PROPERTY/MapServer/1",
+   "apn": "PID",
+   "num": "HOUSE_NO",
+   "street": "STREET_NM",
+   "where": "street",
+   "tests": [
+    [
+     44.920842,
+     -93.315494
+    ],
+    [
+     44.829672,
+     -93.299712
+    ]
+   ],
+   "page": "https://gis.hennepin.us/arcgis/rest/services/HennepinData/LAND_PROPERTY/MapServer"
+  },
+  {
+   "state": "MN",
+   "counties": [
+    "27123"
+   ],
+   "label": "Ramsey County GIS — parcel boundaries",
+   "url": "https://maps.co.ramsey.mn.us/arcgis/rest/services/ParcelData/AttributedData/MapServer/0",
+   "apn": "ParcelID",
+   "addr": "SiteAddress",
+   "where": "upper",
+   "tests": [
+    [
+     44.937285,
+     -93.16506
+    ],
+    [
+     45.08402,
+     -93.007009
+    ]
+   ],
+   "page": "https://maps.co.ramsey.mn.us/arcgis/rest/services/ParcelData/AttributedData/MapServer"
+  },
+  {
+   "state": "MO",
+   "counties": [
+    "29095"
+   ],
+   "label": "Jackson County GIS (Parcel Viewer) — parcel boundaries",
+   "url": "https://jcgis.jacksongov.org/arcgis/rest/services/ParcelViewer/ParcelsAscendRelate/MapServer/1",
+   "apn": "parcel_id",
+   "tests": [
+    [
+     39.009344,
+     -94.591286
+    ],
+    [
+     39.079769,
+     -94.411153
+    ]
+   ],
+   "page": "https://jcgis.jacksongov.org/arcgis/rest/services/ParcelViewer/ParcelsAscendRelate/MapServer"
+  },
+  {
+   "state": "MO",
+   "counties": [
+    "29189"
+   ],
+   "label": "St. Louis County GIS — parcel boundaries",
+   "url": "https://maps.stlouisco.com/hosting/rest/services/Maps/AGS_Parcels/MapServer/0",
+   "apn": "LOCATOR",
+   "addr": "PROP_ADD",
+   "where": "upper",
+   "tests": [
+    [
+     38.579263,
+     -90.410777
+    ],
+    [
+     38.795849,
+     -90.323694
+    ]
+   ],
+   "page": "https://maps.stlouisco.com/hosting/rest/services/Maps/AGS_Parcels/MapServer"
+  },
+  {
+   "state": "MO",
+   "counties": [
+    "29510"
+   ],
+   "label": "City of St. Louis (Planning & Urban Design Agency GIS) — parcel boundaries",
+   "url": "https://maps6.stlouis-mo.gov/arcgis/rest/services/St_Louis_Parcels/MapServer/0",
+   "apn": "HANDLE",
+   "addr": "SITEADDR",
+   "where": "upper",
+   "tests": [
+    [
+     38.595477,
+     -90.258719
+    ],
+    [
+     38.58418,
+     -90.294879
+    ]
+   ],
+   "page": "https://maps6.stlouis-mo.gov/arcgis/rest/services/St_Louis_Parcels/MapServer"
+  },
+  {
+   "state": "MS",
+   "counties": [],
+   "label": "MARIS (Mississippi Automated Resource Information System) / MDEQ statewide parcel framework - EAST half — parcel boundaries",
+   "url": "https://gis.mississippi.edu/server/rest/services/Cadastral/MS_Parcels_August_2024/MapServer/2",
+   "apn": "PARNO",
+   "addr": "SITEADD",
+   "where": "upper",
+   "tests": [
+    [
+     30.3906,
+     -89.070277
+    ],
+    [
+     34.265107,
+     -88.715396
+    ],
+    [
+     31.325705,
+     -89.315682
+    ]
+   ],
+   "page": "https://gis.mississippi.edu/server/rest/services/Cadastral/MS_Parcels_August_2024/MapServer"
+  },
+  {
+   "state": "MT",
+   "counties": [],
+   "label": "Montana State Library (MSDI Cadastral Framework) — parcel boundaries",
+   "url": "https://services.arcgis.com/qnjIrwR8z5Izc0ij/arcgis/rest/services/Montana_Cadastral_Framework/FeatureServer/1",
+   "apn": "PARCELID",
+   "addr": "AddressLine1",
+   "where": "upper",
+   "filter": "PARCELID IS NOT NULL",
+   "tests": [
+    [
+     45.778779,
+     -108.538169
+    ],
+    [
+     46.857396,
+     -113.991756
+    ]
+   ],
+   "page": "https://www.arcgis.com/home/item.html?id=f161a98b347b4cf29d371a6d7697912a"
+  },
+  {
+   "state": "NC",
+   "counties": [],
+   "label": "NC OneMap (NC Center for Geographic Information & Analysis) — parcel boundaries",
+   "url": "https://services.nconemap.gov/secure/rest/services/NC1Map_Parcels/FeatureServer/1",
+   "apn": "parno",
+   "addr": "siteadd",
+   "num": "saddno",
+   "street": "saddstname",
+   "where": "upper",
+   "tests": [
+    [
+     35.807004,
+     -78.644912
+    ],
+    [
+     35.618041,
+     -82.553908
+    ]
+   ],
+   "page": "https://services.nconemap.gov/secure/rest/services/NC1Map_Parcels/FeatureServer"
+  },
+  {
+   "state": "ND",
+   "counties": [],
+   "label": "North Dakota GIS Hub (ND Information Technology) - State Parcel Program — parcel boundaries",
+   "url": "https://services1.arcgis.com/GOcSXpzwBHyk2nog/arcgis/rest/services/NDGISHUB_Parcels/FeatureServer/0",
+   "apn": "GISID",
+   "tests": [
+    [
+     46.860485,
+     -96.794527
+    ],
+    [
+     46.819982,
+     -100.775231
+    ],
+    [
+     47.910231,
+     -97.059316
+    ]
+   ],
+   "page": "https://www.arcgis.com/home/item.html?id=ac6da1176038457db16e8debe3f1abaf"
+  },
+  {
+   "state": "NE",
+   "counties": [
+    "31055"
+   ],
+   "label": "Douglas-Omaha GIS (DOGIS) — parcel boundaries",
+   "url": "https://dcgis.org/server/rest/services/vector/Parcels_public/MapServer/0",
+   "apn": "PIN",
+   "addr": "PROPERTY_A",
+   "num": "HOUSE",
+   "street": "STREET_NAM",
+   "where": "upper",
+   "tests": [
+    [
+     41.265375,
+     -95.995661
+    ],
+    [
+     41.249233,
+     -96.150529
+    ]
+   ],
+   "page": "https://dcgis.org/server/rest/services/vector/Parcels_public/MapServer"
+  },
+  {
+   "state": "NE",
+   "counties": [
+    "31109"
+   ],
+   "label": "City of Lincoln / Lancaster County GIS (Assessor) — parcel boundaries",
+   "url": "https://gis.lincoln.ne.gov/public/rest/services/Assessor/TaxParcels/MapServer/0",
+   "apn": "PARCELID",
+   "addr": "SITEADDRESS",
+   "where": "upper",
+   "tests": [
+    [
+     40.795869,
+     -96.69025
+    ],
+    [
+     40.760806,
+     -96.630292
+    ]
+   ],
+   "page": "https://gis.lincoln.ne.gov/public/rest/services/Assessor/TaxParcels/MapServer"
+  },
+  {
+   "state": "NH",
+   "counties": [],
+   "label": "NH GRANIT (UNH Earth Systems Research Center) - NH Parcel Mosaic — parcel boundaries",
+   "url": "https://nhgeodata.unh.edu/nhgeodata/rest/services/CAD/ParcelMosaic/MapServer/1",
+   "apn": "NH_GIS_ID",
+   "addr": "StreetAddress",
+   "where": "upper",
+   "tests": [
+    [
+     43.009758,
+     -71.459952
+    ],
+    [
+     43.21175,
+     -71.546742
+    ]
+   ],
+   "page": "https://nhgeodata.unh.edu/nhgeodata/rest/services/CAD/ParcelMosaic/MapServer"
+  },
+  {
+   "state": "NM",
+   "counties": [
+    "35001"
+   ],
+   "label": "Bernalillo County Assessor — parcel boundaries",
+   "url": "https://assessormap.bernco.gov/server/rest/services/GIS/Public_Assessor_Parcels/MapServer/0",
+   "apn": "UPC",
+   "addr": "SITUSADD",
+   "num": "SITUSNUM",
+   "street": "SITUSSTR",
+   "where": "upper",
+   "tests": [
+    [
+     35.119117,
+     -106.551373
+    ],
+    [
+     35.149342,
+     -106.639562
+    ]
+   ],
+   "page": "https://assessormap.bernco.gov/server/rest/services/GIS/Public_Assessor_Parcels/MapServer"
+  },
+  {
+   "state": "NV",
+   "counties": [
+    "32003"
+   ],
+   "label": "Clark County Assessor / GISMO — parcel boundaries",
+   "url": "https://maps.clarkcountynv.gov/arcgis/rest/services/Assessor/Layers/MapServer/1",
+   "apn": "APN",
+   "tests": [
+    [
+     36.179329,
+     -115.299225
+    ],
+    [
+     36.029423,
+     -115.059929
+    ]
+   ],
+   "page": "https://maps.clarkcountynv.gov/arcgis/rest/services/Assessor/Layers/MapServer"
+  },
+  {
+   "state": "NV",
+   "counties": [
+    "32031"
+   ],
+   "label": "Washoe County GIS / Assessor — parcel boundaries",
+   "url": "https://wcgisweb.washoecounty.us/arcgis/rest/services/Assessor/Assessor_RDE/MapServer/0",
+   "apn": "APN",
+   "addr": "FullAddress",
+   "num": "STREETNUM",
+   "street": "STREET",
+   "where": "upper",
+   "tests": [
+    [
+     39.501044,
+     -119.830753
+    ],
+    [
+     39.560488,
+     -119.728966
+    ]
+   ],
+   "page": "https://wcgisweb.washoecounty.us/arcgis/rest/services/Assessor/Assessor_RDE/MapServer"
+  },
+  {
+   "state": "NY",
+   "counties": [],
+   "label": "NYS Office of Information Technology Services (ITS) Geospatial Services / NYS ORPTS — parcel boundaries",
+   "url": "https://gisservices.its.ny.gov/arcgis/rest/services/NYS_Tax_Parcels_Public/MapServer/1",
+   "apn": "SBL",
+   "addr": "PARCEL_ADDR",
+   "num": "LOC_ST_NBR",
+   "street": "LOC_STREET",
+   "where": "upper",
+   "tests": [
+    [
+     40.620185,
+     -73.960196
+    ],
+    [
+     42.950397,
+     -78.860903
+    ],
+    [
+     43.0409,
+     -76.1205
+    ]
+   ],
+   "page": "https://gisservices.its.ny.gov/arcgis/rest/services/NYS_Tax_Parcels_Public/MapServer"
+  },
+  {
+   "state": "NY",
+   "counties": [
+    "36005",
+    "36047",
+    "36061",
+    "36081",
+    "36085"
+   ],
+   "label": "NYC Department of City Planning (MapPLUTO, ArcGIS Online) — parcel boundaries",
+   "url": "https://services5.arcgis.com/GfwWNkhOj9bNBqoJ/arcgis/rest/services/MAPPLUTO/FeatureServer/0",
+   "apn": "BBL",
+   "addr": "Address",
+   "where": "upper",
+   "tests": [
+    [
+     40.763715,
+     -73.771346
+    ],
+    [
+     40.551873,
+     -74.152299
+    ],
+    [
+     40.61126,
+     -73.929519
+    ]
+   ],
+   "page": "https://services5.arcgis.com/GfwWNkhOj9bNBqoJ/arcgis/rest/services/MAPPLUTO/FeatureServer"
+  },
+  {
+   "state": "NY",
+   "counties": [
+    "36103"
+   ],
+   "label": "NYS GIS Program Office (ITS) - statewide public tax-parcel service (participating counties only) — parcel boundaries",
+   "url": "https://gisservices.its.ny.gov/arcgis/rest/services/NYS_Tax_Parcels_Public/MapServer/1",
+   "apn": "SWIS_PRINT_KEY_ID",
+   "addr": "PARCEL_ADDR",
+   "num": "LOC_ST_NBR",
+   "street": "LOC_STREET",
+   "where": "upper",
+   "tests": [
+    [
+     40.844044,
+     -73.404278
+    ],
+    [
+     40.781028,
+     -73.245303
+    ]
+   ],
+   "page": "https://gisservices.its.ny.gov/arcgis/rest/services/NYS_Tax_Parcels_Public/MapServer"
+  },
+  {
+   "state": "NY",
+   "counties": [
+    "36119"
+   ],
+   "label": "Westchester County GIS — parcel boundaries",
+   "url": "https://giswww.westchestergov.com/arcgis/rest/services/DataHub_TaxParcels/MapServer/0",
+   "apn": "SWIS_PRINT_KEY_ID",
+   "addr": "PARCEL_ADDR",
+   "where": "upper",
+   "tests": [
+    [
+     41.023416,
+     -73.759894
+    ],
+    [
+     40.940026,
+     -73.864301
+    ]
+   ],
+   "page": "https://giswww.westchestergov.com/arcgis/rest/services/DataHub_TaxParcels/MapServer"
+  },
+  {
+   "state": "OH",
+   "counties": [],
+   "label": "Ohio Geographically Referenced Information Program (OGRIP, Ohio DAS) — parcel boundaries",
+   "url": "https://services2.arcgis.com/MlJ0G8iWUyC7jAmu/arcgis/rest/services/OhioStatewidePacels_full_view/FeatureServer/0",
+   "apn": "LocalParcelID",
+   "addr": "SitusAddressAll",
+   "where": "upper",
+   "tests": [
+    [
+     40.029938,
+     -83.020256
+    ],
+    [
+     41.480205,
+     -81.799028
+    ],
+    [
+     39.140668,
+     -84.440477
+    ]
+   ],
+   "page": "https://www.arcgis.com/home/item.html?id=26ab5fad8d5d4258a7492a14de83bc0e"
+  },
+  {
+   "state": "OH",
+   "counties": [
+    "39035"
+   ],
+   "label": "Cuyahoga County Fiscal Office / Cuyahoga County GIS — parcel boundaries",
+   "url": "https://gis.cuyahogacounty.gov/server/rest/services/CCFO/Parcel_Fabric_Taxparcels/FeatureServer/0",
+   "apn": "parcelpin",
+   "addr": "par_addr_all",
+   "num": "parcel_addr",
+   "street": "parcel_street",
+   "where": "upper",
+   "tests": [
+    [
+     41.480952,
+     -81.788839
+    ],
+    [
+     41.475116,
+     -81.551529
+    ]
+   ],
+   "page": "https://gis.cuyahogacounty.gov/server/rest/services/CCFO/Parcel_Fabric_Taxparcels/FeatureServer"
+  },
+  {
+   "state": "OH",
+   "counties": [
+    "39049"
+   ],
+   "label": "Franklin County Auditor GIS — parcel boundaries",
+   "url": "https://gis.franklincountyohio.gov/hosting/rest/services/ParcelFeatures/Parcel_Features/MapServer/0",
+   "apn": "PARCELID",
+   "addr": "SITEADDRESS",
+   "where": "upper",
+   "tests": [
+    [
+     40.029038,
+     -83.016198
+    ],
+    [
+     40.009134,
+     -83.069572
+    ]
+   ],
+   "page": "https://gis.franklincountyohio.gov/hosting/rest/services/ParcelFeatures/Parcel_Features/MapServer"
+  },
+  {
+   "state": "OH",
+   "counties": [
+    "39061"
+   ],
+   "label": "CAGIS (Cincinnati Area GIS) / Hamilton County Auditor — parcel boundaries",
+   "url": "https://cagisonline.hamilton-co.org/arcgis/rest/services/COUNTYWIDE/Cadastral/MapServer/0",
+   "apn": "AUDPCLID",
+   "num": "ADDRNO",
+   "street": "ADDRST",
+   "where": "street",
+   "tests": [
+    [
+     39.139064,
+     -84.440348
+    ],
+    [
+     39.235568,
+     -84.379775
+    ]
+   ],
+   "page": "https://cagisonline.hamilton-co.org/arcgis/rest/services/COUNTYWIDE/Cadastral/MapServer"
+  },
+  {
+   "state": "OK",
+   "counties": [
+    "40109"
+   ],
+   "label": "Oklahoma County Assessor — parcel boundaries",
+   "url": "https://okassessor.oklahomacounty.org/server/rest/services/OnlineMapping/Property_Information/MapServer/3",
+   "apn": "accountno",
+   "addr": "location",
+   "where": "upper",
+   "tests": [
+    [
+     35.549344,
+     -97.545319
+    ],
+    [
+     35.649176,
+     -97.469845
+    ]
+   ],
+   "page": "https://okassessor.oklahomacounty.org/server/rest/services/OnlineMapping/Property_Information/MapServer"
+  },
+  {
+   "state": "OK",
+   "counties": [
+    "40143"
+   ],
+   "label": "INCOG (Indian Nations Council of Governments) - Tulsa County Assessor parcels — parcel boundaries",
+   "url": "https://map11.incog.org/arcgis11wa/rest/services/Parcels_TulsaCo/MapServer/0",
+   "apn": "ParcelNo",
+   "addr": "PropertyAddress",
+   "where": "upper",
+   "tests": [
+    [
+     36.125747,
+     -95.949437
+    ],
+    [
+     36.049986,
+     -95.799706
+    ]
+   ],
+   "page": "https://map11.incog.org/arcgis11wa/rest/services/Parcels_TulsaCo/MapServer"
+  },
+  {
+   "state": "OR",
+   "counties": [
+    "41005",
+    "41051",
+    "41067"
+   ],
+   "label": "City of Portland (PortlandMaps) republishing Oregon Metro RLIS taxlots — parcel boundaries",
+   "url": "https://www.portlandmaps.com/arcgis/rest/services/Public/Taxlots/MapServer/0",
+   "apn": "TLID",
+   "addr": "SITEADDR",
+   "where": "upper",
+   "tests": [
+    [
+     45.528585,
+     -122.625262
+    ],
+    [
+     45.499873,
+     -122.429002
+    ],
+    [
+     45.484651,
+     -122.808796
+    ]
+   ],
+   "page": "https://www.portlandmaps.com/arcgis/rest/services/Public/Taxlots/MapServer"
+  },
+  {
+   "state": "PA",
+   "counties": [
+    "42003"
+   ],
+   "label": "Allegheny County GIS (Open Data) — parcel boundaries",
+   "url": "https://gisdata.alleghenycounty.us/arcgis/rest/services/OPENDATA/Parcels/MapServer/0",
+   "apn": "PIN",
+   "tests": [
+    [
+     40.429996,
+     -79.921038
+    ],
+    [
+     40.375848,
+     -80.050048
+    ]
+   ],
+   "page": "https://gisdata.alleghenycounty.us/arcgis/rest/services/OPENDATA/Parcels/MapServer"
+  },
+  {
+   "state": "PA",
+   "counties": [
+    "42017"
+   ],
+   "label": "Bucks County GIS (ArcGIS Online) — parcel boundaries",
+   "url": "https://services3.arcgis.com/SP47Tddf7RK32lBU/arcgis/rest/services/Bucks_County_Parcels/FeatureServer/0",
+   "apn": "PARCEL_NUM",
+   "addr": "ADDRESS",
+   "where": "upper",
+   "tests": [
+    [
+     40.153974,
+     -74.849283
+    ],
+    [
+     40.309479,
+     -75.128562
+    ]
+   ],
+   "page": "https://services3.arcgis.com/SP47Tddf7RK32lBU/arcgis/rest/services/Bucks_County_Parcels/FeatureServer"
+  },
+  {
+   "state": "PA",
+   "counties": [
+    "42029"
+   ],
+   "label": "Chester County GIS (ArcGIS Online) — parcel boundaries",
+   "url": "https://services.arcgis.com/G4S1dGvn7PIgYd6Y/arcgis/rest/services/Parcels_owners/FeatureServer/0",
+   "apn": "UPI",
+   "addr": "LOC_ADDRESS",
+   "num": "ST_NUM",
+   "street": "ST_NAME",
+   "where": "upper",
+   "tests": [
+    [
+     39.959227,
+     -75.604937
+    ],
+    [
+     40.128939,
+     -75.5192
+    ]
+   ],
+   "page": "https://services.arcgis.com/G4S1dGvn7PIgYd6Y/arcgis/rest/services/Parcels_owners/FeatureServer"
+  },
+  {
+   "state": "PA",
+   "counties": [
+    "42045"
+   ],
+   "label": "Delaware County GIS (assessment viewer) — parcel boundaries",
+   "url": "https://gis.delcopa.gov/arcgis/rest/services/AssessmentViewers/Parcels/MapServer/0",
+   "apn": "PIN",
+   "tests": [
+    [
+     39.930492,
+     -75.328557
+    ],
+    [
+     39.982182,
+     -75.306159
+    ]
+   ],
+   "page": "https://gis.delcopa.gov/arcgis/rest/services/AssessmentViewers/Parcels/MapServer"
+  },
+  {
+   "state": "PA",
+   "counties": [
+    "42091"
+   ],
+   "label": "Montgomery County Planning Commission GIS — parcel boundaries",
+   "url": "https://gis.montcopa.org/arcgis/rest/services/Parcels/Montgomery_County_Parcels/MapServer/10",
+   "apn": "TAXPIN",
+   "tests": [
+    [
+     40.240609,
+     -75.283632
+    ],
+    [
+     40.116221,
+     -75.124
+    ]
+   ],
+   "page": "https://gis.montcopa.org/arcgis/rest/services/Parcels/Montgomery_County_Parcels/MapServer"
+  },
+  {
+   "state": "PA",
+   "counties": [
+    "42101"
+   ],
+   "label": "City of Philadelphia - Philadelphia Water Department parcels (ArcGIS Online) — parcel boundaries",
+   "url": "https://services.arcgis.com/fLeGjb7u4uXqeF9q/arcgis/rest/services/PWD_PARCELS/FeatureServer/0",
+   "apn": "brt_id",
+   "addr": "address",
+   "where": "upper",
+   "tests": [
+    [
+     40.076047,
+     -75.080038
+    ],
+    [
+     40.074674,
+     -75.210458
+    ]
+   ],
+   "page": "https://services.arcgis.com/fLeGjb7u4uXqeF9q/arcgis/rest/services/PWD_PARCELS/FeatureServer"
+  },
+  {
+   "state": "SC",
+   "counties": [
+    "45019"
+   ],
+   "label": "Charleston County GIS — parcel boundaries",
+   "url": "https://gisccapps.charlestoncounty.org/arcgis/rest/services/CDC/CDC_ParcelMap/MapServer/0",
+   "apn": "PID",
+   "num": "PROP_ST_NO",
+   "street": "PROP_ST_NAME",
+   "where": "street",
+   "tests": [
+    [
+     32.793861,
+     -79.999546
+    ],
+    [
+     32.813686,
+     -79.855177
+    ]
+   ],
+   "page": "https://gisccapps.charlestoncounty.org/arcgis/rest/services/CDC/CDC_ParcelMap/MapServer"
+  },
+  {
+   "state": "SC",
+   "counties": [
+    "45051"
+   ],
+   "label": "Horry County GIS — parcel boundaries",
+   "url": "https://www.horrycounty.org/parcelapp/rest/services/HorryCountyGISApp/MapServer/24",
+   "apn": "PIN",
+   "tests": [
+    [
+     33.710483,
+     -78.868549
+    ],
+    [
+     33.838974,
+     -79.048854
+    ]
+   ],
+   "page": "https://www.horrycounty.org/parcelapp/rest/services/HorryCountyGISApp/MapServer"
+  },
+  {
+   "state": "TN",
+   "counties": [],
+   "label": "TN Comptroller of the Treasury, Division of Property Assessments (published by TN STS-GIS / TNMap) — parcel boundaries",
+   "url": "https://services1.arcgis.com/YuVBSS7Y1of2Qud1/arcgis/rest/services/Tennessee_Property_Boundaries_Public_Use/FeatureServer/0",
+   "apn": "PARCELID",
+   "addr": "ADDRESS",
+   "tests": [
+    [
+     36.3121,
+     -82.372105
+    ],
+    [
+     36.160748,
+     -85.505957
+    ],
+    [
+     35.625896,
+     -88.825551
+    ]
+   ],
+   "page": "https://www.arcgis.com/home/item.html?id=e356f1a241844d6f9025f2fa4e977df3"
+  },
+  {
+   "state": "TX",
+   "counties": [
+    "48029"
+   ],
+   "label": "Bexar County GIS (BCAD parcels) — parcel boundaries",
+   "url": "https://maps.bexar.org/arcgis/rest/services/Parcels/MapServer/0",
+   "apn": "PropID",
+   "addr": "Situs",
+   "where": "upper",
+   "tests": [
+    [
+     29.484252,
+     -98.465426
+    ],
+    [
+     29.529059,
+     -98.620183
+    ]
+   ],
+   "page": "https://maps.bexar.org/arcgis/rest/services/Parcels/MapServer"
+  },
+  {
+   "state": "TX",
+   "counties": [
+    "48085"
+   ],
+   "label": "Collin Central Appraisal District (CCAD, ArcGIS Online) — parcel boundaries",
+   "url": "https://services2.arcgis.com/uXyoacYrZTPTKD3R/arcgis/rest/services/CCAD_Parcel_Feature_Set/FeatureServer/4",
+   "apn": "PROP_ID",
+   "addr": "situsConcat",
+   "num": "situsBldgNum",
+   "street": "situsStreetName",
+   "where": "upper",
+   "tests": [
+    [
+     33.040198,
+     -96.729272
+    ],
+    [
+     33.192387,
+     -96.64729
+    ]
+   ],
+   "page": "https://services2.arcgis.com/uXyoacYrZTPTKD3R/arcgis/rest/services/CCAD_Parcel_Feature_Set/FeatureServer"
+  },
+  {
+   "state": "TX",
+   "counties": [
+    "48113"
+   ],
+   "label": "Dallas Central Appraisal District (DCAD) — parcel boundaries",
+   "url": "https://maps.dcad.org/prdwa/rest/services/Property/ParcelQuery/MapServer/4",
+   "apn": "PARCELID",
+   "addr": "SITEADDRESS",
+   "where": "upper",
+   "tests": [
+    [
+     32.820546,
+     -96.75079
+    ],
+    [
+     32.840115,
+     -96.970165
+    ]
+   ],
+   "page": "https://maps.dcad.org/prdwa/rest/services/Property/ParcelQuery/MapServer"
+  },
+  {
+   "state": "TX",
+   "counties": [
+    "48121"
+   ],
+   "label": "Denton County GIS (Denton CAD parcels) — parcel boundaries",
+   "url": "https://gis.dentoncounty.gov/arcgis/rest/services/Parcels/MapServer/0",
+   "apn": "prop_id",
+   "addr": "SITUS",
+   "where": "upper",
+   "tests": [
+    [
+     33.20912,
+     -97.14036
+    ],
+    [
+     33.030837,
+     -97.00066
+    ]
+   ],
+   "page": "https://gis.dentoncounty.gov/arcgis/rest/services/Parcels/MapServer"
+  },
+  {
+   "state": "TX",
+   "counties": [
+    "48141"
+   ],
+   "label": "City of El Paso GIS (El Paso CAD parcels) — parcel boundaries",
+   "url": "https://gis.elpasotexas.gov/arcgis/rest/services/EPParcels/MapServer/0",
+   "apn": "PropID",
+   "addr": "LOCADDRESS",
+   "where": "upper",
+   "tests": [
+    [
+     31.769169,
+     -106.341206
+    ],
+    [
+     31.840016,
+     -106.548663
+    ]
+   ],
+   "page": "https://gis.elpasotexas.gov/arcgis/rest/services/EPParcels/MapServer"
+  },
+  {
+   "state": "TX",
+   "counties": [
+    "48157"
+   ],
+   "label": "Fort Bend Central Appraisal District (FBCAD, ArcGIS Online) — parcel boundaries",
+   "url": "https://services2.arcgis.com/D4saGHECICkCeoJm/arcgis/rest/services/FBCAD_Public_Data/FeatureServer/0",
+   "apn": "QUICKREFID",
+   "addr": "SITUS",
+   "num": "SITUSSNO",
+   "street": "SITUSSNM",
+   "where": "upper",
+   "tests": [
+    [
+     29.589416,
+     -95.63151
+    ],
+    [
+     29.570831,
+     -95.538828
+    ]
+   ],
+   "page": "https://services2.arcgis.com/D4saGHECICkCeoJm/arcgis/rest/services/FBCAD_Public_Data/FeatureServer"
+  },
+  {
+   "state": "TX",
+   "counties": [
+    "48201"
+   ],
+   "label": "Harris County GIS (HCAD parcels, Harris Central Appraisal District) — parcel boundaries",
+   "url": "https://www.gis.hctx.net/arcgishcpid/rest/services/HCAD/Parcels/MapServer/0",
+   "apn": "HCAD_NUM",
+   "addr": "Situs_Address",
+   "num": "site_str_num",
+   "street": "site_str_name",
+   "where": "upper",
+   "tests": [
+    [
+     29.795936,
+     -95.39732
+    ],
+    [
+     29.669093,
+     -95.170474
+    ]
+   ],
+   "page": "https://www.gis.hctx.net/arcgishcpid/rest/services/HCAD/Parcels/MapServer"
+  },
+  {
+   "state": "TX",
+   "counties": [
+    "48339"
+   ],
+   "label": "Montgomery County IT-GIS (MCAD tax parcels, ArcGIS Online) — parcel boundaries",
+   "url": "https://services1.arcgis.com/PRoAPGnMSUqvTrzq/arcgis/rest/services/Tax_Parcel_view/FeatureServer/0",
+   "apn": "pid",
+   "addr": "situs",
+   "where": "upper",
+   "tests": [
+    [
+     30.169181,
+     -95.499198
+    ],
+    [
+     30.320673,
+     -95.469145
+    ]
+   ],
+   "page": "https://services1.arcgis.com/PRoAPGnMSUqvTrzq/arcgis/rest/services/Tax_Parcel_view/FeatureServer"
+  },
+  {
+   "state": "TX",
+   "counties": [
+    "48439"
+   ],
+   "label": "Tarrant Appraisal District (TAD open data) — parcel boundaries",
+   "url": "https://tad.newedgeservices.com/arcgis/rest/services/OD_TAD/OD_Parcels/MapServer/0",
+   "apn": "TAXPIN",
+   "tests": [
+    [
+     32.735974,
+     -97.384741
+    ],
+    [
+     32.71074,
+     -97.120943
+    ]
+   ],
+   "page": "https://tad.newedgeservices.com/arcgis/rest/services/OD_TAD/OD_Parcels/MapServer"
+  },
+  {
+   "state": "UT",
+   "counties": [],
+   "label": "Utah Geospatial Resource Center (UGRC) — parcel boundaries",
+   "url": "https://services1.arcgis.com/99lidPhWCzftIe9K/arcgis/rest/services/UtahStatewideParcels/FeatureServer/0",
+   "apn": "PARCEL_ID",
+   "addr": "PARCEL_ADD",
+   "where": "upper",
+   "tests": [
+    [
+     40.726621,
+     -111.852816
+    ],
+    [
+     37.103995,
+     -113.570246
+    ]
+   ],
+   "page": "https://www.arcgis.com/home/item.html?id=9df536b0835e4ee78e34d7cf6fe132c2"
+  },
+  {
+   "state": "VA",
+   "counties": [],
+   "label": "Virginia Geographic Information Network (VGIN / VDEM) — parcel boundaries",
+   "url": "https://vginmaps.vdem.virginia.gov/arcgis/rest/services/VA_Base_Layers/VA_Parcels/FeatureServer/0",
+   "apn": "PARCELID",
+   "tests": [
+    [
+     37.585091,
+     -77.44985
+    ],
+    [
+     37.263853,
+     -79.977145
+    ]
+   ],
+   "page": "https://vginmaps.vdem.virginia.gov/arcgis/rest/services/VA_Base_Layers/VA_Parcels/FeatureServer"
+  },
+  {
+   "state": "VT",
+   "counties": [],
+   "label": "Vermont Center for Geographic Information (VCGI) — parcel boundaries",
+   "url": "https://services1.arcgis.com/BkFxaEFNwHqX3tAw/arcgis/rest/services/FS_VCGI_OPENDATA_Cadastral_VTPARCELS_poly_standardized_parcels_SP_v1/FeatureServer/0",
+   "apn": "SPAN",
+   "addr": "E911ADDR",
+   "where": "upper",
+   "tests": [
+    [
+     44.459267,
+     -73.208756
+    ],
+    [
+     43.604407,
+     -72.968793
+    ]
+   ],
+   "page": "https://www.arcgis.com/home/item.html?id=09cf47e1cf82465e99164762a04f3ce6"
+  },
+  {
+   "state": "WI",
+   "counties": [],
+   "label": "Wisconsin State Cartographer's Office / WI DOA Land Information Program — parcel boundaries",
+   "url": "https://services3.arcgis.com/n6uYoouQZW75n5WI/arcgis/rest/services/Wisconsin_Statewide_Parcels_DB/FeatureServer/0",
+   "apn": "PARCELID",
+   "addr": "SITEADRESS",
+   "num": "ADDNUM",
+   "street": "STREETNAME",
+   "where": "upper",
+   "tests": [
+    [
+     43.06055,
+     -89.427998
+    ],
+    [
+     42.997062,
+     -87.899299
+    ]
+   ],
+   "page": "https://www.arcgis.com/home/item.html?id=2386813b23ea4e51a009f7d1d6b76e02"
+  },
+  {
+   "state": "WV",
+   "counties": [],
+   "label": "WV GIS Technical Center (WVU) / WV State Tax Dept. — parcel boundaries",
+   "url": "https://services.wvgis.wvu.edu/arcgis/rest/services/Planning_Cadastre/WV_Parcels/MapServer/0",
+   "apn": "CleanParcelID",
+   "addr": "FullPhysicalAddress",
+   "where": "upper",
+   "tests": [
+    [
+     38.327155,
+     -81.588069
+    ],
+    [
+     39.65481,
+     -79.96769
+    ]
+   ],
+   "page": "https://services.wvgis.wvu.edu/arcgis/rest/services/Planning_Cadastre/WV_Parcels/MapServer"
+  },
+  {
+   "state": "WY",
+   "counties": [],
+   "label": "State of Wyoming (wyo.gov ArcGIS Online org) - Wyoming Parcels for 2026 — parcel boundaries",
+   "url": "https://services3.arcgis.com/r0iJ85SKZ4zAzz3P/arcgis/rest/services/Wyoming_Parcels_for_2026/FeatureServer/0",
+   "apn": "parcelnb",
+   "addr": "locationad",
+   "where": "upper",
+   "filter": "parcelnb <> 'ROW'",
+   "tests": [
+    [
+     41.145159,
+     -104.800565
+    ],
+    [
+     42.839911,
+     -106.31977
+    ],
+    [
+     41.31081,
+     -105.579502
+    ]
+   ],
+   "page": "https://www.arcgis.com/home/item.html?id=9ab04f655f5b4e398d9f2f070d2d29bb"
+  }
+ ]
+}

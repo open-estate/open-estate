@@ -1,0 +1,36 @@
+id: fcc_broadband_bdc_live
+name: "FCC National Broadband Map (BDC) Live"
+version: "1.0.0"
+description: "Native live FCC Broadband Data Collection (BDC) fixed provider lookup supporting FCC_BDC_USERNAME/FCC_BDC_API_TOKEN; reports unverified cleanly on HTTP 401/405 without fabricating providers."
+domain: broadband
+domains:
+  - broadband
+driver: native_adapter
+proto_message_type: "openestate.extension.v1.BroadbandOptionProto"
+priority: 300
+enabled_by_default: true
+builtin: true
+provenance: live_verified
+homepage_url: "https://broadbandmap.fcc.gov/"
+documentation_url: "https://www.fcc.gov/BroadbandData"
+codeowners:
+  - "@openestate/broadband"
+geo_scope:
+  country: "US"
+  nationwide: true
+  states: []
+auth:
+  auth_type: api_key_header
+  header_name: "hash_value"
+  env_var: "FCC_BDC_API_TOKEN"
+  optional_key: true
+rate_limit:
+  requests_per_second: 3
+  burst: 6
+  timeout_ms: 6000
+  max_retries: 0
+cache_ttl_secs: 86400
+source_attribution:
+  name: "FCC National Broadband Map (BDC)"
+  url: "https://broadbandmap.fcc.gov/"
+  notes: "Never falls back silently to unverified carrier lists when FCC returns HTTP 401/405."

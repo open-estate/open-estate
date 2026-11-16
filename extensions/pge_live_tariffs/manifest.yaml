@@ -1,0 +1,32 @@
+id: pge_live_tariffs
+name: "PG&E Live Residential XLSX Tariffs + SVCE Generation"
+version: "1.0.0"
+description: "Fetches and parses live PG&E official XLSX tariffs (E-TOU-C electric & G-1 gas) alongside Silicon Valley Clean Energy (SVCE) official generation rate PDFs."
+domain: electric_utility
+domains:
+  - electric_utility
+  - gas_utility
+driver: native_adapter
+proto_message_type: "openestate.extension.v1.ElectricUtilityProto"
+priority: 360
+enabled_by_default: true
+builtin: true
+provenance: official_tariff
+homepage_url: "https://www.pge.com/tariffs/index.page"
+documentation_url: "https://www.pge.com/assets/rates/tariffs/Res_Current.xlsx"
+codeowners:
+  - "@openestate/utilities"
+geo_scope:
+  country: "US"
+  states: ["CA"]
+auth:
+  auth_type: none
+rate_limit:
+  requests_per_second: 4
+  burst: 8
+  timeout_ms: 8000
+  max_retries: 1
+cache_ttl_secs: 21600
+source_attribution:
+  name: "PG&E Official CPUC Tariffs & Silicon Valley Clean Energy"
+  url: "https://www.pge.com/tariffs/index.page"

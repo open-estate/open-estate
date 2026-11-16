@@ -1,0 +1,228 @@
+id: us_natural_gas
+name: "US Natural Gas & Residential Heating Fuel Tariffs"
+version: "1.0.0"
+description: "Published residential natural gas $/therm rate schedules, monthly meter base fees, and all-electric heat-pump regional standards across US utilities."
+domain: gas_utility
+domains:
+  - gas_utility
+driver: declarative_yaml
+proto_message_type: "openestate.extension.v1.GasUtilityProto"
+priority: 120
+enabled_by_default: true
+provenance: unverified
+homepage_url: "https://www.eia.gov/dnav/ng/ng_pri_sum_a_epg0_prs_dmcf_m.htm"
+documentation_url: "https://www.eia.gov/naturalgas/"
+codeowners:
+  - "@openestate/utilities"
+geo_scope:
+  country: "US"
+  nationwide: true
+  states: []
+auth:
+  auth_type: none
+cache_ttl_secs: 604800
+source_attribution:
+  name: "State PUC & US EIA Published Residential Natural Gas Tariffs"
+  url: "https://www.eia.gov/dnav/ng/ng_pri_sum_a_epg0_prs_dmcf_m.htm"
+tariff_catalog:
+  gas_rules:
+    - id: fl_heat_pump
+      geo_scope: { states: ["FL"] }
+      carrier_name: "All-Electric Heat Pump Standard (TECO Peoples Gas / FPU where piped)"
+      heating_fuel_norm: "electric_heat_pump"
+      rate_schedule: "All-Electric HVAC & Water Heating Typical"
+      monthly_base_fee_usd: 0.0
+      tariff_url: "https://www.eia.gov/dnav/ng/ng_pri_sum_a_epg0_prs_dmcf_m.htm"
+      rate_source: "EIA Residential Heating Fuel Profile"
+
+    - id: hi_heat_pump
+      geo_scope: { states: ["HI"] }
+      carrier_name: "All-Electric / Hawaiʻi Gas (Propane/SNG where piped)"
+      heating_fuel_norm: "electric_heat_pump"
+      rate_schedule: "All-Electric HVAC & Water Heating Typical"
+      monthly_base_fee_usd: 0.0
+      tariff_url: "https://www.eia.gov/dnav/ng/ng_pri_sum_a_epg0_prs_dmcf_m.htm"
+      rate_source: "EIA Residential Heating Fuel Profile"
+
+    - id: cpau_palo_alto_gas
+      geo_scope:
+        states: ["CA"]
+        cities: ["palo alto"]
+      carrier_name: "City of Palo Alto Utilities (Gas)"
+      heating_fuel_norm: "natural_gas"
+      rate_schedule: "Residential Gas Schedule G-1"
+      rate_per_therm_usd: 1.95
+      monthly_base_fee_usd: 14.20
+      tariff_url: "https://www.cityofpaloalto.org/Departments/Utilities"
+      rate_source: "City of Palo Alto Utilities Gas Schedule G-1"
+
+    - id: sdge_gas
+      geo_scope:
+        states: ["CA"]
+        counties: ["06073"]
+      carrier_name: "San Diego Gas & Electric (SDG&E Gas)"
+      heating_fuel_norm: "natural_gas"
+      rate_schedule: "Residential Natural Gas Schedule GR"
+      rate_per_therm_usd: 2.24
+      monthly_base_fee_usd: 5.00
+      tariff_url: "https://www.sdge.com/rates-and-regulations/current-and-effective-tariffs"
+      rate_source: "SDG&E Residential Gas Tariff GR"
+
+    - id: socalgas
+      geo_scope:
+        states: ["CA"]
+        counties: ["06037", "06059", "06065", "06071", "06111", "06083"]
+      carrier_name: "SoCalGas (Southern California Gas Co.)"
+      heating_fuel_norm: "natural_gas"
+      rate_schedule: "Residential Gas Service GR"
+      rate_per_therm_usd: 1.92
+      monthly_base_fee_usd: 5.00
+      tariff_url: "https://www.socalgas.com/pay-bill/understanding-your-bill/gas-rates"
+      rate_source: "SoCalGas CPUC Residential Schedule GR"
+
+    - id: pge_gas
+      geo_scope:
+        states: ["CA"]
+      carrier_name: "Pacific Gas & Electric (PG&E Gas)"
+      heating_fuel_norm: "natural_gas"
+      rate_schedule: "Residential Gas Schedule G-1 (Baseline / Tier 2)"
+      rate_per_therm_usd: 2.38
+      monthly_base_fee_usd: 4.00
+      tariff_url: "https://www.pge.com/tariffs/en.html"
+      rate_source: "PG&E CPUC Residential Gas Schedule G-1"
+
+    - id: texas_gas_service_austin
+      geo_scope:
+        states: ["TX"]
+        counties: ["48453"]
+        cities: ["austin"]
+      carrier_name: "Texas Gas Service"
+      heating_fuel_norm: "natural_gas"
+      rate_schedule: "Central Texas Residential Gas"
+      rate_per_therm_usd: 1.52
+      monthly_base_fee_usd: 21.00
+      tariff_url: "https://www.texasgasservice.com/"
+      rate_source: "EIA & Published Utility Gas Tariff"
+
+    - id: centerpoint_gas_houston
+      geo_scope:
+        states: ["TX"]
+        counties: ["48201", "48157"]
+        cities: ["houston"]
+      carrier_name: "CenterPoint Energy Natural Gas"
+      heating_fuel_norm: "natural_gas"
+      rate_schedule: "Houston Residential Gas R-2099"
+      rate_per_therm_usd: 1.45
+      monthly_base_fee_usd: 19.50
+      tariff_url: "https://www.centerpointenergy.com/"
+      rate_source: "EIA & Published Utility Gas Tariff"
+
+    - id: atmos_energy_tx
+      geo_scope: { states: ["TX"] }
+      carrier_name: "Atmos Energy"
+      heating_fuel_norm: "natural_gas"
+      rate_schedule: "Mid-Tex Residential Gas R"
+      rate_per_therm_usd: 1.48
+      monthly_base_fee_usd: 22.25
+      tariff_url: "https://www.atmosenergy.com/account-center/rates-and-tariffs"
+      rate_source: "EIA & Published Utility Gas Tariff"
+
+    - id: pse_gas_wa
+      geo_scope: { states: ["WA"] }
+      carrier_name: "Puget Sound Energy (PSE Gas) / Cascade Natural Gas"
+      heating_fuel_norm: "natural_gas"
+      rate_schedule: "Residential Gas Schedule 23"
+      rate_per_therm_usd: 1.56
+      monthly_base_fee_usd: 13.00
+      tariff_url: "https://www.pse.com/en/pages/rates"
+      rate_source: "EIA & Published Utility Gas Tariff"
+
+    - id: nw_natural_or
+      geo_scope: { states: ["OR"] }
+      carrier_name: "NW Natural"
+      heating_fuel_norm: "natural_gas"
+      rate_schedule: "Residential Rate Schedule 2"
+      rate_per_therm_usd: 1.49
+      monthly_base_fee_usd: 10.00
+      tariff_url: "https://www.nwnatural.com/about-us/rates-and-regulations"
+      rate_source: "EIA & Published Utility Gas Tariff"
+
+    - id: coned_natgrid_ny
+      geo_scope: { states: ["NY"] }
+      carrier_name: "Con Edison Gas / National Grid NY"
+      heating_fuel_norm: "natural_gas"
+      rate_schedule: "Residential Heating Service SC-3"
+      rate_per_therm_usd: 2.15
+      monthly_base_fee_usd: 24.00
+      tariff_url: "https://www.coned.com/"
+      rate_source: "EIA & Published Utility Gas Tariff"
+
+    - id: pseg_gas_nj
+      geo_scope: { states: ["NJ"] }
+      carrier_name: "PSE&G Gas / New Jersey Natural Gas"
+      heating_fuel_norm: "natural_gas"
+      rate_schedule: "Residential Gas Service RSG"
+      rate_per_therm_usd: 1.52
+      monthly_base_fee_usd: 10.50
+      tariff_url: "https://nj.pseg.com/"
+      rate_source: "EIA & Published Utility Gas Tariff"
+
+    - id: eversource_gas_ne
+      geo_scope: { states: ["MA", "CT", "RI", "NH"] }
+      carrier_name: "Eversource Gas / National Grid (or Heating Oil verify)"
+      heating_fuel_norm: "natural_gas"
+      rate_schedule: "Residential Heating R-3"
+      rate_per_therm_usd: 2.28
+      monthly_base_fee_usd: 16.00
+      tariff_url: "https://www.eversource.com/"
+      rate_source: "EIA & Published Utility Gas Tariff"
+
+    - id: nicor_peoples_il
+      geo_scope: { states: ["IL"] }
+      carrier_name: "Nicor Gas / Peoples Gas"
+      heating_fuel_norm: "natural_gas"
+      rate_schedule: "Residential Service Rate 1"
+      rate_per_therm_usd: 1.28
+      monthly_base_fee_usd: 18.50
+      tariff_url: "https://www.nicorgas.com/"
+      rate_source: "EIA & Published Utility Gas Tariff"
+
+    - id: xcel_gas_co_mn
+      geo_scope: { states: ["CO", "MN"] }
+      carrier_name: "Xcel Energy Natural Gas"
+      heating_fuel_norm: "natural_gas"
+      rate_schedule: "Residential Gas Service RG"
+      rate_per_therm_usd: 1.24
+      monthly_base_fee_usd: 12.50
+      tariff_url: "https://www.xcelenergy.com/"
+      rate_source: "EIA & Published Utility Gas Tariff"
+
+    - id: southwest_gas_az_nv
+      geo_scope: { states: ["AZ", "NV"] }
+      carrier_name: "Southwest Gas"
+      heating_fuel_norm: "natural_gas"
+      rate_schedule: "Single-Family Residential G-5"
+      rate_per_therm_usd: 1.68
+      monthly_base_fee_usd: 13.70
+      tariff_url: "https://www.swgas.com/en/residential-rates"
+      rate_source: "EIA & Published Utility Gas Tariff"
+
+    - id: atlanta_gas_light_ga
+      geo_scope: { states: ["GA"] }
+      carrier_name: "Atlanta Gas Light (Certificated Gas Marketer Choice)"
+      heating_fuel_norm: "natural_gas"
+      rate_schedule: "Published Marketer Fixed Therm Rate"
+      rate_per_therm_usd: 1.65
+      monthly_base_fee_usd: 18.00
+      tariff_url: "https://psc.ga.gov/utilities/natural-gas/marketer-pricing-chart/"
+      rate_source: "EIA & Published Utility Gas Tariff"
+
+    - id: us_gas_regional_default
+      geo_scope: { nationwide: true, states: [] }
+      carrier_name: "Regional Natural Gas Distribution Utility (Unverified)"
+      heating_fuel_norm: "natural_gas"
+      rate_schedule: "Regional Gas Benchmark (Verify Utility)"
+      rate_per_therm_usd: 1.55
+      monthly_base_fee_usd: 0.0
+      tariff_url: "https://www.eia.gov/dnav/ng/ng_pri_sum_a_epg0_prs_dmcf_m.htm"
+      rate_source: "Unverified Regional Gas Benchmark (Verify Utility)"

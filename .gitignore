@@ -1,0 +1,12 @@
+/target/
+/reports/
+.cache/
+node_modules/
+.wrangler/
+*.part
+*.sqlite*
+*.db*
+.env
+.env*
+!.env.example
+.dev.vars

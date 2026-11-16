@@ -1,0 +1,53 @@
+openapi: "3.0.3"
+info:
+  title: "Mapbox Directions Matrix API"
+  version: "1.0.0"
+  description: "Mapbox Directions Matrix API v1 driving travel times and distances (max 25 coordinates per request; requires MAPBOX_ACCESS_TOKEN)."
+servers:
+  - url: "https://api.mapbox.com"
+paths:
+  /directions-matrix/v1/mapbox/driving/{coordinates}:
+    get:
+      operationId: getMapboxDrivingMatrix
+      summary: "Compute traffic-aware driving duration and distance matrices between origin and destination coordinates."
+      parameters:
+        - name: coordinates
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: sources
+          in: query
+          required: false
+          description: "Semicolon-separated origin coordinate indices."
+          schema:
+            type: string
+            default: "0"
+        - name: destinations
+          in: query
+          required: false
+          description: "Semicolon-separated destination coordinate indices (Mapbox requires sources * destinations >= 2; 1x1 calls pass '0;1' and read column 1)."
+          schema:
+            type: string
+            default: "0;1"
+        - name: annotations
+          in: query
+          required: false
+          schema:
+            type: string
+            default: "duration,distance"
+      security:
+        - MapboxAccessToken: []
+      responses:
+        "200":
+          description: "Mapbox Directions Matrix response"
+          content:
+            application/json:
+              schema:
+                type: object
+components:
+  securitySchemes:
+    MapboxAccessToken:
+      type: apiKey
+      in: query
+      name: access_token

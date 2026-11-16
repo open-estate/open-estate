@@ -1,0 +1,30 @@
+openapi: "3.0.3"
+info:
+  title: "FCC National Broadband Map (BDC) Public Location API"
+  version: "1.0.0"
+  description: "Federal Communications Commission Broadband Data Collection fixed broadband availability lookup by parcel coordinates."
+servers:
+  - url: "https://broadbandmap.fcc.gov/api/public/map"
+paths:
+  /listAvailableFixedProvidersByLocation:
+    get:
+      operationId: listAvailableFixedCarriersByLocation
+      summary: "Query FCC BDC fixed wireline, fiber, cable, wireless, and satellite availability at WGS84 coordinates."
+      parameters:
+        - name: latitude
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: longitude
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: "FCC BDC fixed broadband carriers at location"
+          content:
+            application/json:
+              schema:
+                type: object

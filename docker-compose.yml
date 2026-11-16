@@ -1,0 +1,107 @@
+services:
+  open-estate:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ${OPEN_ESTATE_IMAGE:-openestate/openestate:latest}
+    ports:
+      - "${PORT:-8080}:8080"
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      HOST: 0.0.0.0
+      PORT: 8080
+      DATABASE_PROVIDER: ${DATABASE_PROVIDER:-sqlite}
+      SQLITE_DB_PATH: /data/open-estate.db
+      SQLITE_PATH: /data/open-estate.db
+      DATA_DIR: /data/datasets
+      HTTP_CACHE_DIR: /data/http-cache
+      REPORTS_DIR: /app/reports
+      FREE_PROXY_POOL_ENABLED: ${FREE_PROXY_POOL_ENABLED:-false}
+      PROXY_POOL_STRICT: ${PROXY_POOL_STRICT:-false}
+    volumes:
+      - open-estate-data:/data
+      - open-estate-reports:/app/reports
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/healthz"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
+  # Optional self-hosted OSRM road router (`OSRM_BASE_URL=http://osrm:5000 docker compose --profile osrm up -d`)
+  osrm-download:
+    image: curlimages/curl:8.11.1
+    profiles: ["osrm"]
+    user: "0:0"
+    entrypoint: ["/bin/sh", "/scripts/download.sh"]
+    environment:
+      DATA_DIR: /data
+      EXTRACT_URL: ${OSRM_EXTRACT_URL:-https://download.geofabrik.de/north-america/us/california-latest.osm.pbf}
+      EXTRACT_NAME: ${OSRM_EXTRACT_NAME:-california-latest}
+      SKIP_IF_CURRENT_EXISTS: ${SKIP_IF_CURRENT_EXISTS:-1}
+    volumes:
+      - ./deploy/osrm/scripts:/scripts:ro
+      - osrm-data:/data
+
+  osrm-build:
+    image: ghcr.io/project-osrm/osrm-backend:v26.11.0-debian
+    profiles: ["osrm"]
+    depends_on:
+      osrm-download:
+        condition: service_completed_successfully
+    entrypoint: ["/bin/sh", "/scripts/build.sh"]
+    environment:
+      DATA_DIR: /data
+      EXTRACT_NAME: ${OSRM_EXTRACT_NAME:-california-latest}
+      OSRM_THREADS: ${OSRM_THREADS:-2}
+      SKIP_IF_CURRENT_EXISTS: ${SKIP_IF_CURRENT_EXISTS:-1}
+    volumes:
+      - ./deploy/osrm/scripts:/scripts:ro
+      - osrm-data:/data
+
+  osrm:
+    image: ghcr.io/project-osrm/osrm-backend:v26.11.0-debian
+    profiles: ["osrm"]
+    depends_on:
+      osrm-build:
+        condition: service_completed_successfully
+    entrypoint: ["/bin/sh", "/scripts/serve.sh"]
+    environment:
+      DATA_DIR: /data
+      EXTRACT_NAME: ${OSRM_EXTRACT_NAME:-california-latest}
+      OSRM_MAX_TABLE_SIZE: ${OSRM_MAX_TABLE_LOCATIONS:-1000}
+    volumes:
+      - ./deploy/osrm/scripts:/scripts:ro
+      - osrm-data:/data
+    expose:
+      - "5000"
+    restart: unless-stopped
+
+  # Optional MySQL 8.4 backend (`DATABASE_PROVIDER=mysql MYSQL_URL=mysql://openestate:openestate@mysql:3306/openestate docker compose --profile mysql up -d`)
+  mysql:
+    image: mysql:8.4
+    profiles: ["mysql"]
+    environment:
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-openestate}
+      MYSQL_USER: ${MYSQL_USER:-openestate}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-openestate}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-openestate-root}
+    volumes:
+      - mysql-data:/var/lib/mysql
+    expose:
+      - "3306"
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "--silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+volumes:
+  open-estate-data:
+  open-estate-reports:
+  osrm-data:
+  mysql-data:

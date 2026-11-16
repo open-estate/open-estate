@@ -1,0 +1,32 @@
+id: eia861_electric_rates
+name: "EIA-861 Nationwide Electric Territory & Residential Rates"
+version: "1.0.0"
+description: "Resolves electric retail utility territory and EIA Form 861 average residential kWh rate from public EIA-861 / HIFLD ArcGIS layers across all 50 US states."
+domain: electric_utility
+domains:
+  - electric_utility
+driver: native_adapter
+proto_message_type: "openestate.extension.v1.ElectricUtilityProto"
+priority: 310
+enabled_by_default: true
+builtin: true
+provenance: live_verified
+homepage_url: "https://www.eia.gov/electricity/data/eia861/"
+documentation_url: "https://services8.arcgis.com/peDZJliSvYims39Q/arcgis/rest/services/Electricity_Rates_H3_Res5/FeatureServer/7"
+codeowners:
+  - "@openestate/utilities"
+geo_scope:
+  country: "US"
+  nationwide: true
+  states: []
+auth:
+  auth_type: none
+rate_limit:
+  requests_per_second: 5
+  burst: 10
+  timeout_ms: 6000
+  max_retries: 1
+cache_ttl_secs: 86400
+source_attribution:
+  name: "US EIA Form 861 Residential Electric Rate Layer"
+  url: "https://services8.arcgis.com/peDZJliSvYims39Q/arcgis/rest/services/Electricity_Rates_H3_Res5/FeatureServer/7"

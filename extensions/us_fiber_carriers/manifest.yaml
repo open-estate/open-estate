@@ -1,0 +1,291 @@
+id: us_fiber_carriers
+name: "US Symmetrical Fiber-to-the-Home (FTTH) Carrier Footprints"
+version: "1.0.0"
+description: "Published metro & county service territories, symmetrical multi-gigabit FTTH speeds, plan pricing tiers, and address-check links for major US fiber carriers (supplementing live FCC BDC queries)."
+domain: broadband
+domains:
+  - broadband
+driver: declarative_yaml
+proto_message_type: "openestate.extension.v1.BroadbandCatalogProto"
+priority: 120
+enabled_by_default: true
+provenance: unverified
+homepage_url: "https://broadbandmap.fcc.gov/"
+documentation_url: "https://broadbandmap.fcc.gov/"
+codeowners:
+  - "@openestate/broadband"
+geo_scope:
+  country: "US"
+  nationwide: true
+  states: []
+auth:
+  auth_type: none
+cache_ttl_secs: 604800
+source_attribution:
+  name: "Published FTTH Fiber Carrier Metro Service Footprints"
+  url: "https://broadbandmap.fcc.gov/"
+footprint_catalog:
+  broadband_rules:
+    - id: sonic_10g_bay_area
+      exclude_rural: true
+      geo_scope:
+        states: ["CA"]
+        counties: ["06085", "06075", "06001", "06081", "06013", "06041"]
+      carrier_name: "Sonic 10G Fiber"
+      technology: "Fiber (FTTH)"
+      tier_category: "fiber"
+      max_download_mbps: 10000
+      max_upload_mbps: 10000
+      symmetrical: true
+      typical_monthly_usd: "$49.99/mo (up to 10 Gbps symmetrical)"
+      availability_status: "regional_footprint_unverified"
+      check_url: "https://www.sonic.com/"
+
+    - id: att_fiber_norcal_socal
+      exclude_rural: true
+      geo_scope:
+        states: ["CA"]
+        counties: ["06085", "06075", "06001", "06081", "06013", "06041", "06087", "06067", "06061", "06037", "06059", "06065", "06071", "06111", "06073"]
+      carrier_name: "AT&T Fiber"
+      technology: "Fiber (FTTH)"
+      tier_category: "fiber"
+      max_download_mbps: 5000
+      max_upload_mbps: 5000
+      symmetrical: true
+      typical_monthly_usd: "$55–$80/mo (300M–1Gbps · up to 5Gbps)"
+      availability_status: "regional_footprint_unverified"
+      check_url: "https://www.att.com/internet/fiber/"
+
+    - id: att_fiber_ca_statewide
+      exclude_rural: true
+      geo_scope:
+        states: ["CA"]
+      carrier_name: "AT&T Fiber"
+      technology: "Fiber (FTTH)"
+      tier_category: "fiber"
+      max_download_mbps: 5000
+      max_upload_mbps: 5000
+      symmetrical: true
+      typical_monthly_usd: "$55–$80/mo (300M–1Gbps)"
+      availability_status: "regional_footprint_unverified"
+      check_url: "https://www.att.com/internet/fiber/"
+
+    - id: frontier_fiber_west_valley_ca
+      exclude_rural: true
+      geo_scope:
+        states: ["CA"]
+        cities: ["los gatos", "campbell", "saratoga"]
+      carrier_name: "Frontier Fiber"
+      technology: "Fiber (FTTH)"
+      tier_category: "fiber"
+      max_download_mbps: 5000
+      max_upload_mbps: 5000
+      symmetrical: true
+      typical_monthly_usd: "$50–$75/mo (500M–2Gbps · up to 5Gbps)"
+      availability_status: "regional_footprint_unverified"
+      check_url: "https://frontier.com/shop/internet/fiber-internet"
+
+    - id: frontier_fiber_socal
+      exclude_rural: true
+      geo_scope:
+        states: ["CA"]
+        counties: ["06037", "06059", "06065", "06071", "06111", "06073"]
+      carrier_name: "Frontier Fiber"
+      technology: "Fiber (FTTH)"
+      tier_category: "fiber"
+      max_download_mbps: 5000
+      max_upload_mbps: 5000
+      symmetrical: true
+      typical_monthly_usd: "$50–$75/mo (500M–2Gbps · up to 5Gbps)"
+      availability_status: "regional_footprint_unverified"
+      check_url: "https://frontier.com/shop/internet/fiber-internet"
+
+    - id: google_fiber_orange_county
+      exclude_rural: true
+      geo_scope:
+        states: ["CA"]
+        counties: ["06059"]
+        cities: ["irvine"]
+      carrier_name: "Google Fiber"
+      technology: "Fiber (FTTH)"
+      tier_category: "fiber"
+      max_download_mbps: 2000
+      max_upload_mbps: 2000
+      symmetrical: true
+      typical_monthly_usd: "$70/mo (1 Gbps) · $100/mo (2 Gbps)"
+      availability_status: "regional_footprint_unverified"
+      check_url: "https://fiber.google.com/"
+
+    - id: google_fiber_austin
+      exclude_rural: true
+      geo_scope:
+        states: ["TX"]
+        counties: ["48453"]
+        cities: ["austin"]
+      carrier_name: "Google Fiber"
+      technology: "Fiber (FTTH)"
+      tier_category: "fiber"
+      max_download_mbps: 8000
+      max_upload_mbps: 8000
+      symmetrical: true
+      typical_monthly_usd: "$70/mo (1 Gbps) · $100/mo (2 Gbps)"
+      availability_status: "regional_footprint_unverified"
+      check_url: "https://fiber.google.com/"
+
+    - id: att_fiber_texas_se_midwest
+      exclude_rural: true
+      geo_scope:
+        states: ["TX", "FL", "GA", "NC", "SC", "TN", "IL", "MI", "OH", "IN", "KY", "WI"]
+      carrier_name: "AT&T Fiber"
+      technology: "Fiber (FTTH)"
+      tier_category: "fiber"
+      max_download_mbps: 5000
+      max_upload_mbps: 5000
+      symmetrical: true
+      typical_monthly_usd: "$55–$80/mo (300M–1Gbps · up to 5Gbps)"
+      availability_status: "regional_footprint_unverified"
+      check_url: "https://www.att.com/internet/fiber/"
+
+    - id: ezee_tachus_houston
+      exclude_rural: true
+      geo_scope:
+        states: ["TX"]
+        counties: ["48201", "48157"]
+        cities: ["houston"]
+      carrier_name: "Ezee Fiber / Tachus Fiber"
+      technology: "Fiber (FTTH)"
+      tier_category: "fiber"
+      max_download_mbps: 5000
+      max_upload_mbps: 5000
+      symmetrical: true
+      typical_monthly_usd: "$65–$89/mo (1–5 Gbps)"
+      availability_status: "regional_footprint_unverified"
+      check_url: "https://broadbandmap.fcc.gov/"
+
+    - id: frontier_fiber_dfw_tx
+      exclude_rural: true
+      geo_scope:
+        states: ["TX"]
+        counties: ["48113", "48085", "48121", "48439"]
+      carrier_name: "Frontier Fiber"
+      technology: "Fiber (FTTH)"
+      tier_category: "fiber"
+      max_download_mbps: 5000
+      max_upload_mbps: 5000
+      symmetrical: true
+      typical_monthly_usd: "$50–$75/mo (500M–2Gbps · up to 5Gbps)"
+      availability_status: "regional_footprint_unverified"
+      check_url: "https://frontier.com/shop/internet/fiber-internet"
+
+    - id: verizon_fios_northeast
+      exclude_rural: true
+      geo_scope:
+        states: ["NY", "NJ", "PA", "DC", "MD", "VA", "MA", "RI", "DE"]
+      carrier_name: "Verizon Fios (100% FTTH)"
+      technology: "Fiber (FTTH)"
+      tier_category: "fiber"
+      max_download_mbps: 2000
+      max_upload_mbps: 2000
+      symmetrical: true
+      typical_monthly_usd: "$50–$90/mo (300M–2Gbps symmetrical)"
+      availability_status: "regional_footprint_unverified"
+      check_url: "https://www.verizon.com/home/internet/fios-fastest-internet/"
+
+    - id: optimum_fiber_ny_nj
+      exclude_rural: true
+      geo_scope:
+        states: ["NY", "NJ"]
+      carrier_name: "Optimum Fiber"
+      technology: "Fiber (FTTH)"
+      tier_category: "fiber"
+      max_download_mbps: 5000
+      max_upload_mbps: 5000
+      symmetrical: true
+      typical_monthly_usd: "$55–$85/mo (500M–5Gbps)"
+      availability_status: "regional_footprint_unverified"
+      check_url: "https://www.optimum.com/internet"
+
+    - id: quantum_fiber_pnw
+      exclude_rural: true
+      geo_scope:
+        states: ["WA", "OR"]
+      carrier_name: "Quantum Fiber (Lumen)"
+      technology: "Fiber (FTTH)"
+      tier_category: "fiber"
+      max_download_mbps: 3000
+      max_upload_mbps: 3000
+      symmetrical: true
+      typical_monthly_usd: "$50–$75/mo (500M–3Gbps symmetrical)"
+      availability_status: "regional_footprint_unverified"
+      check_url: "https://www.quantumfiber.com/"
+
+    - id: ziply_fiber_pnw
+      exclude_rural: true
+      geo_scope:
+        states: ["WA", "OR"]
+      carrier_name: "Ziply Fiber"
+      technology: "Fiber (FTTH)"
+      tier_category: "fiber"
+      max_download_mbps: 5000
+      max_upload_mbps: 5000
+      symmetrical: true
+      typical_monthly_usd: "$60–$85/mo (1–5 Gbps symmetrical)"
+      availability_status: "regional_footprint_unverified"
+      check_url: "https://ziplyfiber.com/"
+
+    - id: frontier_fiber_tampa
+      exclude_rural: true
+      geo_scope:
+        states: ["FL"]
+        counties: ["12057", "12103"]
+      carrier_name: "Frontier Fiber"
+      technology: "Fiber (FTTH)"
+      tier_category: "fiber"
+      max_download_mbps: 5000
+      max_upload_mbps: 5000
+      symmetrical: true
+      typical_monthly_usd: "$50–$75/mo (500M–2Gbps)"
+      availability_status: "regional_footprint_unverified"
+      check_url: "https://frontier.com/shop/internet/fiber-internet"
+
+    - id: google_fiber_se
+      exclude_rural: true
+      geo_scope:
+        states: ["NC", "GA", "TN"]
+      carrier_name: "Google Fiber"
+      technology: "Fiber (FTTH)"
+      tier_category: "fiber"
+      max_download_mbps: 2000
+      max_upload_mbps: 2000
+      symmetrical: true
+      typical_monthly_usd: "$70/mo (1 Gbps) · $100/mo (2 Gbps)"
+      availability_status: "regional_footprint_unverified"
+      check_url: "https://fiber.google.com/"
+
+    - id: quantum_fiber_mountain_west
+      exclude_rural: true
+      geo_scope:
+        states: ["CO", "UT", "AZ", "NV", "MN"]
+      carrier_name: "Quantum Fiber"
+      technology: "Fiber (FTTH)"
+      tier_category: "fiber"
+      max_download_mbps: 3000
+      max_upload_mbps: 3000
+      symmetrical: true
+      typical_monthly_usd: "$50–$75/mo (500M–3Gbps)"
+      availability_status: "regional_footprint_unverified"
+      check_url: "https://www.quantumfiber.com/"
+
+    - id: google_fiber_mountain_west
+      exclude_rural: true
+      geo_scope:
+        states: ["UT", "CO", "AZ"]
+      carrier_name: "Google Fiber"
+      technology: "Fiber (FTTH)"
+      tier_category: "fiber"
+      max_download_mbps: 2000
+      max_upload_mbps: 2000
+      symmetrical: true
+      typical_monthly_usd: "$70/mo (1 Gbps)"
+      availability_status: "regional_footprint_unverified"
+      check_url: "https://fiber.google.com/"

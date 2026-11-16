@@ -1,0 +1,463 @@
+syntax = "proto3";
+
+package openestate.extension.v1;
+
+// Canonical geocoded parcel & Census geography contract (`DOMAIN_GEOCODE`).
+message GeocodeResultProto {
+  string matched_address = 1;
+  double lat = 2;
+  double lon = 3;
+  string street = 4;
+  string city = 5;
+  string state = 6;
+  string zip = 7;
+  string state_fips = 8;
+  string county_fips = 9;
+  string county_name = 10;
+  optional string census_tract = 11;
+  optional string block_group = 12;
+  optional string cbsa_code = 13;
+  optional string cbsa_title = 14;
+  optional string school_district_geoid = 15;
+  optional string school_district_name = 16;
+}
+
+// Canonical residential/commercial electric utility schedule & rate contract (`DOMAIN_ELECTRIC_UTILITY`).
+message ElectricUtilityProto {
+  string carrier_name = 1;
+  string short_name = 2;
+  // Canonical governance class: "municipal", "iou", "deregulated_choice", or "coop".
+  string utility_type = 3;
+  string utility_type_label = 4;
+  optional string cca_program = 5;
+  string rate_schedule = 6;
+  double rate_per_kwh_usd = 7;
+  double off_peak_kwh_usd = 8;
+  double peak_kwh_usd = 9;
+  double monthly_base_fee_usd = 10;
+  string solar_nem_policy = 11;
+  string tariff_url = 12;
+  string rate_source = 13;
+}
+
+// Canonical natural gas / heating utility contract (`DOMAIN_GAS_UTILITY`).
+message GasUtilityProto {
+  string carrier_name = 1;
+  // Canonical fuel class: "natural_gas", "electric_heat_pump", or "fuel_oil_or_propane".
+  string heating_fuel_norm = 2;
+  string rate_schedule = 3;
+  // Explicit presence: omitted when parcel is all-electric / no piped gas tariff applies.
+  optional double rate_per_therm_usd = 4;
+  double monthly_base_fee_usd = 5;
+  string tariff_url = 6;
+  string rate_source = 7;
+}
+
+// Canonical public water, sanitary sewer, and municipal solid-waste contract (`DOMAIN_WATER_SEWER_TRASH`).
+message WaterSewerTrashProto {
+  string water_carrier_name = 1;
+  optional string water_pwsid = 2;
+  // "municipal" or "private_well"
+  string water_source_type = 3;
+  // e.g., "CCF (748 gal)" or "1,000 gal"
+  string water_rate_unit = 4;
+  optional double water_volumetric_rate_usd = 5;
+  double water_base_monthly_usd = 6;
+  optional string water_tariff_url = 7;
+  string sewer_carrier_name = 8;
+  // "municipal" or "septic"
+  string sewer_type = 9;
+  int64 sewer_monthly_usd = 10;
+  string trash_carrier_name = 11;
+  int64 trash_monthly_usd = 12;
+}
+
+// Single wireline, fixed-wireless, or satellite broadband carrier option (`DOMAIN_BROADBAND`).
+message BroadbandOptionProto {
+  string carrier_name = 1;
+  // "Fiber (FTTH)", "Cable (DOCSIS 3.1/4.0)", "5G Fixed Wireless", "LEO Satellite", "DSL / Copper"
+  string technology = 2;
+  // "fiber", "cable", "wireless", "satellite", "dsl"
+  string tier_category = 3;
+  int64 max_download_mbps = 4;
+  int64 max_upload_mbps = 5;
+  bool symmetrical = 6;
+  string typical_monthly_usd = 7;
+  // "confirmed_fcc", "metro_footprint_verify_drop", "nationwide_sky_view"
+  string availability_status = 8;
+  string check_url = 9;
+}
+
+// Aggregated parcel broadband & fiber catalog (`DOMAIN_BROADBAND`).
+message BroadbandCatalogProto {
+  bool high_speed_available = 1;
+  bool fiber_available = 2;
+  bool fiber_confirmed_fcc = 3;
+  // "fiber_confirmed", "fiber_area", "cable_high_speed", "wireless_or_dsl"
+  string internet_tier = 4;
+  // "fcc_location_verified" or "regional_footprint_verify_drop"
+  string verification_status = 5;
+  string headline_verdict = 6;
+  int64 max_download_mbps = 7;
+  int64 max_upload_mbps = 8;
+  repeated BroadbandOptionProto fiber_carriers = 9;
+  repeated BroadbandOptionProto cable_carriers = 10;
+  repeated BroadbandOptionProto wireless_carriers = 11;
+  int64 est_monthly_internet_usd = 12;
+  string fcc_map_url = 13;
+}
+
+// Canonical subject property physical, tax, and hardware attributes (`DOMAIN_PROPERTY_FACTS`).
+// Every scalar uses `optional` so absent upstream facts remain explicitly unset rather than zeroed.
+message PropertyFactsProto {
+  string matched_address = 1;
+  string street = 2;
+  string city = 3;
+  string state = 4;
+  string zip = 5;
+  string county_fips = 6;
+  string county_name = 7;
+  optional double lat = 8;
+  optional double lon = 9;
+  optional string apn = 10;
+  optional string property_type = 11;
+  optional double beds = 12;
+  optional double baths = 13;
+  optional int64 sqft = 14;
+  optional int64 lot_sqft = 15;
+  optional int64 year_built = 16;
+  optional double stories = 17;
+  optional double garage_spaces = 18;
+  optional int64 hoa_monthly_usd = 19;
+  optional int64 list_price_usd = 20;
+  optional int64 last_sale_price_usd = 21;
+  optional string last_sale_date = 22;
+  optional double annual_property_tax_usd = 23;
+  optional double effective_tax_rate = 24;
+  optional string zoning = 25;
+  optional string architectural_style = 26;
+  repeated string features = 27;
+  optional bool has_solar = 28;
+  optional bool has_ev_charger = 29;
+  optional bool has_heat_pump = 30;
+  optional bool has_adu = 31;
+  optional bool adu_feasible = 32;
+  optional bool has_pool = 33;
+  optional string mls_number = 34;
+  optional string listing_status = 35;
+}
+
+// Canonical natural-hazard screening summary (`DOMAIN_NATURAL_HAZARDS`).
+message HazardSummaryProto {
+  optional string fema_flood_zone = 1;
+  optional bool in_sfha = 2;
+  optional double nearest_sfha_meters = 3;
+  optional string wildfire_zone = 4;
+  optional double seismic_pga_g = 5;
+  optional double seismic_ss_g = 6;
+  optional double seismic_s1_g = 7;
+  optional string seismic_design_category = 8;
+  optional double nearest_fault_km = 9;
+  optional string nearest_fault_name = 10;
+  optional int32 epa_radon_zone = 11;
+  optional double fema_nri_composite_score = 12;
+  optional double overall_safety_score = 13;
+  repeated string highlights = 14;
+}
+
+// Canonical environmental & public-water compliance summary (`DOMAIN_ENVIRONMENTAL`).
+message EnvironmentalSummaryProto {
+  optional string water_system_pwsid = 1;
+  optional string water_system_name = 2;
+  optional int32 sdwis_violation_count = 3;
+  optional int32 superfund_count_3mi = 4;
+  optional double nearest_superfund_km = 5;
+  optional int32 tri_facility_count_2mi = 6;
+  optional int32 lust_open_count_1mi = 7;
+  optional double pm25_mean_ug_m3 = 8;
+  optional int32 us_aqi_recent = 9;
+  optional double road_noise_dba = 10;
+  optional double aviation_noise_dba = 11;
+  optional double pollution_burden_percentile = 12;
+  optional double environmental_health_score = 13;
+  repeated string highlights = 14;
+}
+
+// Individual public/charter school performance entry (`DOMAIN_SCHOOLS` / `DOMAIN_LIVABILITY`).
+message SchoolSummaryItemProto {
+  string name = 1;
+  // "elementary", "middle", "high"
+  string level = 2;
+  optional double rating_0_to_10 = 3;
+  optional double state_percentile = 4;
+  optional double distance_km = 5;
+  optional string nces_id = 6;
+  optional string district_name = 7;
+}
+
+// Canonical neighborhood livability, schools, and crime context (`DOMAIN_LIVABILITY`, `DOMAIN_SCHOOLS`, `DOMAIN_CRIME`).
+message LivabilitySummaryProto {
+  optional double walkability_index = 1;
+  optional double amenity_access_score = 2;
+  optional int32 grocery_count_1mi = 3;
+  optional int32 restaurant_count_1mi = 4;
+  optional int32 park_count_1mi = 5;
+  optional int32 transit_stop_count_half_mi = 6;
+  optional double nearest_freeway_meters = 7;
+  optional double nearest_high_voltage_meters = 8;
+  optional double school_composite_score = 9;
+  optional string school_grade = 10;
+  optional string school_district = 11;
+  repeated SchoolSummaryItemProto schools = 12;
+  optional double violent_crime_per_100k = 13;
+  optional double property_crime_per_100k = 14;
+  optional double crime_safety_score = 15;
+}
+
+// Canonical valuation & local housing-market economics (`DOMAIN_VALUATION`, `DOMAIN_MARKET_TRENDS`).
+message MarketValuationProto {
+  optional int64 estimated_value_usd = 1;
+  optional int64 value_low_usd = 2;
+  optional int64 value_high_usd = 3;
+  optional double confidence_0_to_1 = 4;
+  optional int64 estimated_monthly_rent_usd = 5;
+  optional int64 zip_median_home_value_usd = 6;
+  optional double yoy_appreciation_pct = 7;
+  optional double cagr_5yr_pct = 8;
+  optional double mortgage_rate_30yr_pct = 9;
+  optional int64 median_household_income_usd = 10;
+  optional double tract_broadband_adoption_pct = 11;
+  optional int64 estimated_annual_insurance_usd = 12;
+  optional double effective_property_tax_rate = 13;
+  optional bool has_special_tax_district = 14;
+  optional string special_tax_district_label = 15;
+}
+
+// Canonical property insurance risk & premium estimate (`DOMAIN_INSURANCE`).
+message InsuranceQuoteProto {
+  optional int64 estimated_annual_premium_usd = 1;
+  optional double effective_pct_of_value = 2;
+  optional bool fair_plan_or_surplus_risk = 3;
+  optional int64 flood_insurance_annual_usd = 4;
+  optional int64 earthquake_insurance_annual_usd = 5;
+  optional string carrier_market_status = 6;
+  repeated string underwriting_notes = 7;
+}
+
+// Canonical transfer taxes, special districts & point-of-sale mandates (`DOMAIN_TAX_MANDATES`).
+message TaxMandatesProto {
+  optional double effective_property_tax_rate = 1;
+  optional double state_transfer_tax_pct = 2;
+  optional double local_transfer_tax_pct = 3;
+  optional int64 estimated_transfer_tax_usd = 4;
+  optional bool has_special_tax_district = 5;
+  optional string special_tax_district_type = 6;
+  optional string homestead_exemption_summary = 7;
+  repeated string point_of_sale_mandates = 8;
+}
+
+// Canonical 3D LiDAR massing & roof solar metadata (`DOMAIN_HOUSE_3D`).
+message House3dMetadataProto {
+  optional double roof_ridge_height_m = 1;
+  optional double ground_elevation_m = 2;
+  optional double dominant_roof_pitch_deg = 3;
+  optional double roof_footprint_sqm = 4;
+  optional int32 tree_canopy_count = 5;
+  optional string lidar_project_name = 6;
+  optional string tour_embed_url = 7;
+}
+
+// Active or sold listing record from a feed connector (`DOMAIN_LISTINGS_FEED`).
+message ListingFeedItemProto {
+  string listing_id = 1;
+  string address = 2;
+  optional string street = 3;
+  optional string city = 4;
+  optional string state = 5;
+  string zip = 6;
+  optional double lat = 7;
+  optional double lon = 8;
+  string status = 9;
+  optional int64 price_usd = 10;
+  optional double beds = 11;
+  optional double baths = 12;
+  optional int64 sqft = 13;
+  optional int64 lot_sqft = 14;
+  optional int64 year_built = 15;
+  optional string property_type = 16;
+  optional int64 hoa_monthly_usd = 17;
+  optional string listed_date = 18;
+  optional string sold_date = 19;
+  optional string mls_number = 20;
+  optional string source_url = 21;
+  optional string photo_url = 22;
+  optional string features_text = 23;
+}
+
+// Batch of active/sold listings returned by a `DOMAIN_LISTINGS_FEED` extension.
+message ListingsFeedBatchProto {
+  string zip = 1;
+  repeated ListingFeedItemProto items = 2;
+}
+
+// Canonical bridge to the 77-column `listings` shopping database table (`LISTINGS_SHOPPING_UPGRADE_COLS` + core facets).
+// Every facet is `optional` so unknown values remain SQL NULL rather than fabricated defaults.
+message ListingShoppingFacetsProto {
+  string listing_id = 1;
+  optional string electric_carrier = 2;
+  optional string electric_utility_type = 3;
+  optional double electric_rate_kwh = 4;
+  optional string gas_carrier = 5;
+  optional double gas_rate_therm = 6;
+  optional string water_carrier = 7;
+  optional string water_source_type = 8;
+  optional string sewer_type = 9;
+  optional int64 est_monthly_utilities = 10;
+  optional string internet_tier = 11;
+  optional bool fiber_available = 12;
+  optional bool high_speed_internet = 13;
+  optional string internet_carriers = 14;
+  optional string fiber_carriers = 15;
+  optional int64 max_download_mbps = 16;
+  optional int64 max_upload_mbps = 17;
+  optional int64 all_in_monthly = 18;
+  optional double property_tax_rate = 19;
+  optional bool has_special_tax = 20;
+  optional bool has_solar = 21;
+  optional bool has_ev_charger = 22;
+  optional bool has_heat_pump = 23;
+  optional bool has_adu = 24;
+  optional bool adu_feasible = 25;
+  optional bool has_pool = 26;
+  optional double garage_spaces = 27;
+  optional string architectural_style = 28;
+  optional string flood_zone = 29;
+  optional string wildfire_zone = 30;
+  optional double school_score = 31;
+  optional string school_grade = 32;
+  optional double walk_score = 33;
+  optional int64 estimated_value = 34;
+}
+
+// Canonical drive-time routing matrix capability & health probe contract (`DOMAIN_ROUTING`).
+message RoutingMatrixProto {
+  string provider_id = 1;
+  string provider_name = 2;
+  // "primary" (self-hosted OSRM) or "fallback" (cloud matrix API).
+  string tier = 3;
+  string profile = 4;
+  string endpoint_host = 5;
+  uint32 max_coordinates = 6;
+  uint32 origin_count = 7;
+  uint32 destination_count = 8;
+  optional double sample_duration_sec = 9;
+  optional double sample_distance_m = 10;
+  bool healthy = 11;
+}
+
+// Canonical building permit, planning/entitlement, or code-enforcement record (`DOMAIN_PERMITS`).
+message PermitRecordProto {
+  string permit_number = 1;
+  // Canonical category: "reroof" | "new_construction" | "solar" | "hvac" | "electrical" |
+  // "plumbing" | "remodel_addition" | "seismic_foundation" | "adu" | "pool" |
+  // "demolition" | "planning" | "code_enforcement" | "other".
+  string category = 2;
+  string raw_type = 3;
+  string description = 4;
+  string address = 5;
+  string status = 6;
+  string final_date = 7;
+  string issue_date = 8;
+  string applied_date = 9;
+  optional int32 year = 10;
+  bool finaled = 11;
+  bool verified = 12;
+  bool source_verified = 13;
+  bool is_parent_lot = 14;
+  // "subject" or "parent_lot"
+  string scope = 15;
+  optional double solar_kw = 16;
+  optional uint32 solar_panels = 17;
+  optional int64 valuation_usd = 18;
+  string contractor = 19;
+  string source = 20;
+  string source_url = 21;
+  string apn = 22;
+}
+
+// Aggregated or single-source building permit & code-enforcement history (`DOMAIN_PERMITS`).
+message PermitsHistoryProto {
+  repeated PermitRecordProto permits = 1;
+  repeated string sources_checked = 2;
+  string portal_name = 3;
+  string portal_url = 4;
+  bool coverage_complete = 5;
+  repeated string queried_layers = 6;
+  optional int32 open_code_enforcement_count = 7;
+  optional int32 closed_code_enforcement_count = 8;
+  string notes = 9;
+}
+
+// Stage-2 roof lifecycle assessment derived strictly from upstream `DOMAIN_PERMITS` records (`DOMAIN_PERMIT_INTEL`).
+message RoofIntelProto {
+  // "verified_reroof" | "new_construction" | "unverified"
+  string verification_status = 1;
+  bool replacement_date_verified = 2;
+  bool reroof_verified = 3;
+  optional int32 verified_reroof_year = 4;
+  optional int32 issued_reroof_year = 5;
+  optional int32 new_construction_permit_year = 6;
+  optional int32 effective_year = 7;
+  // "verified_reroof_permit" | "issued_reroof_permit" | "new_construction_permit" | "year_built_unverified" | "unknown"
+  string effective_year_source = 8;
+  optional string material = 9;
+  // "recorded" | "unknown"
+  string material_source = 10;
+  string note = 11;
+  repeated PermitRecordProto matching_permits = 12;
+}
+
+// Stage-2 rooftop solar PV extraction derived from upstream `DOMAIN_PERMITS` records (`DOMAIN_PERMIT_INTEL`).
+message SolarIntelProto {
+  bool has_solar = 1;
+  optional double total_kw = 2;
+  optional uint32 panel_count = 3;
+  optional double estimated_annual_kwh = 4;
+  repeated PermitRecordProto permits = 5;
+  string note = 6;
+}
+
+// Stage-2 HVAC / Electrical / Plumbing systems extraction derived from `DOMAIN_PERMITS` (`DOMAIN_PERMIT_INTEL`).
+message MepIntelProto {
+  bool has_hvac_upgrade = 1;
+  bool has_electrical_upgrade = 2;
+  bool has_plumbing_upgrade = 3;
+  bool has_ev_charger = 4;
+  bool has_heat_pump = 5;
+  optional int32 latest_hvac_year = 6;
+  optional int32 latest_electrical_year = 7;
+  optional int32 latest_plumbing_year = 8;
+  repeated PermitRecordProto permits = 9;
+  string note = 10;
+}
+
+// Stage-2 remodel / addition / ADU / seismic extraction derived from `DOMAIN_PERMITS` (`DOMAIN_PERMIT_INTEL`).
+message RemodelIntelProto {
+  bool has_remodel_or_addition = 1;
+  bool has_adu_permit = 2;
+  bool has_seismic_foundation = 3;
+  bool has_pool_permit = 4;
+  optional int32 latest_remodel_year = 5;
+  optional int64 total_declared_valuation_usd = 6;
+  repeated PermitRecordProto permits = 7;
+  string note = 8;
+}
+
+// Stage-2 municipal code-enforcement extraction derived from `DOMAIN_PERMITS` (`DOMAIN_PERMIT_INTEL`).
+message CodeEnforcementIntelProto {
+  uint32 open_count = 1;
+  uint32 closed_count = 2;
+  bool has_open_violation = 3;
+  repeated PermitRecordProto cases = 4;
+  string note = 5;
+}

@@ -1,0 +1,76 @@
+syntax = "proto3";
+
+package openestate.extension.v1;
+
+import "openestate/extension/v1/domains.proto";
+import "openestate/extension/v1/extension.proto";
+
+// Deterministic multi-extension conflict resolution strategies executed by `aggregator.rs`.
+enum MergeStrategy {
+  MERGE_UNSPECIFIED = 0;
+  // Highest admin-configured `priority` wins (with provenance tier tie-break).
+  MERGE_HIGHEST_PRIORITY = 1;
+  // Highest `(geo_specificity, provenance_tier, priority)` tuple wins — e.g., municipal ZIP/city utility overrides state IOU.
+  MERGE_GEO_MOST_SPECIFIC = 2;
+  // Numeric fields combine via statistical median across independent verified sources; strings take highest-priority non-empty value.
+  MERGE_CONSENSUS_MEDIAN = 3;
+  // Collection items merge and deduplicate by canonical carrier/entity key, upgrading regional footprints when live-verified data arrives.
+  MERGE_UNION_DEDUP = 4;
+}
+
+// Per-domain aggregation policy governing how multiple `ExtensionEnvelopeProto` messages merge.
+message DomainAggregationPolicyProto {
+  CapabilityDomain domain = 1;
+  MergeStrategy strategy = 2;
+  // When true, `PROVENANCE_LIVE_VERIFIED` outranks `PROVENANCE_OFFICIAL_TARIFF` and `PROVENANCE_REGIONAL_FOOTPRINT`.
+  bool prefer_live_verified = 3;
+  // Minimum independent sources desired before computing consensus dispersion metrics.
+  uint32 min_consensus_sources = 4;
+  // Canonical deduplication key paths for `MERGE_UNION_DEDUP` (e.g., ["carrier_name", "tier_category"]).
+  repeated string dedup_key_fields = 5;
+  // Whether `PROVENANCE_REGIONAL_FOOTPRINT` entries may populate catalog options when live location APIs are unavailable.
+  bool allow_regional_footprint_fallback = 6;
+}
+
+// Audit trace recording how a specific capability domain was resolved during aggregation.
+message DomainResolutionTraceProto {
+  CapabilityDomain domain = 1;
+  MergeStrategy strategy_used = 2;
+  string winning_extension_id = 3;
+  repeated string contributing_extension_ids = 4;
+  int32 winning_geo_specificity = 5;
+  int32 winning_priority = 6;
+  ProvenanceTier winning_provenance = 7;
+  uint32 wave_index = 8;
+  repeated string skipped_extension_ids = 9;
+}
+
+// Complete aggregated, provenance-backed property intelligence bundle ready for report JSON patching
+// (`to_report_json_patch`) and 77-column `listings` shopping facet projection (`to_listing_shopping_facets`).
+message AggregatedPropertyBundleProto {
+  ExtensionQueryProto query = 1;
+  GeocodeResultProto geocode = 2;
+  PropertyFactsProto property_facts = 3;
+  ElectricUtilityProto electric_utility = 4;
+  GasUtilityProto gas_utility = 5;
+  WaterSewerTrashProto water_sewer_trash = 6;
+  BroadbandCatalogProto broadband_catalog = 7;
+  HazardSummaryProto hazard_summary = 8;
+  EnvironmentalSummaryProto environmental_summary = 9;
+  LivabilitySummaryProto livability_summary = 10;
+  MarketValuationProto market_valuation = 11;
+  InsuranceQuoteProto insurance_quote = 12;
+  TaxMandatesProto tax_mandates = 13;
+  House3dMetadataProto house_3d = 14;
+  ListingShoppingFacetsProto shopping_facets = 15;
+  repeated SourceAttributionProto attributions = 16;
+  repeated DomainResolutionTraceProto resolution_traces = 17;
+  string aggregated_at_rfc3339 = 18;
+  RoutingMatrixProto routing_matrix = 19;
+  PermitsHistoryProto permits_history = 20;
+  RoofIntelProto roof_intel = 21;
+  SolarIntelProto solar_intel = 22;
+  MepIntelProto mep_intel = 23;
+  RemodelIntelProto remodel_intel = 24;
+  CodeEnforcementIntelProto code_enforcement_intel = 25;
+}

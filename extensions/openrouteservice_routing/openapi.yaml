@@ -1,0 +1,57 @@
+openapi: "3.0.3"
+info:
+  title: "OpenRouteService Matrix API"
+  version: "2.0.0"
+  description: "OpenRouteService v2 Matrix API by HeiGIT driving-car durations and distances on OpenStreetMap road data (max 25 coordinates per request; requires OPENROUTESERVICE_API_KEY)."
+servers:
+  - url: "https://api.openrouteservice.org"
+paths:
+  /v2/matrix/driving-car:
+    post:
+      operationId: postOpenRouteServiceDrivingMatrix
+      summary: "Compute driving-car duration and distance matrices in meters and seconds."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - locations
+              properties:
+                locations:
+                  type: array
+                  items:
+                    type: array
+                    items:
+                      type: number
+                sources:
+                  type: array
+                  items:
+                    type: integer
+                destinations:
+                  type: array
+                  items:
+                    type: integer
+                metrics:
+                  type: array
+                  items:
+                    type: string
+                units:
+                  type: string
+                  default: "m"
+      security:
+        - OrsApiKey: []
+      responses:
+        "200":
+          description: "OpenRouteService v2 Matrix response"
+          content:
+            application/json:
+              schema:
+                type: object
+components:
+  securitySchemes:
+    OrsApiKey:
+      type: apiKey
+      in: header
+      name: Authorization

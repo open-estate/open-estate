@@ -1,0 +1,60 @@
+openapi: "3.0.3"
+info:
+  title: "RentCast Property Records & Valuation API"
+  version: "1.0.0"
+  description: "Nationwide US parcel characteristics, assessor tax history, active sale listings, and automated valuation API (requires RENTCAST_API_KEY)."
+servers:
+  - url: "https://api.rentcast.io/v1"
+paths:
+  /properties:
+    get:
+      operationId: getPropertyRecordByAddress
+      summary: "Retrieve non-PII parcel structural attributes, APN, zoning, and last sale history by US street address."
+      parameters:
+        - name: address
+          in: query
+          required: true
+          schema:
+            type: string
+      security:
+        - ApiKeyAuth: []
+      responses:
+        "200":
+          description: "RentCast property record array"
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+  /avm/value:
+    get:
+      operationId: getPropertyValueEstimate
+      summary: "Retrieve automated value estimate and comparable sales for a US address."
+      parameters:
+        - name: address
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: compCount
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 12
+      security:
+        - ApiKeyAuth: []
+      responses:
+        "200":
+          description: "RentCast AVM value payload"
+          content:
+            application/json:
+              schema:
+                type: object
+components:
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-Api-Key

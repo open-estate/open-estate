@@ -1,0 +1,52 @@
+extension_id: ip_geolocation
+name: "Keyless US IP Geolocation & Census ZCTA Resolver"
+version: "1.0.0"
+description: "Zero-mock US IP-to-ZIP geolocation connector combining reverse-proxy edge headers (Cloudflare, Vercel, Google Cloud), keyless IP databases (ipwho.is, FreeIPAPI, ipapi.co), and U.S. Census Bureau TIGER/Line ZCTA5 coordinate verification."
+domain: DOMAIN_GEOCODE
+driver: DRIVER_OPENAPI_YAML
+proto_message_type: openestate.extension.v1.GeocodeResultProto
+openapi_spec_file: openapi.yaml
+homepage_url: "https://ipwho.is/"
+documentation_url: "https://ipwhois.io/documentation"
+codeowners:
+  - "@openestate-core"
+default_provenance: PROVENANCE_LIVE_VERIFIED
+priority: 20
+enabled: true
+builtin: true
+cache_ttl_secs: 3600
+
+geo_scope:
+  country: "US"
+  nationwide: true
+
+auth:
+  auth_type: none
+
+rate_limit:
+  requests_per_second: 4
+  burst: 8
+  timeout_ms: 4500
+  max_retries: 1
+
+openapi_operation:
+  spec_file: openapi.yaml
+  operation_id: getSelfOrClientIpGeolocation
+  parameters:
+    fields: "ip,success,country,country_code,region,region_code,city,postal,latitude,longitude"
+
+response_mapping:
+  root_path: "$"
+  require_non_empty: true
+  fields:
+    lat: "$.latitude"
+    lon: "$.longitude"
+    city: "$.city"
+    state: "$.region_code"
+    zip: "$.postal"
+
+attribution:
+  source_name: "ipwho.is Keyless IP Geolocation + U.S. Census Bureau TIGER Geographies"
+  source_url: "https://ipwho.is/"
+  schedule_or_version: "IPv4 /24 & IPv6 /48 + Census TIGER Current_Current"
+  notes: "Falls back across ipwho.is, FreeIPAPI, and ipapi.co, then resolves exact 5-digit ZCTA5 and CBSA metro via Census geographies/coordinates. Never returns synthetic fallback ZIP codes."

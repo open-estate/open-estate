@@ -1,0 +1,353 @@
+id: us_municipal_electric
+name: "US Municipal Public Power & PUD Tariff Catalog"
+version: "1.0.0"
+description: "Published residential electric rate schedules, time-of-use tiers, monthly customer charges, and municipal solar net-metering policies for US municipal utilities and Public Utility Districts."
+domain: electric_utility
+domains:
+  - electric_utility
+driver: declarative_yaml
+proto_message_type: "openestate.extension.v1.ElectricUtilityProto"
+priority: 280
+enabled_by_default: true
+provenance: official_tariff
+homepage_url: "https://www.publicpower.org/"
+documentation_url: "https://www.eia.gov/electricity/state/"
+codeowners:
+  - "@openestate/utilities"
+geo_scope:
+  country: "US"
+  states: ["CA", "TX", "WA", "FL", "AZ", "AK", "TN"]
+auth:
+  auth_type: none
+cache_ttl_secs: 604800
+source_attribution:
+  name: "Published Municipal Electric Utility Residential Tariffs"
+  url: "https://www.publicpower.org/"
+tariff_catalog:
+  electric_rules:
+    - id: svp_santa_clara
+      geo_scope:
+        states: ["CA"]
+        cities: ["santa clara"]
+        zip_codes: ["95050", "95051", "95054", "95055"]
+      carrier_name: "Silicon Valley Power (City of Santa Clara)"
+      short_name: "Silicon Valley Power"
+      utility_type: "municipal"
+      rate_schedule: "Residential Schedule D-1"
+      rate_per_kwh_usd: 0.164
+      off_peak_kwh_usd: 0.155
+      peak_kwh_usd: 0.174
+      monthly_base_fee_usd: 4.20
+      solar_nem_policy: "Municipal Solar Net Metering (exempt from CPUC NEM 3.0)"
+      tariff_url: "https://www.siliconvalleypower.com/residents/rates-and-fees"
+      rate_source: "Silicon Valley Power Published Residential Tariff D-1"
+
+    - id: cpau_palo_alto
+      geo_scope:
+        states: ["CA"]
+        cities: ["palo alto"]
+        zip_codes: ["94301", "94303", "94304", "94306"]
+      carrier_name: "City of Palo Alto Utilities (CPAU)"
+      short_name: "Palo Alto Utilities"
+      utility_type: "municipal"
+      rate_schedule: "Residential Schedule E-1"
+      rate_per_kwh_usd: 0.228
+      off_peak_kwh_usd: 0.189
+      peak_kwh_usd: 0.278
+      monthly_base_fee_usd: 12.65
+      solar_nem_policy: "CPAU Export Electricity Program"
+      tariff_url: "https://www.cityofpaloalto.org/Departments/Utilities/Customer-Service/Utility-Rates"
+      rate_source: "City of Palo Alto Utilities Residential Rate Schedule E-1"
+
+    - id: amp_alameda
+      geo_scope:
+        states: ["CA"]
+        cities: ["alameda"]
+        zip_codes: ["94501", "94502"]
+      carrier_name: "Alameda Municipal Power (AMP)"
+      short_name: "Alameda Municipal Power"
+      utility_type: "municipal"
+      rate_schedule: "Residential Schedule D-1"
+      rate_per_kwh_usd: 0.238
+      off_peak_kwh_usd: 0.205
+      peak_kwh_usd: 0.268
+      monthly_base_fee_usd: 16.00
+      solar_nem_policy: "AMP Eligible Renewable Generation Tariff"
+      tariff_url: "https://www.alamedamp.com/195/Rates-and-Fees"
+      rate_source: "Alameda Municipal Power Published Tariff"
+
+    - id: roseville_electric
+      geo_scope:
+        states: ["CA"]
+        cities: ["roseville"]
+        zip_codes: ["95661", "95678", "95747"]
+      carrier_name: "Roseville Electric Utility"
+      short_name: "Roseville Electric"
+      utility_type: "municipal"
+      rate_schedule: "Residential Domestic Rate"
+      rate_per_kwh_usd: 0.178
+      off_peak_kwh_usd: 0.154
+      peak_kwh_usd: 0.208
+      monthly_base_fee_usd: 26.00
+      solar_nem_policy: "Roseville Solar 2.0 Export Credit"
+      tariff_url: "https://www.roseville.ca.us/government/departments/electric_utility/rates"
+      rate_source: "Roseville Electric Residential Rate Schedule"
+
+    - id: smud_sacramento
+      geo_scope:
+        states: ["CA"]
+        counties: ["06067"]
+        cities: ["sacramento", "elk grove", "folsom", "rancho cordova", "citrus heights", "carmichael", "fair oaks"]
+      carrier_name: "SMUD (Sacramento Municipal Utility District)"
+      short_name: "SMUD"
+      utility_type: "municipal"
+      rate_schedule: "Time-of-Day (5–8 p.m.) Rate R-TOD"
+      rate_per_kwh_usd: 0.185
+      off_peak_kwh_usd: 0.145
+      peak_kwh_usd: 0.348
+      monthly_base_fee_usd: 24.15
+      solar_nem_policy: "SMUD Solar & Storage Export Tariff ($0.074/kWh export + battery incentive)"
+      tariff_url: "https://www.smud.org/Rate-Information/Residential-rates"
+      rate_source: "SMUD Published Residential Time-of-Day Schedule"
+
+    - id: ladwp_los_angeles
+      geo_scope:
+        states: ["CA"]
+        cities: ["los angeles", "van nuys", "sherman oaks", "encino", "woodland hills", "north hollywood", "studio city", "san pedro", "venice"]
+      carrier_name: "LADWP (Los Angeles Dept. of Water & Power)"
+      short_name: "LADWP"
+      utility_type: "municipal"
+      rate_schedule: "Standard Residential Schedule R-1A"
+      rate_per_kwh_usd: 0.256
+      off_peak_kwh_usd: 0.214
+      peak_kwh_usd: 0.318
+      monthly_base_fee_usd: 12.00
+      solar_nem_policy: "LADWP Net Energy Metering (exempt from CPUC IOU NEM 3.0)"
+      tariff_url: "https://www.ladwp.com/account/customer-service/electric-rates"
+      rate_source: "LADWP Residential Electric Rate Schedule R-1A"
+
+    - id: pwp_pasadena
+      geo_scope:
+        states: ["CA"]
+        cities: ["pasadena"]
+      carrier_name: "Pasadena Water & Power (PWP)"
+      short_name: "Pasadena W&P"
+      utility_type: "municipal"
+      rate_schedule: "Municipal Residential Tiered / TOU"
+      rate_per_kwh_usd: 0.242
+      off_peak_kwh_usd: 0.208
+      peak_kwh_usd: 0.300
+      monthly_base_fee_usd: 11.50
+      solar_nem_policy: "Municipal Solar Billing Tariff"
+      tariff_url: "https://pwp.cityofpasadena.net/electric-rates/"
+      rate_source: "Municipal Electric Published Tariff"
+
+    - id: bwp_burbank
+      geo_scope:
+        states: ["CA"]
+        cities: ["burbank"]
+      carrier_name: "Burbank Water and Power (BWP)"
+      short_name: "Burbank W&P"
+      utility_type: "municipal"
+      rate_schedule: "Municipal Residential Tiered / TOU"
+      rate_per_kwh_usd: 0.218
+      off_peak_kwh_usd: 0.187
+      peak_kwh_usd: 0.270
+      monthly_base_fee_usd: 11.50
+      solar_nem_policy: "Municipal Solar Billing Tariff"
+      tariff_url: "https://www.burbankwaterandpower.com/electric/residential-electric-rates"
+      rate_source: "Municipal Electric Published Tariff"
+
+    - id: gwp_glendale
+      geo_scope:
+        states: ["CA"]
+        cities: ["glendale"]
+      carrier_name: "Glendale Water & Power (GWP)"
+      short_name: "Glendale W&P"
+      utility_type: "municipal"
+      rate_schedule: "Municipal Residential Tiered / TOU"
+      rate_per_kwh_usd: 0.264
+      off_peak_kwh_usd: 0.227
+      peak_kwh_usd: 0.327
+      monthly_base_fee_usd: 11.50
+      solar_nem_policy: "Municipal Solar Billing Tariff"
+      tariff_url: "https://www.glendalewaterandpower.com/"
+      rate_source: "Municipal Electric Published Tariff"
+
+    - id: apu_anaheim
+      geo_scope:
+        states: ["CA"]
+        cities: ["anaheim"]
+      carrier_name: "Anaheim Public Utilities"
+      short_name: "Anaheim Public Utilities"
+      utility_type: "municipal"
+      rate_schedule: "Municipal Residential Tiered / TOU"
+      rate_per_kwh_usd: 0.215
+      off_peak_kwh_usd: 0.185
+      peak_kwh_usd: 0.267
+      monthly_base_fee_usd: 11.50
+      solar_nem_policy: "Municipal Solar Billing Tariff"
+      tariff_url: "https://www.anaheim.net/616/Electric-Rates"
+      rate_source: "Municipal Electric Published Tariff"
+
+    - id: austin_energy
+      geo_scope:
+        states: ["TX"]
+        counties: ["48453"]
+        cities: ["austin"]
+      carrier_name: "Austin Energy (Municipal Public Power)"
+      short_name: "Austin Energy"
+      utility_type: "municipal"
+      rate_schedule: "Residential 4-Tier Rate + PSA"
+      rate_per_kwh_usd: 0.142
+      off_peak_kwh_usd: 0.112
+      peak_kwh_usd: 0.176
+      monthly_base_fee_usd: 15.00
+      solar_nem_policy: "Austin Energy Value of Solar (VoS) Credit ($0.0991/kWh)"
+      tariff_url: "https://austinenergy.com/rates/residential-rates"
+      rate_source: "Austin Energy Published Residential Tariff"
+
+    - id: cps_san_antonio
+      geo_scope:
+        states: ["TX"]
+        counties: ["48029"]
+        cities: ["san antonio"]
+      carrier_name: "CPS Energy (City of San Antonio)"
+      short_name: "CPS Energy"
+      utility_type: "municipal"
+      rate_schedule: "Residential Electric Rate PL"
+      rate_per_kwh_usd: 0.134
+      off_peak_kwh_usd: 0.118
+      peak_kwh_usd: 0.152
+      monthly_base_fee_usd: 9.50
+      solar_nem_policy: "CPS Energy Net Metering Credit"
+      tariff_url: "https://www.cpsenergy.com/en/my-home/Understanding-My-Bill.html"
+      rate_source: "CPS Energy Published Residential Schedule"
+
+    - id: seattle_city_light
+      geo_scope:
+        states: ["WA"]
+        cities: ["seattle", "shoreline", "burien", "seatac", "tukwila"]
+      carrier_name: "Seattle City Light"
+      short_name: "Seattle City Light"
+      utility_type: "municipal"
+      rate_schedule: "Residential Standard Schedule RSC (Hydro-Dominant)"
+      rate_per_kwh_usd: 0.136
+      off_peak_kwh_usd: 0.128
+      peak_kwh_usd: 0.142
+      monthly_base_fee_usd: 8.09
+      solar_nem_policy: "WA 1:1 Retail Net Metering up to 100 kW"
+      tariff_url: "https://www.seattle.gov/city-light/residential-services/billing-information/rates"
+      rate_source: "Seattle City Light Residential Schedule RSC"
+
+    - id: tacoma_power
+      geo_scope:
+        states: ["WA"]
+        cities: ["tacoma"]
+      carrier_name: "Tacoma Power"
+      short_name: "Tacoma Power"
+      utility_type: "municipal"
+      rate_schedule: "Residential Schedule A-1"
+      rate_per_kwh_usd: 0.112
+      off_peak_kwh_usd: 0.105
+      peak_kwh_usd: 0.118
+      monthly_base_fee_usd: 22.50
+      solar_nem_policy: "WA 1:1 Retail Net Metering"
+      tariff_url: "https://www.mytpu.org/payment-billing/rate-information/power-rates/"
+      rate_source: "Tacoma Power Schedule A-1"
+
+    - id: snohomish_pud
+      geo_scope:
+        states: ["WA"]
+        counties: ["53061"]
+        cities: ["everett", "lynnwood", "edmonds", "marysville"]
+      carrier_name: "Snohomish County PUD"
+      short_name: "Snohomish PUD"
+      utility_type: "coop"
+      rate_schedule: "Residential Schedule 7"
+      rate_per_kwh_usd: 0.116
+      off_peak_kwh_usd: 0.108
+      peak_kwh_usd: 0.124
+      monthly_base_fee_usd: 20.00
+      solar_nem_policy: "WA 1:1 Retail Net Metering"
+      tariff_url: "https://www.snopud.com/account/rates/"
+      rate_source: "Snohomish County PUD Schedule 7"
+
+    - id: jea_jacksonville
+      geo_scope:
+        states: ["FL"]
+        counties: ["12031"]
+        cities: ["jacksonville"]
+      carrier_name: "JEA (Jacksonville Municipal Utility)"
+      short_name: "JEA"
+      utility_type: "municipal"
+      rate_schedule: "Residential Rate RS"
+      rate_per_kwh_usd: 0.138
+      off_peak_kwh_usd: 0.132
+      peak_kwh_usd: 0.145
+      monthly_base_fee_usd: 15.00
+      solar_nem_policy: "JEA Distributed Generation Credit"
+      tariff_url: "https://www.jea.com/Residential_Customers/Electric_Rates/"
+      rate_source: "JEA Published Electric Rates"
+
+    - id: ouc_orlando
+      geo_scope:
+        states: ["FL"]
+        cities: ["orlando"]
+      carrier_name: "OUC (Orlando Utilities Commission)"
+      short_name: "OUC"
+      utility_type: "municipal"
+      rate_schedule: "Residential Electric Service"
+      rate_per_kwh_usd: 0.142
+      off_peak_kwh_usd: 0.132
+      peak_kwh_usd: 0.155
+      monthly_base_fee_usd: 15.00
+      solar_nem_policy: "OUC Retail Net Metering"
+      tariff_url: "https://www.ouc.com/residential/service-rates-and-fees"
+      rate_source: "OUC Published Residential Tariff"
+
+    - id: srp_arizona
+      geo_scope:
+        states: ["AZ"]
+        cities: ["tempe", "mesa", "chandler", "gilbert"]
+      carrier_name: "Salt River Project (SRP)"
+      short_name: "SRP"
+      utility_type: "municipal"
+      rate_schedule: "SRP Basic / Time-of-Use E-23"
+      rate_per_kwh_usd: 0.148
+      off_peak_kwh_usd: 0.126
+      peak_kwh_usd: 0.185
+      monthly_base_fee_usd: 14.00
+      solar_nem_policy: "State Net Metering / Distributed Generation Schedule"
+      tariff_url: "https://www.srpnet.com/price-plans/residential-electric"
+      rate_source: "Published Municipal Utility Residential Tariff Reference"
+
+    - id: chugach_alaska
+      geo_scope:
+        states: ["AK"]
+      carrier_name: "Chugach Electric / Alaska Electric Utility"
+      short_name: "Chugach Electric"
+      utility_type: "coop"
+      rate_schedule: "Residential Rate Schedule"
+      rate_per_kwh_usd: 0.252
+      off_peak_kwh_usd: 0.214
+      peak_kwh_usd: 0.315
+      monthly_base_fee_usd: 14.00
+      solar_nem_policy: "State Net Metering / Distributed Generation Schedule"
+      tariff_url: "https://www.chugachelectric.com/"
+      rate_source: "Published Municipal Utility Residential Tariff Reference"
+
+    - id: tva_tennessee
+      geo_scope:
+        states: ["TN"]
+      carrier_name: "TVA Local Power Company (NES / EPB / MLGW / KUB)"
+      short_name: "TVA Local Utility"
+      utility_type: "municipal"
+      rate_schedule: "TVA Residential Rate Schedule RS"
+      rate_per_kwh_usd: 0.132
+      off_peak_kwh_usd: 0.112
+      peak_kwh_usd: 0.165
+      monthly_base_fee_usd: 14.00
+      solar_nem_policy: "State Net Metering / Distributed Generation Schedule"
+      tariff_url: "https://www.tva.com/"
+      rate_source: "Published Municipal Utility Residential Tariff Reference"

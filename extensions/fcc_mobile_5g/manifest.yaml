@@ -1,0 +1,55 @@
+id: fcc_mobile_5g
+name: "FCC Broadband Data Collection — 5G-NR & 4G LTE Mobile Coverage"
+version: "1.0.0"
+description: "Federal Communications Commission Broadband Data Collection (BDC) mobile wireless 5G-NR (35/3 Mbps & 7/1 Mbps) and 4G LTE (5/1 Mbps) outdoor/in-vehicle coverage lookup across Verizon, AT&T, and T-Mobile."
+domain: broadband
+domains:
+  - broadband
+  - livability
+driver: declarative_yaml
+proto_message_type: "openestate.extension.v1.BroadbandCatalogProto"
+priority: 220
+enabled_by_default: true
+builtin: true
+provenance: live_verified
+homepage_url: "https://broadbandmap.fcc.gov/"
+documentation_url: "https://www.fcc.gov/BroadbandData"
+codeowners:
+  - "@openestate/connectivity"
+geo_scope:
+  country: "US"
+  nationwide: true
+  states: []
+  counties: []
+  zip_prefixes: []
+  zip_codes: []
+  cities: []
+auth:
+  auth_type: none
+rate_limit:
+  requests_per_second: 3
+  burst: 6
+  timeout_ms: 2500
+  max_retries: 0
+cache_ttl_secs: 604800
+source_attribution:
+  name: "FCC National Broadband Map — Mobile Wireless Broadband Data Collection (BDC)"
+  url: "https://broadbandmap.fcc.gov/"
+  schedule_or_version: "FCC BDC Semi-Annual Mobile Wireless Availability"
+  notes: "Evaluates 5G-NR (500) and 4G LTE (400) carrier hexagons; public map JSON endpoint may return HTTP 405 without interactive session, in which case mobile 5G coverage reports unverified with zero fabricated carriers."
+request:
+  method: "GET"
+  url: "https://broadbandmap.fcc.gov/api/public/map/listAvailableMobileProvidersByLocation"
+  query_params:
+    latitude: "{{ lat }}"
+    longitude: "{{ lon }}"
+response_mapping:
+  items_path: "$.data[*]"
+  require_non_empty: true
+  fields:
+    carrier_name: "$.brand_name"
+    fallback_carrier_name: "$.holding_company_name"
+    technology_code: "$.technology_code"
+    technology_desc: "$.technology_code_desc"
+    max_download_mbps: "$.mindown"
+    max_upload_mbps: "$.minup"

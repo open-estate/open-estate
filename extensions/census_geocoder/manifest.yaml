@@ -1,0 +1,59 @@
+id: census_geocoder
+name: "U.S. Census Geocoder (TIGER/Line)"
+version: "1.0.0"
+description: "Official keyless U.S. Census Bureau geocoder resolving street addresses to WGS84 coordinates, state/county/tract/block FIPS, ZCTA, CBSA, and school districts."
+domain: geocode
+domains:
+  - geocode
+driver: openapi_yaml
+proto_message_type: "openestate.extension.v1.GeocodeResultProto"
+priority: 250
+enabled_by_default: true
+provenance: live_verified
+homepage_url: "https://geocoding.geo.census.gov/"
+documentation_url: "https://geocoding.geo.census.gov/geocoder/Geocoding_Services_API.html"
+codeowners:
+  - "@openestate/core"
+geo_scope:
+  country: "US"
+  nationwide: true
+  states: []
+  counties: []
+  zip_prefixes: []
+  zip_codes: []
+  cities: []
+auth:
+  auth_type: none
+rate_limit:
+  requests_per_second: 5
+  burst: 10
+  timeout_ms: 12000
+cache_ttl_secs: 1209600
+source_attribution:
+  name: "U.S. Census Bureau Geocoder (Public_AR_Current / Current_Current)"
+  url: "https://geocoding.geo.census.gov/"
+openapi:
+  spec_file: "openapi.yaml"
+  operation_id: "geocodeOnelineAddress"
+  query_params:
+    address: "{{ address }}"
+    benchmark: "Public_AR_Current"
+    vintage: "Current_Current"
+    layers: "all"
+    format: "json"
+response_mapping:
+  root_path: "$.result.addressMatches[0]"
+  require_non_empty: true
+  fields:
+    matched_address: "$.matchedAddress"
+    lat: "$.coordinates.y"
+    lon: "$.coordinates.x"
+    state: "$.addressComponents.state"
+    city: "$.addressComponents.city"
+    zip: "$.addressComponents.zip"
+    county_fips: "$.geographies.Counties[0].GEOID"
+    county_name: "$.geographies.Counties[0].NAME"
+    state_fips: "$.geographies.States[0].GEOID"
+    census_tract: "$.geographies['Census Tracts'][0].GEOID"
+    block_group: "$.geographies['Census Block Groups'][0].GEOID"
+    school_district_name: "$.geographies['Unified School Districts'][0].NAME"

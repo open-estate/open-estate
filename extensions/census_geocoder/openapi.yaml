@@ -1,0 +1,89 @@
+openapi: "3.0.3"
+info:
+  title: "U.S. Census Bureau Geocoder API"
+  version: "1.0.0"
+  description: "Official keyless U.S. Census TIGER/Line geocoding and geography lookup service."
+servers:
+  - url: "https://geocoding.geo.census.gov/geocoder"
+paths:
+  /geographies/onelineaddress:
+    get:
+      operationId: geocodeOnelineAddress
+      summary: "Resolve a one-line US street address to WGS84 coordinates and Census TIGER geographies."
+      parameters:
+        - name: address
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: benchmark
+          in: query
+          required: true
+          schema:
+            type: string
+            default: "Public_AR_Current"
+        - name: vintage
+          in: query
+          required: true
+          schema:
+            type: string
+            default: "Current_Current"
+        - name: layers
+          in: query
+          required: false
+          schema:
+            type: string
+            default: "all"
+        - name: format
+          in: query
+          required: true
+          schema:
+            type: string
+            default: "json"
+      responses:
+        "200":
+          description: "Census Geocoder JSON match payload"
+          content:
+            application/json:
+              schema:
+                type: object
+  /geographies/coordinates:
+    get:
+      operationId: geographiesByCoordinates
+      summary: "Resolve WGS84 longitude/latitude to Census state, county, tract, block, and school districts."
+      parameters:
+        - name: x
+          in: query
+          required: true
+          schema:
+            type: number
+        - name: y
+          in: query
+          required: true
+          schema:
+            type: number
+        - name: benchmark
+          in: query
+          required: true
+          schema:
+            type: string
+            default: "Public_AR_Current"
+        - name: vintage
+          in: query
+          required: true
+          schema:
+            type: string
+            default: "Current_Current"
+        - name: format
+          in: query
+          required: true
+          schema:
+            type: string
+            default: "json"
+      responses:
+        "200":
+          description: "Census TIGER geographies payload"
+          content:
+            application/json:
+              schema:
+                type: object

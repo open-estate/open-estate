@@ -1,0 +1,88 @@
+id: us_deregulated_electric
+name: "US Deregulated Retail Choice Electric Tariffs (ERCOT / PJM)"
+version: "1.0.0"
+description: "Published Transmission & Distribution Utility (TDU/EDC) + Competitive Retail Electric benchmark schedules for ERCOT Texas, Pennsylvania Power Switch, and Ohio Energy Choice territories."
+domain: electric_utility
+domains:
+  - electric_utility
+driver: declarative_yaml
+proto_message_type: "openestate.extension.v1.ElectricUtilityProto"
+priority: 210
+enabled_by_default: true
+provenance: official_tariff
+homepage_url: "https://www.powertochoose.org/"
+documentation_url: "https://www.eia.gov/electricity/state/"
+codeowners:
+  - "@openestate/utilities"
+geo_scope:
+  country: "US"
+  states: ["TX", "PA", "OH"]
+auth:
+  auth_type: none
+cache_ttl_secs: 604800
+source_attribution:
+  name: "PUCT PowerToChoose / PA Power Switch / PUCO Energy Choice Published Benchmarks"
+  url: "https://www.powertochoose.org/"
+tariff_catalog:
+  electric_rules:
+    - id: centerpoint_ercot_houston
+      geo_scope:
+        states: ["TX"]
+        counties: ["48201", "48157", "48039", "48167"]
+        cities: ["houston", "katy", "sugar land", "pearland", "pasadena", "league city"]
+      carrier_name: "CenterPoint Energy (TDU) + ERCOT Retail Choice"
+      short_name: "CenterPoint + ERCOT Choice"
+      utility_type: "deregulated_choice"
+      rate_schedule: "12-Mo Fixed Retail Electric Plan (TXU / Octopus / Rhythm / Reliant)"
+      rate_per_kwh_usd: 0.159
+      off_peak_kwh_usd: 0.142
+      peak_kwh_usd: 0.178
+      monthly_base_fee_usd: 4.39
+      solar_nem_policy: "Retail Solar Buyback Plan (select REP with 1:1 or RTW export credit)"
+      tariff_url: "https://www.powertochoose.org/"
+      rate_source: "PUCT PowerToChoose Houston CenterPoint 1,000 kWh Benchmark"
+
+    - id: oncor_ercot_texas
+      geo_scope:
+        states: ["TX"]
+      carrier_name: "Oncor Electric Delivery (TDU) + ERCOT Retail Choice"
+      short_name: "Oncor + ERCOT Choice"
+      utility_type: "deregulated_choice"
+      rate_schedule: "12-Mo Fixed Retail Electric Plan (Compare on PowerToChoose.org)"
+      rate_per_kwh_usd: 0.156
+      off_peak_kwh_usd: 0.138
+      peak_kwh_usd: 0.175
+      monthly_base_fee_usd: 4.23
+      solar_nem_policy: "Retail Solar Buyback Plan (select REP offering solar export credits)"
+      tariff_url: "https://www.powertochoose.org/"
+      rate_source: "PUCT PowerToChoose Oncor North/Central TX 1,000 kWh Benchmark"
+
+    - id: pa_power_switch
+      geo_scope:
+        states: ["PA"]
+      carrier_name: "PECO / PPL / Duquesne Light (+ PA Power Switch Choice)"
+      short_name: "PECO / PPL"
+      utility_type: "deregulated_choice"
+      rate_schedule: "Residential Rate R + Retail Supplier Choice"
+      rate_per_kwh_usd: 0.192
+      off_peak_kwh_usd: 0.163
+      peak_kwh_usd: 0.240
+      monthly_base_fee_usd: 14.00
+      solar_nem_policy: "State Net Metering / Distributed Generation Schedule"
+      tariff_url: "https://www.papowerswitch.com/"
+      rate_source: "Retail Choice State Switch Portal Benchmark"
+
+    - id: oh_energy_choice
+      geo_scope:
+        states: ["OH"]
+      carrier_name: "AEP Ohio / Duke Energy OH / FirstEnergy (+ PUCO Choice)"
+      short_name: "AEP / Duke OH"
+      utility_type: "deregulated_choice"
+      rate_schedule: "Residential Standard Choice Offer"
+      rate_per_kwh_usd: 0.164
+      off_peak_kwh_usd: 0.139
+      peak_kwh_usd: 0.205
+      monthly_base_fee_usd: 14.00
+      solar_nem_policy: "State Net Metering / Distributed Generation Schedule"
+      tariff_url: "https://energychoice.ohio.gov/"
+      rate_source: "Retail Choice State Switch Portal Benchmark"

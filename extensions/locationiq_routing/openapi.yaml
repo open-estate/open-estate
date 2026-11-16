@@ -1,0 +1,49 @@
+openapi: "3.0.3"
+info:
+  title: "LocationIQ Matrix API"
+  version: "1.0.0"
+  description: "LocationIQ Matrix API v1 driving durations and distances on OpenStreetMap road data (max 25 coordinates per request; requires LOCATIONIQ_API_KEY)."
+servers:
+  - url: "https://us1.locationiq.com"
+paths:
+  /v1/matrix/driving/{coordinates}:
+    get:
+      operationId: getLocationIqDrivingMatrix
+      summary: "Compute driving duration and distance matrices between origin and destination coordinates."
+      parameters:
+        - name: coordinates
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: sources
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: destinations
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: annotations
+          in: query
+          required: false
+          schema:
+            type: string
+            default: "duration,distance"
+      security:
+        - LocationIqApiKey: []
+      responses:
+        "200":
+          description: "LocationIQ Matrix response"
+          content:
+            application/json:
+              schema:
+                type: object
+components:
+  securitySchemes:
+    LocationIqApiKey:
+      type: apiKey
+      in: query
+      name: key

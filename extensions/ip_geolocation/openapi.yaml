@@ -1,0 +1,92 @@
+openapi: "3.0.3"
+info:
+  title: "Keyless IP Geolocation Service API (ipwho.is)"
+  version: "1.0.0"
+  description: "Keyless HTTPS IPv4/IPv6 geolocation endpoint resolving public client IPs or self-hosted server egress IPs to ISO country, USPS state, city, WGS84 coordinates, and postal code."
+servers:
+  - url: "https://ipwho.is"
+    description: "Primary keyless JSON IP geolocation endpoint"
+  - url: "https://freeipapi.com/api/json"
+    description: "Secondary keyless IP geolocation endpoint"
+  - url: "https://ipapi.co"
+    description: "Tertiary keyless IP geolocation endpoint"
+paths:
+  /:
+    get:
+      operationId: getSelfOrClientIpGeolocation
+      summary: "Geolocate the caller's current public egress IP address."
+      parameters:
+        - name: fields
+          in: query
+          required: false
+          description: "Comma-separated subset of response fields to return."
+          schema:
+            type: string
+            default: "ip,success,country,country_code,region,region_code,city,postal,latitude,longitude"
+      responses:
+        "200":
+          description: "IP geolocation JSON payload"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IpWhoisResponse"
+  /{ip}:
+    get:
+      operationId: getIpGeolocationByAddress
+      summary: "Geolocate a specific public routable IPv4 or IPv6 address."
+      parameters:
+        - name: ip
+          in: path
+          required: true
+          description: "Public routable IPv4 or IPv6 address."
+          schema:
+            type: string
+        - name: fields
+          in: query
+          required: false
+          description: "Comma-separated subset of response fields to return."
+          schema:
+            type: string
+            default: "ip,success,country,country_code,region,region_code,city,postal,latitude,longitude"
+      responses:
+        "200":
+          description: "IP geolocation JSON payload"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IpWhoisResponse"
+components:
+  schemas:
+    IpWhoisResponse:
+      type: object
+      properties:
+        ip:
+          type: string
+        success:
+          type: boolean
+        country:
+          type: string
+          nullable: true
+        country_code:
+          type: string
+          nullable: true
+        region:
+          type: string
+          nullable: true
+        region_code:
+          type: string
+          nullable: true
+        city:
+          type: string
+          nullable: true
+        postal:
+          type: string
+          nullable: true
+        latitude:
+          type: number
+          format: double
+          nullable: true
+        longitude:
+          type: number
+          format: double
+          nullable: true

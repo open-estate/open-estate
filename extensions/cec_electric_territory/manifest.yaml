@@ -1,0 +1,31 @@
+id: cec_electric_territory
+name: "CA CEC Electric Load Serving Entities & CCAs"
+version: "1.0.0"
+description: "Queries California Energy Commission Electric Load Serving Entities (IOU/POU) and Community Choice Aggregator (CCA) polygon feature services at parcel coordinates."
+domain: electric_utility
+domains:
+  - electric_utility
+driver: native_adapter
+proto_message_type: "openestate.extension.v1.ElectricUtilityProto"
+priority: 320
+enabled_by_default: true
+builtin: true
+provenance: live_verified
+homepage_url: "https://www.energy.ca.gov/"
+documentation_url: "https://services3.arcgis.com/bWPjFyq029ChCGur/arcgis/rest/services/ElectricLoadServingEntities_IOU_POU/FeatureServer/0"
+codeowners:
+  - "@openestate/utilities"
+geo_scope:
+  country: "US"
+  states: ["CA"]
+auth:
+  auth_type: none
+rate_limit:
+  requests_per_second: 5
+  burst: 10
+  timeout_ms: 6000
+  max_retries: 1
+cache_ttl_secs: 86400
+source_attribution:
+  name: "California Energy Commission (CEC) Electric Service Territories"
+  url: "https://services3.arcgis.com/bWPjFyq029ChCGur/arcgis/rest/services/ElectricLoadServingEntities_IOU_POU/FeatureServer/0"

@@ -1,0 +1,32 @@
+id: sjwater_live_tariffs
+name: "San Jose Water Live CPUC Schedule 1 & Retail SWRCB Boundary"
+version: "1.0.0"
+description: "Resolves retail drinking-water boundary (filtering out wholesalers such as CA4310027) and parses current San Jose Water Schedule 1 meter & tiered CCF tariffs."
+domain: water_sewer_trash
+domains:
+  - water_sewer_trash
+driver: native_adapter
+proto_message_type: "openestate.extension.v1.WaterSewerTrashProto"
+priority: 350
+enabled_by_default: true
+builtin: true
+provenance: official_tariff
+homepage_url: "https://www.sjwater.com/"
+documentation_url: "https://www.sjwater.com/2026-rates/"
+codeowners:
+  - "@openestate/utilities"
+geo_scope:
+  country: "US"
+  states: ["CA"]
+  counties: ["06085"]
+auth:
+  auth_type: none
+rate_limit:
+  requests_per_second: 4
+  burst: 8
+  timeout_ms: 8000
+  max_retries: 1
+cache_ttl_secs: 21600
+source_attribution:
+  name: "San Jose Water CPUC Schedule 1 & CA SWRCB Drinking Water Boundaries"
+  url: "https://www.sjwater.com/2026-rates/"

@@ -1,0 +1,67 @@
+openapi: "3.0.3"
+info:
+  title: "US EPA Community Water System Service Area Boundaries (SDWIS)"
+  version: "1.0.0"
+  description: "EPA Safe Drinking Water Information System (SDWIS) Community Water System service territory FeatureServer."
+servers:
+  - url: "https://services.arcgis.com/cJ9YHowT8TU7DUyn/ArcGIS/rest/services/Water_System_Boundaries/FeatureServer"
+paths:
+  /0/query:
+    get:
+      operationId: queryWaterSystemByPoint
+      summary: "Resolve public community water system PWSID and agency name serving a parcel coordinate."
+      parameters:
+        - name: geometry
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: geometryType
+          in: query
+          required: true
+          schema:
+            type: string
+            default: "esriGeometryPoint"
+        - name: inSR
+          in: query
+          required: true
+          schema:
+            type: string
+            default: "4326"
+        - name: spatialRel
+          in: query
+          required: true
+          schema:
+            type: string
+            default: "esriSpatialRelIntersects"
+        - name: where
+          in: query
+          required: false
+          schema:
+            type: string
+            default: "Service_Area_Type <> 'Wholesaler of Water'"
+        - name: outFields
+          in: query
+          required: true
+          schema:
+            type: string
+            default: "PWSID,PWS_Name,Population_Served_Count,Service_Connections_Count,Service_Area_Type"
+        - name: returnGeometry
+          in: query
+          required: true
+          schema:
+            type: string
+            default: "false"
+        - name: f
+          in: query
+          required: true
+          schema:
+            type: string
+            default: "json"
+      responses:
+        "200":
+          description: "EPA SDWIS water system boundary attributes"
+          content:
+            application/json:
+              schema:
+                type: object

@@ -1,0 +1,35 @@
+id: openei_urdb_tariffs
+name: "OpenEI US Utility Rate Database (URDB v7)"
+version: "1.0.0"
+description: "Queries NREL/OpenEI Utility Rate Database v7 (/utility_rates?version=7) at parcel lat/lon for exact residential electric rate schedules and fixed charges."
+domain: electric_utility
+domains:
+  - electric_utility
+driver: native_adapter
+proto_message_type: "openestate.extension.v1.ElectricUtilityProto"
+priority: 330
+enabled_by_default: true
+builtin: true
+provenance: official_tariff
+homepage_url: "https://openei.org/apps/USURDB/"
+documentation_url: "https://api.openei.org/utility_rates"
+codeowners:
+  - "@openestate/utilities"
+geo_scope:
+  country: "US"
+  nationwide: true
+  states: []
+auth:
+  auth_type: api_key_query
+  query_param: "api_key"
+  env_var: "OPENEI_API_KEY"
+  optional_key: true
+rate_limit:
+  requests_per_second: 3
+  burst: 6
+  timeout_ms: 6000
+  max_retries: 1
+cache_ttl_secs: 86400
+source_attribution:
+  name: "NREL / US DOE OpenEI Utility Rate Database (URDB v7)"
+  url: "https://openei.org/apps/USURDB/"

@@ -1,0 +1,53 @@
+id: court_litigation_dockets
+name: "CourtListener RECAP Federal Civil & Bankruptcy Docket Radar"
+version: "1.0.0"
+description: "Free Law Project CourtListener REST API v4 RECAP federal civil and bankruptcy docket search by exact property street address and city (requires COURTLISTENER_API_TOKEN)."
+domain: property_facts
+domains:
+  - property_facts
+driver: declarative_yaml
+proto_message_type: "openestate.extension.v1.PropertyFactsProto"
+priority: 205
+enabled_by_default: true
+builtin: true
+provenance: live_verified
+homepage_url: "https://www.courtlistener.com/help/api/rest/v4/"
+documentation_url: "https://www.courtlistener.com/api/rest/v4/search/"
+codeowners:
+  - "@openestate/core"
+geo_scope:
+  country: "US"
+  nationwide: true
+  states: []
+  counties: []
+  zip_prefixes: []
+  zip_codes: []
+  cities: []
+auth:
+  auth_type: api_key_header
+  env_var: "COURTLISTENER_API_TOKEN"
+  header_name: "Authorization"
+  header_prefix: "Token "
+  optional_key: true
+rate_limit:
+  requests_per_second: 3
+  burst: 6
+  timeout_ms: 4000
+  max_retries: 0
+cache_ttl_secs: 86400
+source_attribution:
+  name: "Free Law Project — CourtListener REST API v4 (RECAP Federal Dockets)"
+  url: "https://www.courtlistener.com/api/rest/v4/search/"
+  schedule_or_version: "CourtListener REST API v4 (type=r RECAP Dockets)"
+  notes: "Requires COURTLISTENER_API_TOKEN; scrubs all natural-person plaintiff/defendant/debtor names from docket titles prior to storage or rendering."
+request:
+  method: "GET"
+  url: "https://www.courtlistener.com/api/rest/v4/search/"
+  query_params:
+    type: "r"
+    q: "\"{{ street }}\" \"{{ city }}\""
+response_mapping:
+  root_path: "$.results[0]"
+  require_non_empty: true
+  fields:
+    matched_address: "$.caseName"

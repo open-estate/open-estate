@@ -1,0 +1,51 @@
+id: fema_nfhl
+name: "FEMA National Flood Hazard Layer (NFHL)"
+version: "1.0.0"
+description: "Keyless FEMA NFHL MapServer Layer 28 query resolving regulatory Special Flood Hazard Area (SFHA) status, flood zone code, zone subtype, and static base flood elevation."
+domain: natural_hazards
+domains:
+  - natural_hazards
+driver: openapi_yaml
+proto_message_type: "openestate.extension.v1.HazardSummaryProto"
+priority: 240
+enabled_by_default: true
+provenance: live_verified
+homepage_url: "https://msc.fema.gov/"
+documentation_url: "https://hazards.fema.gov/arcgis/rest/services/public/NFHL/MapServer/28"
+codeowners:
+  - "@openestate/core"
+geo_scope:
+  country: "US"
+  nationwide: true
+  states: []
+  counties: []
+  zip_prefixes: []
+  zip_codes: []
+  cities: []
+auth:
+  auth_type: none
+rate_limit:
+  requests_per_second: 4
+  burst: 8
+  timeout_ms: 8000
+cache_ttl_secs: 604800
+source_attribution:
+  name: "FEMA National Flood Hazard Layer (NFHL) — Flood Hazard Zones"
+  url: "https://hazards.fema.gov/arcgis/rest/services/public/NFHL/MapServer/28"
+openapi:
+  spec_file: "openapi.yaml"
+  operation_id: "queryNfhlFloodZone"
+  query_params:
+    geometry: "{{ lon }},{{ lat }}"
+    geometryType: "esriGeometryPoint"
+    inSR: "4326"
+    spatialRel: "esriSpatialRelIntersects"
+    outFields: "FLD_ZONE,ZONE_SUBTY,SFHA_TF,STATIC_BFE"
+    returnGeometry: "false"
+    f: "json"
+response_mapping:
+  root_path: "$.features[0].attributes"
+  require_non_empty: true
+  fields:
+    fema_flood_zone: "$.FLD_ZONE"
+    in_sfha: "$.SFHA_TF"
