@@ -2331,8 +2331,8 @@ fn query_openei_urdb_rate_with_db<'a>(
                 carrier_name: utility.clone(),
                 rate_schedule: sched_name.clone(),
                 rate_per_kwh_usd: Some(avg),
-                off_peak_kwh_usd: Some(round_n(avg * 0.90, 3)),
-                peak_kwh_usd: Some(round_n(avg * 1.15, 3)),
+                off_peak_kwh_usd: None,
+                peak_kwh_usd: None,
                 rate_per_therm_usd: None,
                 volumetric_water_rate_usd: None,
                 water_rate_unit: None,
@@ -2823,8 +2823,8 @@ fn resolve_live_electric_with_db<'a>(
                 cca_url: cec_cca.and_then(|(_, u)| u),
                 rate_schedule: sched,
                 rate_per_kwh_usd: rate,
-                off_peak_kwh_usd: round_n(rate * 0.90, 3),
-                peak_kwh_usd: round_n(rate * 1.15, 3),
+                off_peak_kwh_usd: 0.0,
+                peak_kwh_usd: 0.0,
                 monthly_base_fee_usd: fixed_mo,
                 solar_nem_policy:
                     "Verify utility net metering / net billing tariff on current schedule"
@@ -2875,13 +2875,13 @@ fn resolve_live_electric_with_db<'a>(
                 cca_url: cec_cca.and_then(|(_, u)| u),
                 rate_schedule: format!("Utility EIA-861 Residential Average (${rate_usd:.4}/kWh)"),
                 rate_per_kwh_usd: rate_usd,
-                off_peak_kwh_usd: round_n(rate_usd * 0.90, 3),
-                peak_kwh_usd: round_n(rate_usd * 1.15, 3),
-                monthly_base_fee_usd: 12.0,
+                off_peak_kwh_usd: 0.0,
+                peak_kwh_usd: 0.0,
+                monthly_base_fee_usd: 0.0,
                 solar_nem_policy: "Check utility net billing / net metering policy".to_string(),
                 tariff_url,
                 rate_source: src.to_string(),
-                is_live_verified: true,
+                is_live_verified: false,
                 provenance_label: "live_eia861_territory".to_string(),
             });
         }
@@ -2932,11 +2932,11 @@ fn resolve_live_gas_with_db<'a>(
                 heating_fuel_norm: "natural_gas".to_string(),
                 rate_schedule: format!("EIA Monthly State Residential Gas Rate ({period})"),
                 rate_per_therm_usd: Some(rate_therm),
-                monthly_base_fee_usd: 12.0,
+                monthly_base_fee_usd: 0.0,
                 tariff_url: web_opt
                     .unwrap_or_else(|| "https://www.eia.gov/naturalgas/data.php".to_string()),
                 rate_source: format!("HIFLD/CEC Gas Territory + EIA API v2 ({period})"),
-                is_live_verified: true,
+                is_live_verified: false,
                 provenance_label: "live_eia_state_utility".to_string(),
             });
         }
@@ -2966,11 +2966,11 @@ fn resolve_live_gas_with_db<'a>(
             heating_fuel_norm: "natural_gas".to_string(),
             rate_schedule: "HIFLD / EIA-176 Residential LDC Rate".to_string(),
             rate_per_therm_usd: Some(hifld_therm),
-            monthly_base_fee_usd: 12.0,
+            monthly_base_fee_usd: 0.0,
             tariff_url: web_opt.unwrap_or_else(|| HIFLD_GAS_LDC_URL.to_string()),
             rate_source: "HIFLD Natural Gas LDC Service Territories (EIA-176 RES_PRICE)"
                 .to_string(),
-            is_live_verified: true,
+            is_live_verified: false,
             provenance_label: "live_hifld_eia176_utility".to_string(),
         })
     }
@@ -3557,8 +3557,8 @@ impl DataExtensionAdapter for OpenEiUrdbTariffsAdapter {
                 cca_program: None,
                 rate_schedule: sched,
                 rate_per_kwh_usd: rate,
-                off_peak_kwh_usd: round_n(rate * 0.90, 3),
-                peak_kwh_usd: round_n(rate * 1.15, 3),
+                off_peak_kwh_usd: 0.0,
+                peak_kwh_usd: 0.0,
                 monthly_base_fee_usd: fixed,
                 solar_nem_policy: "Verify net billing policy on utility tariff sheet".to_string(),
                 tariff_url: uri.clone(),

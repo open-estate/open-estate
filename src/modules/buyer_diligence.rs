@@ -1604,7 +1604,7 @@ fn state_sos_business_search_url(state: &str) -> (&'static str, &'static str) {
         ),
         _ => (
             "National Association of Secretaries of State — Corporate Registry Directory",
-            "https://www.nass.org/business-services/corporate-registrations",
+            "https://www.nass.org/",
         ),
     }
 }
@@ -1875,8 +1875,8 @@ fn build_hoa_funding_and_board(
                 "codeCitation": "Fla. Stat. §§ 720.303, 720.30851",
                 "applicability": "Florida mandatory SFR / PUD HOAs",
                 "summary": "Governs annual HOA budgets, reserve account disclosures, member inspection of official records within 10 business days, and binding estoppel certificates capping closing arrears.",
-                "sourceName": "Florida Senate Statutes — Chapter 720",
-                "sourceUrl": "https://www.flsenate.gov/Laws/Statutes/2024/Chapter720#:~:text=720.303",
+                "sourceName": "Florida Senate Statutes — § 720.303",
+                "sourceUrl": "https://www.flsenate.gov/Laws/Statutes/2024/0720.303",
             }));
         }
     } else if ctx.state == "WA" && (has_hoa || is_attached) {
@@ -1921,8 +1921,7 @@ fn build_hoa_funding_and_board(
     if let Some(assoc) = association_name {
         let q_enc: String = url::form_urlencoded::byte_serialize(assoc.as_bytes()).collect();
         let pp_search = format!(
-            "https://projects.propublica.org/nonprofits/search?q={q_enc}#:~:text={}",
-            encode_text_fragment(assoc)
+            "https://projects.propublica.org/nonprofits/search?q={q_enc}"
         );
         registry_links.push(json!({
             "name": format!("ProPublica IRS Form 990 Search — {assoc}"),
@@ -1947,7 +1946,7 @@ fn build_hoa_funding_and_board(
         registry_links.push(json!({
             "name": "Colorado DORA HOA Information & Resource Center Registry",
             "category": "State HOA Regulatory Registry",
-            "sourceUrl": "https://dre.colorado.gov/hoa-information-and-resource-center",
+            "sourceUrl": "https://dre.colorado.gov/hoa-center",
         }));
     }
     if ctx.state == "NV" && (has_hoa || is_attached) {
@@ -4003,6 +4002,10 @@ fn build_connectivity(ctx: &ReportContext, live_bb_opt: Option<&LiveBroadbandChe
         // Strictly refuse unverified fiber headlines or fabricated speeds when address checks didn't confirm service
         broadband_catalog.fiber_available = false;
         broadband_catalog.fiber_confirmed_fcc = false;
+        broadband_catalog.high_speed_available = false;
+        broadband_catalog.max_download_mbps = 0;
+        broadband_catalog.max_upload_mbps = 0;
+        broadband_catalog.est_monthly_internet_usd = 0;
         broadband_catalog.verification_status = "unverified".to_string();
         broadband_catalog.fiber_carriers.clear();
         if broadband_catalog.internet_tier == "fiber_area" {
@@ -4834,7 +4837,7 @@ fn build_post_closing_and_climate(ctx: &ReportContext, has_hoa: bool) -> Value {
                 "capProtectionNote": "Recording a Declaration of Homestead protects up to $500,000 of primary residence equity from unsecured creditors ($1,000,000 if 62+); Boston/Cambridge/Somerville/Brookline also offer 20–35% owner-occupied Residential Property Tax Exemptions.",
                 "filingDeadline": "Record Homestead Declaration at closing; municipal Residential Exemption applications typically due April 1.",
                 "actionRequired": "Ask closing attorney to record MA Declaration of Homestead with deed & check city assessor for Residential Exemption.",
-                "lookupUrl": "https://www.sec.state.ma.us/divisions/registry-of-deeds/homestead.htm",
+                "lookupUrl": "https://www.sec.state.ma.us/divisions/registry-of-deeds/registry-of-deeds.htm",
             })
         }
         "IL" => json!({

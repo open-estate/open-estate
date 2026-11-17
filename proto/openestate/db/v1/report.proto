@@ -1,0 +1,83 @@
+syntax = "proto3";
+
+package openestate.db.v1;
+
+import "openestate/db/v1/enums.proto";
+import "openestate/db/v1/factors.proto";
+import "openestate/extension/v1/domains.proto";
+
+message ReportHeaderProto {
+  int64 report_id = 1;
+  string slug = 2;
+  optional int64 listing_sk = 3;
+  string display_address = 4;
+  string zip = 5;
+  optional string state_code = 6;
+  optional string city = 7;
+  optional double lat = 8;
+  optional double lon = 9;
+  PropertyCategory property_category = 10;
+  optional string property_type_label = 11;
+  optional double overall_score = 12;
+  optional int64 estimated_value = 13;
+  optional int64 list_price = 14;
+  optional int32 all_in_monthly = 15;
+  optional int32 rent_estimate = 16;
+  optional string verdict = 17;
+  optional string ai_headline = 18;
+  bool ai_ready = 19;
+  bool osrm_degraded = 20;
+  int32 section_mask = 21;
+  int32 total_raw_bytes = 22;
+  int32 total_compressed_bytes = 23;
+  int64 generated_ts = 24;
+  int64 updated_ts = 25;
+}
+
+message ReportSectionEnvelopeProto {
+  ReportSectionKind kind = 1;
+  uint32 schema_version = 2;
+  int64 updated_ts = 3;
+
+  oneof typed_summary {
+    openestate.extension.v1.GeocodeResultProto geo = 10;
+    openestate.extension.v1.PropertyFactsProto facts = 11;
+    openestate.extension.v1.MarketValuationProto valuation = 12;
+    openestate.extension.v1.HazardSummaryProto hazards = 13;
+    openestate.extension.v1.EnvironmentalSummaryProto environment = 14;
+    openestate.extension.v1.LivabilitySummaryProto livability = 15;
+    openestate.extension.v1.InsuranceQuoteProto insurance = 16;
+    openestate.extension.v1.TaxMandatesProto tax_mandates = 17;
+    openestate.extension.v1.House3dMetadataProto house_3d = 18;
+    HomeFactorsRowProto factors = 19;
+  }
+
+  bytes section_msgpack_or_utf8 = 30;
+}
+
+message ZipMarketSnapshotProto {
+  bytes snapshot_hash = 1;
+  string zip = 2;
+  int64 updated_ts = 3;
+  bytes bundle_utf8 = 4;
+}
+
+message LlmCacheEntryProto {
+  string cache_key = 1;
+  string task_kind = 2;
+  string model_id = 3;
+  int64 expires_ts = 4;
+  int64 updated_ts = 5;
+  bytes payload_utf8 = 6;
+}
+
+message ClientDocReviewProto {
+  string doc_key = 1;
+  string slug = 2;
+  string client_id = 3;
+  DocReviewKind doc_kind = 4;
+  string doc_type_raw = 5;
+  int64 expires_ts = 6;
+  int64 updated_ts = 7;
+  bytes review_utf8 = 8;
+}

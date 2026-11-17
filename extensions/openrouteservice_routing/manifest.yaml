@@ -47,10 +47,11 @@ sharing:
 source_attribution:
   name: "openrouteservice.org by HeiGIT · © OpenStreetMap"
   url: "https://giscience.github.io/openrouteservice/api-reference/endpoints/matrix/"
+  reference_url_template: "https://giscience.github.io/openrouteservice/api-reference/endpoints/matrix/"
 openapi:
   spec_file: "openapi.yaml"
   operation_id: "postOpenRouteServiceDrivingMatrix"
-  body_template: '{"locations":[[{{ lon }},{{ lat }}],[{{ lon }},{{ lat }}]],"sources":[0],"destinations":[1],"metrics":["duration","distance"],"units":"m"}'
+  body_template: '{"locations":[[{{ lon }},{{ lat }}],[{{ dest_lon }},{{ dest_lat }}]],"sources":[0],"destinations":[1],"metrics":["duration","distance"],"units":"m"}'
 response_mapping:
   root_path: "$"
   require_non_empty: true

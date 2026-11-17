@@ -161,17 +161,29 @@ pub fn effective_brand_domain(raw: &str) -> &str {
     }
 }
 
+static DEFAULT_BRAND_HTML_WORDMARK_RE: once_cell::sync::Lazy<regex::Regex> =
+    once_cell::sync::Lazy::new(|| {
+        regex::Regex::new(r"(?i)\bopen\s*(<b\b[^>]*>)\s*estate(\s*</b>)").unwrap()
+    });
+
+static DEFAULT_BRAND_PROSE_RE: once_cell::sync::Lazy<regex::Regex> =
+    once_cell::sync::Lazy::new(|| {
+        regex::Regex::new(r"(?i)(?-u:\b)open[ _-]estate(?-u:\b)").unwrap()
+    });
+
 /// Rewrites default `"Open Estate"` / `"open-estate.local"` occurrences in a string when
 /// a custom white-label brand name or domain is active.
 pub fn apply_brand_to_str(raw: &str, brand_name: &str, brand_domain: &str) -> String {
     let eff_name = effective_brand_name(brand_name);
     let eff_domain = effective_brand_domain(brand_domain);
-    let mut out = raw.to_string();
-    if eff_domain != "open-estate.local" && out.contains("open-estate.local") {
-        out = out.replace("open-estate.local", eff_domain);
-    }
-    if eff_name != "Open Estate" && out.contains("Open Estate") {
-        out = out.replace("Open Estate", eff_name);
+    let mut out = normalize_retired_brand(raw);
+    if eff_domain != "open-estate.local" {
+        if out.contains("open-estate.local") {
+            out = out.replace("open-estate.local", eff_domain);
+        }
+        if out.contains("openestate.org") {
+            out = out.replace("openestate.org", eff_domain);
+        }
     }
     if eff_name != "Open Estate" && out.contains("open-estate-deal-room-comparison.csv") {
         let brand_slug = slugify(eff_name);
@@ -180,6 +192,22 @@ pub fn apply_brand_to_str(raw: &str, brand_name: &str, brand_domain: &str) -> St
                 "open-estate-deal-room-comparison.csv",
                 &format!("{brand_slug}-deal-room-comparison.csv"),
             );
+        }
+    }
+    if eff_name != "Open Estate" {
+        if DEFAULT_BRAND_HTML_WORDMARK_RE.is_match(&out) {
+            let wm = format_brand_wordmark_html(eff_name);
+            out = DEFAULT_BRAND_HTML_WORDMARK_RE
+                .replace_all(&out, wm.as_str())
+                .into_owned();
+        }
+        if out.contains("Open Estate") {
+            out = out.replace("Open Estate", eff_name);
+        }
+        if DEFAULT_BRAND_PROSE_RE.is_match(&out) {
+            out = DEFAULT_BRAND_PROSE_RE
+                .replace_all(&out, eff_name)
+                .into_owned();
         }
     }
     out
@@ -959,6 +987,7 @@ pub fn now_unix_ms() -> u128 {
 #[derive(Debug, Clone, Default)]
 pub struct EnvConfig {
     vars: Arc<HashMap<String, String>>,
+    from_process_env: bool,
 }
 
 impl EnvConfig {
@@ -987,12 +1016,14 @@ impl EnvConfig {
         }
         Self {
             vars: Arc::new(map),
+            from_process_env: true,
         }
     }
 
     pub fn from_map(map: HashMap<String, String>) -> Self {
         Self {
             vars: Arc::new(map),
+            from_process_env: false,
         }
     }
 
@@ -1012,6 +1043,7 @@ impl EnvConfig {
         }
         Self {
             vars: Arc::new(map),
+            from_process_env: self.from_process_env,
         }
     }
 
@@ -1053,7 +1085,25 @@ impl EnvConfig {
         self.llm_api_key().is_some() && self.llm_base_url().is_some()
     }
 
+    /// Outbound SMTP features are disabled by default unless `ENABLE_SMTP_FEATURES=true`.
+    pub fn smtp_feature_enabled(&self) -> bool {
+        self.get("ENABLE_SMTP_FEATURES").is_some_and(is_truthy_flag)
+    }
+
+    /// Background ZIP/email alert monitoring is disabled by default unless `ENABLE_EMAIL_MONITOR=true`.
+    pub fn email_monitor_enabled(&self) -> bool {
+        self.get("ENABLE_EMAIL_MONITOR").is_some_and(is_truthy_flag)
+    }
+
     pub fn smtp_configured(&self) -> bool {
+        if let Some(flag) = self.get("ENABLE_SMTP_FEATURES") {
+            if !is_truthy_flag(flag) {
+                return false;
+            }
+        } else if self.from_process_env {
+            // Production `.env` / OS environment must opt in explicitly via `ENABLE_SMTP_FEATURES=true`.
+            return false;
+        }
         self.get("SMTP_HOST").is_some()
             && (self.get("SMTP_FROM").is_some() || self.get("SMTP_USER").is_some())
     }
@@ -3263,19 +3313,20 @@ pub fn arcgis_representative_point(geom: &Value) -> Option<(f64, f64)> {
 }
 
 pub fn arcgis_to_geojson_geometry(geom: &Value) -> Option<Value> {
-    if let (Some(x), Some(y)) = (
+    let mut gj = if let (Some(x), Some(y)) = (
         geom.get("x").and_then(|v| v.as_f64()),
         geom.get("y").and_then(|v| v.as_f64()),
     ) {
-        return Some(json!({ "type": "Point", "coordinates": [x, y] }));
-    }
-    if let Some(paths) = geom.get("paths") {
-        return Some(json!({ "type": "MultiLineString", "coordinates": paths }));
-    }
-    if let Some(rings) = geom.get("rings") {
-        return Some(json!({ "type": "Polygon", "coordinates": rings }));
-    }
-    None
+        json!({ "type": "Point", "coordinates": [x, y] })
+    } else if let Some(paths) = geom.get("paths") {
+        json!({ "type": "MultiLineString", "coordinates": paths })
+    } else if let Some(rings) = geom.get("rings") {
+        json!({ "type": "Polygon", "coordinates": rings })
+    } else {
+        return None;
+    };
+    round_geojson_coordinates_6dec(&mut gj);
+    Some(gj)
 }
 
 /// Canonical URL-safe slug via `slug::slugify`.

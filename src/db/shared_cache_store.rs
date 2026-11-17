@@ -9,7 +9,6 @@ use crate::shared::now_unix_secs;
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use sqlx::{mysql::MySqlRow, sqlite::SqliteRow, Row};
 use std::path::{Path, PathBuf};
 
 pub const SHARED_CACHE_TABLE_NAME: &str = "extension_shared_cache";
@@ -211,22 +210,6 @@ pub const MYSQL_SHARED_CACHE_DDL: &[&str] = &[
         INDEX idx_shared_blobs_accessed (last_accessed_at)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci"#,
 ];
-
-trait RowBytesExt: DbRowExt {
-    fn opt_bytes(&self, col: &str) -> Option<Vec<u8>>;
-}
-
-impl RowBytesExt for SqliteRow {
-    fn opt_bytes(&self, col: &str) -> Option<Vec<u8>> {
-        self.try_get::<Option<Vec<u8>>, _>(col).ok().flatten()
-    }
-}
-
-impl RowBytesExt for MySqlRow {
-    fn opt_bytes(&self, col: &str) -> Option<Vec<u8>> {
-        self.try_get::<Option<Vec<u8>>, _>(col).ok().flatten()
-    }
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -481,7 +464,7 @@ fn decode_geo_cols(r: &dyn DbRowExt) -> GeoIndexColumns {
     }
 }
 
-fn decode_dataset_descriptor_row(r: &dyn RowBytesExt) -> SharedDatasetDescriptorRow {
+fn decode_dataset_descriptor_row(r: &dyn DbRowExt) -> SharedDatasetDescriptorRow {
     SharedDatasetDescriptorRow {
         dataset_id: r.opt_str("dataset_id").unwrap_or_default(),
         payload_message_type: r.opt_str("payload_message_type").unwrap_or_default(),
@@ -499,7 +482,7 @@ fn decode_dataset_descriptor_row(r: &dyn RowBytesExt) -> SharedDatasetDescriptor
     }
 }
 
-fn decode_data_record_row(r: &dyn RowBytesExt) -> SharedDataRecordRow {
+fn decode_data_record_row(r: &dyn DbRowExt) -> SharedDataRecordRow {
     SharedDataRecordRow {
         id: r.opt_str("id").unwrap_or_default(),
         dataset_id: r.opt_str("dataset_id").unwrap_or_default(),
@@ -520,7 +503,7 @@ fn decode_data_record_row(r: &dyn RowBytesExt) -> SharedDataRecordRow {
     }
 }
 
-fn decode_blob_row(r: &dyn RowBytesExt) -> (SharedBlobRow, Option<Vec<u8>>) {
+fn decode_blob_row(r: &dyn DbRowExt) -> (SharedBlobRow, Option<Vec<u8>>) {
     let row = SharedBlobRow {
         content_hash: r.opt_str("content_hash").unwrap_or_default(),
         dataset_id: r.opt_str("dataset_id").unwrap_or_default(),

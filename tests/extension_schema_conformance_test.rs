@@ -39,6 +39,7 @@ default_provenance: live_verified
 source_attribution:
   source_name: Public Open Data Test Source
   source_url: https://example.org/api
+  reference_url_template: "https://example.org/lookup?zip={{zip}}"
 request:
   url: "https://example.org/api?zip={{zip}}"
 {extra_lines}"#
@@ -249,6 +250,31 @@ fn all_public_extensions_conform_to_proto_schema_and_roundtrip() {
             !pkg.requires_manual_approval,
             "{} cannot require manual approval in OSS",
             pkg.extension_id
+        );
+
+        let ref_tpl = pkg
+            .manifest
+            .source_attribution
+            .as_ref()
+            .map(|sa| sa.reference_url_template.trim())
+            .unwrap_or("");
+        assert!(
+            ref_tpl.starts_with("https://"),
+            "{} must declare a non-empty https:// source_attribution.reference_url_template, got {:?}",
+            pkg.extension_id,
+            ref_tpl
+        );
+        assert!(
+            !ref_tpl.contains(":~:text="),
+            "{} source_attribution.reference_url_template must not use #:~:text= homepage fragments: {}",
+            pkg.extension_id,
+            ref_tpl
+        );
+        assert!(
+            !ref_tpl.contains("f=html"),
+            "{} source_attribution.reference_url_template must not use ArcGIS f=html directory links: {}",
+            pkg.extension_id,
+            ref_tpl
         );
 
         // YAML -> Proto -> Binary Wire -> Proto round-trip

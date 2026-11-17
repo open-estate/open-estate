@@ -392,7 +392,7 @@ fn state_title_schedule_spec(state: &str) -> StateTitleScheduleSpec {
             rate_schedule_basis: "statutory_formula",
             regulator: "Florida Office of Insurance Regulation (OIR)",
             citation: "Fla. Stat. § 627.782 · Fla. Admin. Code r. 69O-186.003 ($5.75/$1k to $100k; $5.00/$1k $100k–$1M; $2.50/$1k $1M–$5M)",
-            filing_url: "https://www.floir.com/sections/pandc/title",
+            filing_url: "https://floir.gov/property-casualty/title-insurance",
             reissue_window_years: 10,
             reissue_credit_short_pct: 35.0, // F.A.C. 69O-186.003(2) $3.30/$1k to $100k + $3.00/$1k $100k-$1M (~38-40% off original rate)
             reissue_credit_extended_pct: 25.0,
@@ -406,7 +406,7 @@ fn state_title_schedule_spec(state: &str) -> StateTitleScheduleSpec {
             rate_schedule_basis: "statutory_formula",
             regulator: "New Mexico Office of Superintendent of Insurance (OSI)",
             citation: "NMSA 1978 § 59A-30-6 · 13.14.9.18 & 13.14.9.35 NMAC Promulgated Schedule of Basic Premium Rates",
-            filing_url: "https://www.osi.state.nm.us/pages/bureaus/title-bureau/resources",
+            filing_url: "https://www.osi.state.nm.us/",
             reissue_window_years: 10,
             reissue_credit_short_pct: 25.0, // 13.14.9.35 NMAC reissue discount tier
             reissue_credit_extended_pct: 15.0,
@@ -436,7 +436,7 @@ fn state_title_schedule_spec(state: &str) -> StateTitleScheduleSpec {
             rate_schedule_basis: "modeled_regional_benchmark",
             regulator: "California Department of Insurance (CDI)",
             citation: "CA Ins. Code §§ 12401.1–12401.9 · Representative CDI residential benchmark curve (actual insurer-filed schedules vary)",
-            filing_url: "https://interactive.web.insurance.ca.gov/apex_extprd/f?p=150:1",
+            filing_url: "https://www.insurance.ca.gov/0250-insurers/0800-rate-filings/",
             reissue_window_years: 5,
             reissue_credit_short_pct: 20.0,
             reissue_credit_extended_pct: 10.0,

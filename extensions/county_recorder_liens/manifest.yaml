@@ -55,6 +55,7 @@ sharing:
 source_attribution:
   name: "NYC Department of Finance ACRIS Real Property Legals (Zero-PII Document Index)"
   url: "https://data.cityofnewyork.us/resource/8h5j-fqxa.json"
+  reference_url_template: "https://data.cityofnewyork.us/City-Government/ACRIS-Real-Property-Legals/8h5j-fqxa"
   schedule_or_version: "Socrata SODA v2.1 Zero-PII Document Index"
   notes: "Strictly NYC boroughs only; indexes recorded instrument street matches without overwriting assessor APN or exposing personal party names."
 request:
@@ -62,9 +63,8 @@ request:
   url: "https://data.cityofnewyork.us/resource/8h5j-fqxa.json"
   query_params:
     "$limit": "5"
-    "$where": "starts_with(street_name,'{{ street_stem }}')"
+    "$where": "street_number='{{ house_number }}' AND starts_with(street_name,'{{ street_stem }}')"
 response_mapping:
   root_path: "$[0]"
   require_non_empty: true
-  fields:
-    street: "$.street_name"
+  fields: {}

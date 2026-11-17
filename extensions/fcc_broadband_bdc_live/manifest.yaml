@@ -49,4 +49,5 @@ sharing:
 source_attribution:
   name: "FCC National Broadband Map (BDC)"
   url: "https://broadbandmap.fcc.gov/"
+  reference_url_template: "https://broadbandmap.fcc.gov/location-summary/fixed?latlon={{lat}}%2C{{lon}}"
   notes: "Never falls back silently to unverified carrier lists when FCC returns HTTP 401/405."

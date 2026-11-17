@@ -46,10 +46,10 @@ use uuid::Uuid;
 pub const MAX_SINGLE_PDF_BYTES: usize = 12 * 1024 * 1024; // 12 MB per uploaded PDF
 // [feat/hoa-packet-ai]
 pub const MAX_ZIP_ARCHIVE_BYTES: usize = 24 * 1024 * 1024; // 24 MB per uploaded .zip packet
-pub const MAX_ZIP_CENTRAL_ENTRIES: usize = 64;
-pub const MAX_ZIP_TOTAL_UNCOMPRESSED_BYTES: usize = 48 * 1024 * 1024; // 48 MB total decompressed cap
-pub const MAX_ZIP_COMPRESSION_RATIO: usize = 40; // Reject >40:1 compression ratio above exempt floor
-pub const ZIP_RATIO_MIN_EXEMPT_BYTES: usize = 64 * 1024; // 64 KB floor before ratio enforcement
+pub const MAX_ZIP_CENTRAL_ENTRIES: usize = 40;
+pub const MAX_ZIP_TOTAL_UNCOMPRESSED_BYTES: usize = 64 * 1024 * 1024; // 64 MB total decompressed cap
+pub const MAX_ZIP_COMPRESSION_RATIO: usize = 50; // Reject >50:1 compression ratio above exempt floor
+pub const ZIP_RATIO_MIN_EXEMPT_BYTES: usize = 4 * 1024; // 4 KB floor before ratio enforcement
 pub const MAX_PACKET_DOCUMENTS: usize = 20; // Up to 20 PDFs in a multi-doc disclosure packet
 // [/feat/hoa-packet-ai]
 pub const MAX_PDF_PAGES: usize = 150;
@@ -450,26 +450,34 @@ struct ZipCentralEntry {
 }
 
 fn validate_safe_zip_entry_path(raw_name: &str) -> std::result::Result<(bool, bool, String), GuardrailError> {
-    if raw_name.is_empty() || raw_name.contains('\0') {
+    if raw_name.is_empty()
+        || raw_name.contains('\0')
+        || raw_name.chars().any(|c| c.is_control())
+    {
         return Err(GuardrailError::new(
-            "ZIP_PATH_TRAVERSAL",
-            "ZIP archive contains an empty or null-byte filename.",
+            "UNSAFE_ARCHIVE_ENTRY",
+            "ZIP archive contains an unsafe empty, control-character, or null-byte path entry.",
             400,
         ));
     }
-    if raw_name.starts_with('/') || raw_name.starts_with('\\') || raw_name.contains(':') {
+    if raw_name.starts_with('/')
+        || raw_name.starts_with('\\')
+        || raw_name.starts_with('~')
+        || raw_name.contains(':')
+    {
         return Err(GuardrailError::new(
-            "ZIP_PATH_TRAVERSAL",
-            "ZIP archive contains an unsafe absolute or drive-prefixed path.",
+            "UNSAFE_ARCHIVE_ENTRY",
+            "ZIP archive contains an unsafe absolute or drive-prefixed path traversal entry.",
             400,
         ));
     }
     let normalized = raw_name.replace('\\', "/");
     for seg in normalized.split('/') {
-        if seg == ".." {
+        let trimmed_seg = seg.trim();
+        if seg == ".." || trimmed_seg == ".." {
             return Err(GuardrailError::new(
-                "ZIP_PATH_TRAVERSAL",
-                "ZIP archive contains path traversal (`..`) segments.",
+                "UNSAFE_ARCHIVE_ENTRY",
+                "ZIP archive contains unsafe path traversal (`..`) segments.",
                 400,
             ));
         }
@@ -487,14 +495,15 @@ fn validate_safe_zip_entry_path(raw_name: &str) -> std::result::Result<(bool, bo
     let lower_full = normalized.to_ascii_lowercase();
     let lower_base = basename.to_ascii_lowercase();
 
-    // Reject nested archives (recursive zip-bomb defense)
+    // Reject nested archives (recursive zip-bomb defense) before any metadata filter
     for nested_ext in [
-        ".zip", ".tar", ".gz", ".tgz", ".bz2", ".xz", ".7z", ".rar", ".zst",
+        ".zip", ".tar", ".gz", ".tgz", ".tbz", ".tbz2", ".bz2", ".xz", ".txz", ".7z", ".rar",
+        ".zst", ".lz4", ".cab", ".iso", ".jar", ".war",
     ] {
-        if lower_base.ends_with(nested_ext) {
+        if lower_base.ends_with(nested_ext) || lower_full.ends_with(nested_ext) {
             return Err(GuardrailError::new(
-                "ZIP_BOMB_BLOCKED",
-                "Nested archives inside uploaded ZIP disclosure packets are prohibited.",
+                "NESTED_ARCHIVE_PROHIBITED",
+                "Nested archives (.zip/.tar/.gz) inside uploaded ZIP disclosure packets are prohibited.",
                 400,
             ));
         }
@@ -516,6 +525,33 @@ fn validate_safe_zip_entry_path(raw_name: &str) -> std::result::Result<(bool, bo
         || lower_base.ends_with(".txt")
         || lower_base.ends_with(".md");
     Ok((false, is_doc, basename.to_string()))
+}
+
+fn has_nested_archive_magic(bytes: &[u8]) -> bool {
+    if bytes.len() >= 4
+        && (bytes.starts_with(&[0x50, 0x4B, 0x03, 0x04])
+            || bytes.starts_with(&[0x50, 0x4B, 0x05, 0x06])
+            || bytes.starts_with(&[0x50, 0x4B, 0x07, 0x08])
+            || bytes.starts_with(&[0x28, 0xB5, 0x2F, 0xFD]))
+    {
+        return true;
+    }
+    if bytes.len() >= 3
+        && (bytes.starts_with(&[0x1F, 0x8B, 0x08]) || bytes.starts_with(b"BZh"))
+    {
+        return true;
+    }
+    if bytes.len() >= 6
+        && (bytes.starts_with(&[0x37, 0x7A, 0xBC, 0xAF, 0x27, 0x1C])
+            || bytes.starts_with(&[0xFD, 0x37, 0x7A, 0x58, 0x5A, 0x00])
+            || bytes.starts_with(b"Rar!\x1A\x07"))
+    {
+        return true;
+    }
+    if bytes.len() >= 262 && &bytes[257..262] == b"ustar" {
+        return true;
+    }
+    false
 }
 
 fn find_zip_eocd(bytes: &[u8]) -> std::result::Result<usize, GuardrailError> {
@@ -548,9 +584,11 @@ fn find_zip_eocd(bytes: &[u8]) -> std::result::Result<usize, GuardrailError> {
 }
 
 /// Pure-Rust ZIP central-directory unpacker (`Stored` + `Deflate` via `flate2`) with strict
-/// zip-bomb defenses: entry-count cap, path-traversal block, nested-archive block, non-overlapping
-/// local-header verification (Fifield `zbsm` defense), declared & streaming 40:1 compression-ratio
-/// enforcement, 12 MB per-file & 48 MB total uncompressed caps, and IEEE CRC-32 verification.
+/// zip-bomb defenses: 40-entry cap, path-traversal & symlink block (`UNSAFE_ARCHIVE_ENTRY`),
+/// nested-archive filename & magic-byte block (`NESTED_ARCHIVE_PROHIBITED`), non-overlapping
+/// local-header verification (Fifield `zbsm` defense), declared & `Read::take` streaming `<= 50:1`
+/// compression-ratio enforcement, 12 MB per-file & 64 MB total uncompressed caps (`ZIP_BOMB_DETECTED`),
+/// and IEEE CRC-32 verification.
 pub fn unpack_zip_archive_bytes(
     zip_name: &str,
     bytes: &[u8],
@@ -591,7 +629,7 @@ pub fn unpack_zip_archive_bytes(
     }
     if total_entries == 0xFFFF || cd_size == 0xFFFF_FFFF || cd_offset == 0xFFFF_FFFF {
         return Err(GuardrailError::new(
-            "ZIP_BOMB_BLOCKED",
+            "ZIP_BOMB_DETECTED",
             "ZIP64 archives are blocked by disclosure packet safety limits.",
             400,
         ));
@@ -605,7 +643,7 @@ pub fn unpack_zip_archive_bytes(
     }
     if total_entries > MAX_ZIP_CENTRAL_ENTRIES {
         return Err(GuardrailError::new(
-            "ZIP_BOMB_BLOCKED",
+            "ZIP_BOMB_DETECTED",
             format!(
                 "ZIP archive contains {total_entries} entries (maximum allowed is {MAX_ZIP_CENTRAL_ENTRIES})."
             ),
@@ -639,6 +677,7 @@ pub fn unpack_zip_archive_bytes(
                 400,
             ));
         }
+        let version_made_by = u16::from_le_bytes([bytes[cursor + 4], bytes[cursor + 5]]);
         let gp_flags = u16::from_le_bytes([bytes[cursor + 8], bytes[cursor + 9]]);
         if (gp_flags & 0x0001) != 0 {
             return Err(GuardrailError::new(
@@ -675,7 +714,7 @@ pub fn unpack_zip_archive_bytes(
         ]);
         if comp_u32 == 0xFFFF_FFFF || uncomp_u32 == 0xFFFF_FFFF {
             return Err(GuardrailError::new(
-                "ZIP_BOMB_BLOCKED",
+                "ZIP_BOMB_DETECTED",
                 "ZIP64 entry sizes are blocked by packet zip-bomb guardrails.",
                 400,
             ));
@@ -685,12 +724,27 @@ pub fn unpack_zip_archive_bytes(
         let name_len = u16::from_le_bytes([bytes[cursor + 28], bytes[cursor + 29]]) as usize;
         let extra_len = u16::from_le_bytes([bytes[cursor + 30], bytes[cursor + 31]]) as usize;
         let comment_len = u16::from_le_bytes([bytes[cursor + 32], bytes[cursor + 33]]) as usize;
+        let ext_attrs = u32::from_le_bytes([
+            bytes[cursor + 38],
+            bytes[cursor + 39],
+            bytes[cursor + 40],
+            bytes[cursor + 41],
+        ]);
         let local_offset = u32::from_le_bytes([
             bytes[cursor + 42],
             bytes[cursor + 43],
             bytes[cursor + 44],
             bytes[cursor + 45],
         ]) as usize;
+
+        // Block Unix symlinks (`S_IFLNK = 0o120000`) inside ZIP archives
+        if (version_made_by >> 8) == 3 && ((ext_attrs >> 16) & 0o170000) == 0o120000 {
+            return Err(GuardrailError::new(
+                "UNSAFE_ARCHIVE_ENTRY",
+                "ZIP archive contains a prohibited symbolic link entry.",
+                400,
+            ));
+        }
 
         let header_end = cursor
             .checked_add(46)
@@ -719,22 +773,32 @@ pub fn unpack_zip_archive_bytes(
             validate_safe_zip_entry_path(&raw_name)?;
 
         // Enforce zip-bomb size & compression ratio invariants on EVERY entry (even skipped metadata)
+        if uncomp_size == 0 && comp_size > 16 {
+            return Err(GuardrailError::new(
+                "ZIP_BOMB_DETECTED",
+                format!(
+                    "ZIP entry \"{}\" declares 0 uncompressed bytes for a non-empty compressed stream (spoofed header).",
+                    display_base
+                ),
+                400,
+            ));
+        }
         if uncomp_size > MAX_SINGLE_PDF_BYTES {
             return Err(GuardrailError::new(
-                "ZIP_BOMB_BLOCKED",
+                "ZIP_BOMB_DETECTED",
                 format!(
                     "ZIP entry \"{}\" exceeds the 12 MB per-document uncompressed limit.",
                     display_base
                 ),
-                413,
+                400,
             ));
         }
         declared_total_uncompressed = declared_total_uncompressed.saturating_add(uncomp_size);
         if declared_total_uncompressed > MAX_ZIP_TOTAL_UNCOMPRESSED_BYTES {
             return Err(GuardrailError::new(
-                "ZIP_BOMB_BLOCKED",
-                "ZIP archive exceeds the 48 MB total uncompressed budget (zip-bomb defense).",
-                413,
+                "ZIP_BOMB_DETECTED",
+                "ZIP archive exceeds the 64 MB total uncompressed budget (zip-bomb defense).",
+                400,
             ));
         }
         if uncomp_size > ZIP_RATIO_MIN_EXEMPT_BYTES
@@ -742,7 +806,7 @@ pub fn unpack_zip_archive_bytes(
                 || uncomp_size > comp_size.saturating_mul(MAX_ZIP_COMPRESSION_RATIO))
         {
             return Err(GuardrailError::new(
-                "ZIP_BOMB_BLOCKED",
+                "ZIP_BOMB_DETECTED",
                 format!(
                     "ZIP entry \"{}\" compression ratio exceeds {MAX_ZIP_COMPRESSION_RATIO}:1 safety threshold.",
                     display_base
@@ -777,7 +841,7 @@ pub fn unpack_zip_archive_bytes(
         })?;
         if data_end > cd_offset {
             return Err(GuardrailError::new(
-                "ZIP_BOMB_BLOCKED",
+                "ZIP_BOMB_DETECTED",
                 "ZIP entry compressed stream overlaps Central Directory (zip-bomb defense).",
                 400,
             ));
@@ -810,7 +874,7 @@ pub fn unpack_zip_archive_bytes(
     for pair in extents.windows(2) {
         if pair[1].0 < pair[0].1 {
             return Err(GuardrailError::new(
-                "ZIP_BOMB_BLOCKED",
+                "ZIP_BOMB_DETECTED",
                 "ZIP archive contains overlapping local file headers (shared-kernel zip-bomb defense).",
                 400,
             ));
@@ -819,7 +883,7 @@ pub fn unpack_zip_archive_bytes(
 
     let doc_entries: Vec<&ZipCentralEntry> = parsed_entries
         .iter()
-        .filter(|e| !e.is_ignorable_meta && e.is_supported_doc && e.uncomp_size > 0)
+        .filter(|e| !e.is_ignorable_meta && e.is_supported_doc && (e.uncomp_size > 0 || e.comp_size > 0))
         .collect();
 
     if doc_entries.is_empty() {
@@ -846,78 +910,93 @@ pub fn unpack_zip_archive_bytes(
 
     for entry in doc_entries {
         let comp_slice = &bytes[entry.data_start..entry.data_end];
-        let mut out_buf = Vec::with_capacity(entry.uncomp_size.min(256 * 1024));
+        let remaining_total = MAX_ZIP_TOTAL_UNCOMPRESSED_BYTES.saturating_sub(total_actual_bytes);
+        let ratio_cap = if entry.comp_size == 0 {
+            ZIP_RATIO_MIN_EXEMPT_BYTES
+        } else {
+            entry
+                .comp_size
+                .saturating_mul(MAX_ZIP_COMPRESSION_RATIO)
+                .max(ZIP_RATIO_MIN_EXEMPT_BYTES)
+        };
+        let hard_entry_cap = MAX_SINGLE_PDF_BYTES.min(remaining_total).min(ratio_cap);
+        // Never trust `entry.uncomp_size` from the central directory when allocating or reading!
+        let mut out_buf = Vec::with_capacity(entry.uncomp_size.min(hard_entry_cap).min(64 * 1024));
 
         if entry.method == 0 {
             if entry.comp_size != entry.uncomp_size {
                 return Err(GuardrailError::new(
-                    "INVALID_ZIP_ARCHIVE",
+                    "ZIP_BOMB_DETECTED",
                     "Stored ZIP entry has mismatched compressed and uncompressed byte lengths.",
                     400,
                 ));
             }
-            total_actual_bytes = total_actual_bytes.saturating_add(comp_slice.len());
-            if total_actual_bytes > MAX_ZIP_TOTAL_UNCOMPRESSED_BYTES {
-                return Err(GuardrailError::new(
-                    "ZIP_BOMB_BLOCKED",
-                    "ZIP decompression exceeded 48 MB total safety ceiling.",
-                    413,
-                ));
-            }
-            out_buf.extend_from_slice(comp_slice);
-        } else {
-            let mut decoder = DeflateDecoder::new(comp_slice);
-            let mut chunk = [0u8; 16 * 1024];
-            loop {
-                let n = decoder.read(&mut chunk).map_err(|_| {
+            let take_limit = (hard_entry_cap as u64).saturating_add(1);
+            comp_slice
+                .take(take_limit)
+                .read_to_end(&mut out_buf)
+                .map_err(|_| {
                     GuardrailError::new(
                         "INVALID_ZIP_ARCHIVE",
-                        format!("Failed to inflate Deflate stream for \"{}\".", entry.raw_name),
+                        format!("Failed to read Stored stream for \"{}\".", entry.raw_name),
                         400,
                     )
                 })?;
-                if n == 0 {
-                    break;
-                }
-                if out_buf.len().saturating_add(n) > MAX_SINGLE_PDF_BYTES {
-                    return Err(GuardrailError::new(
-                        "ZIP_BOMB_BLOCKED",
-                        format!(
-                            "Inflated stream for \"{}\" exceeded 12 MB per-file safety limit.",
-                            entry.raw_name
-                        ),
-                        413,
-                    ));
-                }
-                total_actual_bytes = total_actual_bytes.saturating_add(n);
-                if total_actual_bytes > MAX_ZIP_TOTAL_UNCOMPRESSED_BYTES {
-                    return Err(GuardrailError::new(
-                        "ZIP_BOMB_BLOCKED",
-                        "Inflated ZIP packet exceeded 48 MB total uncompressed safety limit.",
-                        413,
-                    ));
-                }
-                out_buf.extend_from_slice(&chunk[..n]);
-                if out_buf.len() > ZIP_RATIO_MIN_EXEMPT_BYTES
-                    && (entry.comp_size == 0
-                        || out_buf.len()
-                            > entry.comp_size.saturating_mul(MAX_ZIP_COMPRESSION_RATIO))
-                {
-                    return Err(GuardrailError::new(
-                        "ZIP_BOMB_BLOCKED",
-                        format!(
-                            "Streaming inflation of \"{}\" exceeded {MAX_ZIP_COMPRESSION_RATIO}:1 compression ratio limit.",
-                            entry.raw_name
-                        ),
-                        400,
-                    ));
-                }
+            if out_buf.len() > hard_entry_cap {
+                return Err(GuardrailError::new(
+                    "ZIP_BOMB_DETECTED",
+                    "ZIP decompression exceeded total uncompressed safety ceiling.",
+                    400,
+                ));
             }
+        } else {
+            // Bound actual decompressed bytes via `Read::take` rather than trusting central-directory headers.
+            let take_limit = (hard_entry_cap as u64).saturating_add(1);
+            let mut bounded_decoder = DeflateDecoder::new(comp_slice).take(take_limit);
+            bounded_decoder.read_to_end(&mut out_buf).map_err(|_| {
+                GuardrailError::new(
+                    "INVALID_ZIP_ARCHIVE",
+                    format!("Failed to inflate Deflate stream for \"{}\".", entry.raw_name),
+                    400,
+                )
+            })?;
+            if out_buf.len() > hard_entry_cap {
+                return Err(GuardrailError::new(
+                    "ZIP_BOMB_DETECTED",
+                    format!(
+                        "Streaming inflation of \"{}\" exceeded safety limit (ratio <= {MAX_ZIP_COMPRESSION_RATIO}:1, max 12 MB/file, 64 MB total).",
+                        entry.raw_name
+                    ),
+                    400,
+                ));
+            }
+            if out_buf.len() > ZIP_RATIO_MIN_EXEMPT_BYTES
+                && (entry.comp_size == 0
+                    || out_buf.len() > entry.comp_size.saturating_mul(MAX_ZIP_COMPRESSION_RATIO))
+            {
+                return Err(GuardrailError::new(
+                    "ZIP_BOMB_DETECTED",
+                    format!(
+                        "Streaming inflation of \"{}\" exceeded {MAX_ZIP_COMPRESSION_RATIO}:1 compression ratio limit.",
+                        entry.raw_name
+                    ),
+                    400,
+                ));
+            }
+        }
+
+        total_actual_bytes = total_actual_bytes.saturating_add(out_buf.len());
+        if total_actual_bytes > MAX_ZIP_TOTAL_UNCOMPRESSED_BYTES {
+            return Err(GuardrailError::new(
+                "ZIP_BOMB_DETECTED",
+                "Inflated ZIP packet exceeded 64 MB total uncompressed safety limit.",
+                400,
+            ));
         }
 
         if out_buf.len() != entry.uncomp_size {
             return Err(GuardrailError::new(
-                "ZIP_BOMB_BLOCKED",
+                "ZIP_BOMB_DETECTED",
                 format!(
                     "ZIP entry \"{}\" actual inflated length ({}) does not match declared header ({}).",
                     entry.raw_name,
@@ -926,6 +1005,19 @@ pub fn unpack_zip_archive_bytes(
                 ),
                 400,
             ));
+        }
+        if has_nested_archive_magic(&out_buf) {
+            return Err(GuardrailError::new(
+                "NESTED_ARCHIVE_PROHIBITED",
+                format!(
+                    "ZIP entry \"{}\" contains a disguised nested archive stream.",
+                    entry.raw_name
+                ),
+                400,
+            ));
+        }
+        if out_buf.is_empty() {
+            continue;
         }
         let actual_crc = crc32_ieee(&out_buf);
         if actual_crc != entry.crc32 {
@@ -967,6 +1059,14 @@ pub fn unpack_zip_archive_bytes(
                 base64: None,
             });
         }
+    }
+
+    if unpacked_docs.is_empty() {
+        return Err(GuardrailError::new(
+            "EMPTY_ZIP_ARCHIVE",
+            format!("ZIP archive \"{zip_name}\" contains no non-empty disclosure files."),
+            400,
+        ));
     }
 
     Ok(unpacked_docs)
@@ -2918,4 +3018,142 @@ pub async fn extract_and_ocr_uploads_async(
     }
 
     finalize_upload_batch(extracted_docs, kind, max_total_chars)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use flate2::{write::DeflateEncoder, Compression};
+
+    fn make_test_zip(entries: &[(&str, &[u8], u16, Option<u32>)]) -> Vec<u8> {
+        let mut buf: Vec<u8> = Vec::new();
+        let mut cd_records: Vec<Vec<u8>> = Vec::with_capacity(entries.len());
+
+        for &(name, raw, method, spoofed_uncomp) in entries {
+            let local_offset = buf.len() as u32;
+            let crc = crc32_ieee(raw);
+            let comp: Vec<u8> = if method == 8 {
+                let mut enc = DeflateEncoder::new(Vec::new(), Compression::best());
+                enc.write_all(raw).expect("deflate");
+                enc.finish().expect("finish deflate")
+            } else {
+                raw.to_vec()
+            };
+            let declared_uncomp = spoofed_uncomp.unwrap_or(raw.len() as u32);
+            let name_bytes = name.as_bytes();
+
+            buf.extend_from_slice(&0x0403_4b50u32.to_le_bytes());
+            buf.extend_from_slice(&20u16.to_le_bytes());
+            buf.extend_from_slice(&0u16.to_le_bytes());
+            buf.extend_from_slice(&method.to_le_bytes());
+            buf.extend_from_slice(&0u16.to_le_bytes());
+            buf.extend_from_slice(&0u16.to_le_bytes());
+            buf.extend_from_slice(&crc.to_le_bytes());
+            buf.extend_from_slice(&(comp.len() as u32).to_le_bytes());
+            buf.extend_from_slice(&declared_uncomp.to_le_bytes());
+            buf.extend_from_slice(&(name_bytes.len() as u16).to_le_bytes());
+            buf.extend_from_slice(&0u16.to_le_bytes());
+            buf.extend_from_slice(name_bytes);
+            buf.extend_from_slice(&comp);
+
+            let mut cd = Vec::new();
+            cd.extend_from_slice(&0x0201_4b50u32.to_le_bytes());
+            cd.extend_from_slice(&20u16.to_le_bytes());
+            cd.extend_from_slice(&20u16.to_le_bytes());
+            cd.extend_from_slice(&0u16.to_le_bytes());
+            cd.extend_from_slice(&method.to_le_bytes());
+            cd.extend_from_slice(&0u16.to_le_bytes());
+            cd.extend_from_slice(&0u16.to_le_bytes());
+            cd.extend_from_slice(&crc.to_le_bytes());
+            cd.extend_from_slice(&(comp.len() as u32).to_le_bytes());
+            cd.extend_from_slice(&declared_uncomp.to_le_bytes());
+            cd.extend_from_slice(&(name_bytes.len() as u16).to_le_bytes());
+            cd.extend_from_slice(&0u16.to_le_bytes());
+            cd.extend_from_slice(&0u16.to_le_bytes());
+            cd.extend_from_slice(&0u16.to_le_bytes());
+            cd.extend_from_slice(&0u16.to_le_bytes());
+            cd.extend_from_slice(&0u32.to_le_bytes());
+            cd.extend_from_slice(&local_offset.to_le_bytes());
+            cd.extend_from_slice(name_bytes);
+            cd_records.push(cd);
+        }
+
+        let cd_offset = buf.len() as u32;
+        let mut cd_size = 0u32;
+        for cd in &cd_records {
+            cd_size += cd.len() as u32;
+            buf.extend_from_slice(cd);
+        }
+
+        buf.extend_from_slice(&0x0605_4b50u32.to_le_bytes());
+        buf.extend_from_slice(&0u16.to_le_bytes());
+        buf.extend_from_slice(&0u16.to_le_bytes());
+        buf.extend_from_slice(&(entries.len() as u16).to_le_bytes());
+        buf.extend_from_slice(&(entries.len() as u16).to_le_bytes());
+        buf.extend_from_slice(&cd_size.to_le_bytes());
+        buf.extend_from_slice(&cd_offset.to_le_bytes());
+        buf.extend_from_slice(&0u16.to_le_bytes());
+        buf
+    }
+
+    #[test]
+    fn zip_guardrails_reject_bombs_spoofed_headers_traversal_and_nested_archives() {
+        let legit_doc = b"%PDF-1.5\n1 0 obj << /Type /Catalog >> endobj\n";
+
+        // 1. Valid multi-document ZIP unpacks cleanly
+        let ok_zip = make_test_zip(&[
+            ("01_Inspection.pdf", legit_doc, 8, None),
+            ("02_Title.pdf", legit_doc, 0, None),
+        ]);
+        let unpacked = unpack_zip_archive_bytes("packet.zip", &ok_zip, 20).expect("valid zip");
+        assert_eq!(unpacked.len(), 2);
+
+        // 2. Path traversal (`../` and `/abs/path`) -> 400 UNSAFE_ARCHIVE_ENTRY
+        for unsafe_name in ["../etc/passwd.pdf", "sub/../../secret.pdf", "/etc/hosts.pdf", "C:\\temp\\a.pdf"] {
+            let bad_zip = make_test_zip(&[(unsafe_name, legit_doc, 8, None)]);
+            let err = unpack_zip_archive_bytes("bad.zip", &bad_zip, 20).unwrap_err();
+            assert_eq!(err.status, 400);
+            assert_eq!(err.code, "UNSAFE_ARCHIVE_ENTRY");
+        }
+
+        // 3. Nested archive by filename (`.zip`, `.tar.gz`, `.gz`) and disguised magic bytes -> 400 NESTED_ARCHIVE_PROHIBITED
+        for nested_name in ["inner.zip", "backup.tar.gz", "archive.gz", "sub/bundle.tar"] {
+            let nested_zip = make_test_zip(&[(nested_name, &ok_zip, 0, None)]);
+            let err = unpack_zip_archive_bytes("outer.zip", &nested_zip, 20).unwrap_err();
+            assert_eq!(err.status, 400);
+            assert_eq!(err.code, "NESTED_ARCHIVE_PROHIBITED");
+        }
+        let disguised_nested = make_test_zip(&[("disguised.pdf", &ok_zip, 8, None)]);
+        let err_disguised = unpack_zip_archive_bytes("outer2.zip", &disguised_nested, 20).unwrap_err();
+        assert_eq!(err_disguised.status, 400);
+        assert_eq!(err_disguised.code, "NESTED_ARCHIVE_PROHIBITED");
+
+        // 4. Compression ratio > 50:1 zip-bomb -> 400 ZIP_BOMB_DETECTED
+        let mut high_ratio_payload = b"%PDF-1.5\n".to_vec();
+        high_ratio_payload.resize(300_000, b'A');
+        let ratio_bomb = make_test_zip(&[("ratio_bomb.pdf", &high_ratio_payload, 8, None)]);
+        let err_ratio = unpack_zip_archive_bytes("ratio.zip", &ratio_bomb, 20).unwrap_err();
+        assert_eq!(err_ratio.status, 400);
+        assert_eq!(err_ratio.code, "ZIP_BOMB_DETECTED");
+
+        // 5. Spoofed Central Directory size header (`uncomp_size = 512` while Deflate stream inflates to 300 KB)
+        //    Caught during `Read::take` streaming decompression -> 400 ZIP_BOMB_DETECTED
+        let spoofed_bomb = make_test_zip(&[("spoofed.pdf", &high_ratio_payload, 8, Some(512))]);
+        let err_spoof = unpack_zip_archive_bytes("spoofed.zip", &spoofed_bomb, 20).unwrap_err();
+        assert_eq!(err_spoof.status, 400);
+        assert_eq!(err_spoof.code, "ZIP_BOMB_DETECTED");
+
+        // 6. Entry count > MAX_ZIP_CENTRAL_ENTRIES (40) -> 400 ZIP_BOMB_DETECTED
+        let names: Vec<String> = (0..=MAX_ZIP_CENTRAL_ENTRIES)
+            .map(|i| format!("doc_{i:02}.pdf"))
+            .collect();
+        let many_refs: Vec<(&str, &[u8], u16, Option<u32>)> = names
+            .iter()
+            .map(|n| (n.as_str(), legit_doc.as_slice(), 0u16, None))
+            .collect();
+        let many_zip = make_test_zip(&many_refs);
+        let err_many = unpack_zip_archive_bytes("many.zip", &many_zip, 50).unwrap_err();
+        assert_eq!(err_many.status, 400);
+        assert_eq!(err_many.code, "ZIP_BOMB_DETECTED");
+    }
 }

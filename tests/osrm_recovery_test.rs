@@ -18,7 +18,7 @@ use open_estate::modules::commute::{
     is_router_in_cooldown, RoutingClient, RoutingConfig, ENV_OSRM_FAILURE_COOLDOWN_SECS,
     ENV_OSRM_REGIONS_JSON, ENV_OSRM_TIMEOUT_MS, OSRM_ATTRIBUTION,
 };
-use open_estate::shared::{now_iso, EnvConfig, HttpClient};
+use open_estate::shared::{EnvConfig, HttpClient};
 use open_estate::web::orchestrator::{recompute_report_access, RecomputeAccessStatus};
 use open_estate::web::render::render_report_html_with_brand;
 use open_estate::web::server::{build_router, spawn_startup_background_tasks, AppState};
@@ -183,82 +183,7 @@ async fn make_test_state(extra: Vec<(&str, String)>) -> (AppState, PathBuf) {
 async fn schema_migration_adds_osrm_degraded_idempotently_and_finds_legacy_rows() {
     let dir = std::env::temp_dir().join(format!("oe-osrm-mig-{}", Uuid::new_v4()));
     std::fs::create_dir_all(&dir).unwrap();
-    let db_path = dir.join("legacy.sqlite");
-    let db_url = format!("sqlite://{}?mode=rwc", db_path.display());
-
-    // Simulate a legacy pre-migration SQLite DB without `rendered_html` or `osrm_degraded`.
-    {
-        let pool = sqlx::sqlite::SqlitePoolOptions::new()
-            .connect(&db_url)
-            .await
-            .unwrap();
-        sqlx::query(
-            r#"CREATE TABLE cached_reports (
-                slug VARCHAR(180) PRIMARY KEY,
-                display_address VARCHAR(255) NOT NULL,
-                zip VARCHAR(10),
-                report_json TEXT NOT NULL,
-                updated_at VARCHAR(32) NOT NULL
-            )"#,
-        )
-        .execute(&pool)
-        .await
-        .unwrap();
-
-        let router_down_rep = json!({
-            "meta": { "slug": "legacy-down", "displayAddress": "100 Synthdown St" },
-            "modules": {
-                "access": {
-                    "data": {
-                        "destinations": [{ "key": "downtown", "estimated": true, "estimateReason": "router_down" }],
-                        "note": "Estimated: the routing server did not respond."
-                    },
-                    "warnings": []
-                }
-            }
-        });
-        let outside_cov_rep = json!({
-            "meta": { "slug": "legacy-outside", "displayAddress": "200 Synthfar St" },
-            "modules": {
-                "access": {
-                    "data": {
-                        "destinations": [{ "key": "downtown", "estimated": true, "estimateReason": "outside_coverage" }],
-                        "note": "Estimated: outside the routing map coverage."
-                    },
-                    "warnings": []
-                }
-            }
-        });
-        let unset_rep = json!({
-            "meta": { "slug": "legacy-unset", "displayAddress": "300 Synthunset St" },
-            "modules": {
-                "access": {
-                    "data": {
-                        "destinations": [{ "key": "downtown", "estimated": true, "estimateReason": "router_unset" }],
-                        "note": "Estimated: no routing server is configured."
-                    },
-                    "warnings": []
-                }
-            }
-        });
-
-        for (slug, addr, rep) in [
-            ("legacy-down", "100 Synthdown St", router_down_rep),
-            ("legacy-outside", "200 Synthfar St", outside_cov_rep),
-            ("legacy-unset", "300 Synthunset St", unset_rep),
-        ] {
-            sqlx::query(
-                "INSERT INTO cached_reports (slug, display_address, zip, report_json, updated_at) VALUES (?, ?, '95118', ?, ?)",
-            )
-            .bind(slug)
-            .bind(addr)
-            .bind(rep.to_string())
-            .bind(now_iso())
-            .execute(&pool)
-            .await
-            .unwrap();
-        }
-    }
+    let db_path = dir.join("v3_osrm.sqlite");
 
     let env = EnvConfig::from_map(HashMap::from([(
         "SQLITE_DB_PATH".to_string(),
@@ -266,29 +191,89 @@ async fn schema_migration_adds_osrm_degraded_idempotently_and_finds_legacy_rows(
     )]));
     let db = DbStore::connect(&env).await.unwrap();
     db.ensure_schema().await.unwrap();
-    // Second call must be completely idempotent.
+    // Second call must be completely idempotent on the clean-slate v3 44-table schema.
     db.ensure_schema().await.unwrap();
+
+    let router_down_rep = json!({
+        "meta": { "slug": "legacy-down", "displayAddress": "100 Synthdown St" },
+        "geo": { "zip": "95118", "lat": 37.245, "lon": -121.885 },
+        "modules": {
+            "access": {
+                "data": {
+                    "destinations": [{ "key": "downtown", "estimated": true, "estimateReason": "router_down" }],
+                    "note": "Estimated: the routing server did not respond."
+                },
+                "warnings": []
+            }
+        }
+    });
+    let outside_cov_rep = json!({
+        "meta": { "slug": "legacy-outside", "displayAddress": "200 Synthfar St" },
+        "geo": { "zip": "95118", "lat": 37.246, "lon": -121.886 },
+        "modules": {
+            "access": {
+                "data": {
+                    "destinations": [{ "key": "downtown", "estimated": true, "estimateReason": "outside_coverage" }],
+                    "note": "Estimated: outside the routing map coverage."
+                },
+                "warnings": []
+            }
+        }
+    });
+    let unset_rep = json!({
+        "meta": { "slug": "legacy-unset", "displayAddress": "300 Synthunset St" },
+        "geo": { "zip": "95118", "lat": 37.247, "lon": -121.887 },
+        "modules": {
+            "access": {
+                "data": {
+                    "destinations": [{ "key": "downtown", "estimated": true, "estimateReason": "router_unset" }],
+                    "note": "Estimated: no routing server is configured."
+                },
+                "warnings": []
+            }
+        }
+    });
+
+    for (slug, rep) in [
+        ("legacy-down", &router_down_rep),
+        ("legacy-outside", &outside_cov_rep),
+        ("legacy-unset", &unset_rep),
+    ] {
+        db.put_cached_report(slug, rep, None).await.unwrap();
+    }
+
+    // Verify clean-slate v3 `cached_reports` + `cached_report_sections` persistence and narrow header scan.
+    let headers = db.list_osrm_degraded_report_headers(50).await.unwrap();
+    assert_eq!(headers.len(), 1);
+    assert_eq!(headers[0].slug, "legacy-down");
+    assert!(headers[0].osrm_degraded);
+    assert_eq!(headers[0].zip, "95118");
+
+    let access_sec = db
+        .get_report_section(
+            "legacy-down",
+            open_estate::db::proto::ReportSectionKind::ReportSectionAccess,
+        )
+        .await
+        .unwrap()
+        .expect("cached_report_sections access section");
+    let access_val: Value =
+        serde_json::from_slice(&access_sec.section_msgpack_or_utf8).expect("access section json");
+    assert_eq!(
+        access_val.pointer("/modules/access/data/destinations/0/estimateReason"),
+        Some(&json!("router_down"))
+    );
 
     let degraded = db.list_osrm_degraded_reports(50).await.unwrap();
     assert_eq!(degraded.len(), 1);
     assert_eq!(degraded[0].slug, "legacy-down");
+    assert!(degraded[0].osrm_degraded);
     assert_eq!(db.count_osrm_degraded_reports().await.unwrap(), 1);
-
-    // Even if a legacy row has `osrm_degraded = 0` in DB but `"router_down"` in `report_json`,
-    // `list_osrm_degraded_reports` still picks it up!
-    if let DbBackend::Sqlite(ref pool) = db.backend {
-        sqlx::query("UPDATE cached_reports SET osrm_degraded = 0 WHERE slug = 'legacy-down'")
-            .execute(pool)
-            .await
-            .unwrap();
-    }
-    let legacy_scan = db.list_osrm_degraded_reports(50).await.unwrap();
-    assert_eq!(legacy_scan.len(), 1);
-    assert_eq!(legacy_scan[0].slug, "legacy-down");
 
     // Verify `put_cached_report` distinguishes `router_down` from `outside_coverage`/`router_unset`.
     let fresh_outside = json!({
         "meta": { "slug": "fresh-outside", "displayAddress": "400 Synthisland Rd" },
+        "geo": { "zip": "95118" },
         "modules": {
             "access": {
                 "data": {
@@ -302,6 +287,7 @@ async fn schema_migration_adds_osrm_degraded_idempotently_and_finds_legacy_rows(
         .await
         .unwrap();
     assert!(!db.get_cached_report("fresh-outside").await.unwrap().unwrap().osrm_degraded);
+    assert_eq!(db.list_osrm_degraded_report_headers(50).await.unwrap().len(), 1);
     assert_eq!(db.count_osrm_degraded_reports().await.unwrap(), 1);
 
     let _ = std::fs::remove_dir_all(&dir);
@@ -472,7 +458,12 @@ async fn osrm_down_fallback_cooldown_and_recompute_recovery_end_to_end() {
         .iter()
         .any(|s| s["name"] == OSRM_ATTRIBUTION));
 
-    let html_after = rec_after.rendered_html.expect("re-rendered HTML");
+    assert!(rec_after.rendered_html.is_none());
+    let html_after = render_report_html_with_brand(
+        &rec_after.report,
+        &state.env.brand_name(),
+        &state.env.brand_domain(),
+    );
     assert!(!html_after.contains("\"router_down\""));
     assert!(html_after.contains("\"estimated\":false"));
     assert!(html_after.contains("supermarketDriveTimes"));
@@ -734,10 +725,13 @@ async fn background_watcher_recovers_degraded_reports_on_down_to_up_in_web_mode(
         .as_array()
         .unwrap()
         .is_empty());
-    assert!(rec
-        .rendered_html
-        .unwrap_or_default()
-        .contains("\"estimated\":false"));
+    assert!(rec.rendered_html.is_none());
+    let runtime_html = render_report_html_with_brand(
+        &rec.report,
+        &state.env.brand_name(),
+        &state.env.brand_domain(),
+    );
+    assert!(runtime_html.contains("\"estimated\":false"));
 
     let _ = std::fs::remove_dir_all(&dir);
 }

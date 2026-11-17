@@ -1193,9 +1193,9 @@ pub fn build_insurance_quotes(report: &Value) -> Value {
                 "USGS / State DOI Stand-Alone Seismic Actuarial Benchmark"
             };
             let eq_quote_url = if st == "CA" {
-                "https://www.earthquakeauthority.com/california-earthquake-insurance-policies/cea-earthquake-insurance-premium-calculator"
+                "https://www.earthquakeauthority.com/california-earthquake-insurance-policies/earthquake-insurance-premium-calculator"
             } else {
-                "https://content.naic.org/consumer/earthquake-insurance.htm"
+                "https://content.naic.org/consumer"
             };
             let yb_label = year_built_opt
                 .map(|yb| format!(" and {yb} construction"))
@@ -1725,9 +1725,9 @@ pub fn build_insurance_quotes(report: &Value) -> Value {
                     "Public Seismic Actuarial Filing Benchmark"
                 },
                 if st == "CA" {
-                    "https://www.earthquakeauthority.com/california-earthquake-insurance-policies/cea-earthquake-insurance-premium-calculator"
+                    "https://www.earthquakeauthority.com/california-earthquake-insurance-policies/earthquake-insurance-premium-calculator"
                 } else {
-                    "https://content.naic.org/consumer/earthquake-insurance.htm"
+                    "https://content.naic.org/consumer"
                 },
                 &format!(
                     "Public seismic tariff benchmark at 15% Coverage A deductible (${}); pre-1980 raised wood-frame homes qualify for statutory Brace + Bolt retrofit discounts.",

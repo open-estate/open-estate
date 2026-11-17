@@ -32,6 +32,7 @@ cache_ttl_secs: 604800
 source_attribution:
   name: "PUCT PowerToChoose / PA Power Switch / PUCO Energy Choice Published Benchmarks"
   url: "https://www.powertochoose.org/"
+  reference_url_template: "https://www.powertochoose.org/"
 tariff_catalog:
   electric_rules:
     - id: centerpoint_ercot_houston
@@ -74,9 +75,9 @@ tariff_catalog:
       utility_type: "deregulated_choice"
       rate_schedule: "Residential Rate R + Retail Supplier Choice"
       rate_per_kwh_usd: 0.192
-      off_peak_kwh_usd: 0.163
-      peak_kwh_usd: 0.240
-      monthly_base_fee_usd: 14.00
+      off_peak_kwh_usd: 0.0
+      peak_kwh_usd: 0.0
+      monthly_base_fee_usd: 0.0
       solar_nem_policy: "State Net Metering / Distributed Generation Schedule"
       tariff_url: "https://www.papowerswitch.com/"
       rate_source: "Retail Choice State Switch Portal Benchmark"
@@ -89,9 +90,9 @@ tariff_catalog:
       utility_type: "deregulated_choice"
       rate_schedule: "Residential Standard Choice Offer"
       rate_per_kwh_usd: 0.164
-      off_peak_kwh_usd: 0.139
-      peak_kwh_usd: 0.205
-      monthly_base_fee_usd: 14.00
+      off_peak_kwh_usd: 0.0
+      peak_kwh_usd: 0.0
+      monthly_base_fee_usd: 0.0
       solar_nem_policy: "State Net Metering / Distributed Generation Schedule"
       tariff_url: "https://energychoice.ohio.gov/"
       rate_source: "Retail Choice State Switch Portal Benchmark"

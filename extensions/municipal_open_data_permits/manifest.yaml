@@ -48,4 +48,5 @@ sharing:
 source_attribution:
   name: "US Municipal Open-Data Permit Portals (Socrata / ArcGIS)"
   url: "https://data.sfgov.org/"
+  reference_url_template: "https://data.sfgov.org/"
   notes: "Executes city-specific open-data permit queries cleanly without cross-city fallback confusion."

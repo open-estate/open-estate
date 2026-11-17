@@ -945,6 +945,68 @@ impl ExtensionHub {
         Ok(manifest)
     }
 
+    /// Validates and registers a built-in overlay YAML + optional OpenAPI 3.x extension package
+    /// supplied by `ServerExtensionHooks::extra_extension_packages()`, preserving `builtin = true`
+    /// so overlay packages cannot be accidentally uninstalled via the admin API.
+    pub fn register_hook_package(
+        &self,
+        manifest_yaml: &str,
+        openapi_yaml: Option<&str>,
+    ) -> Result<ExtensionManifestProto> {
+        let pkg = parse_and_validate_package(manifest_yaml, openapi_yaml, Some(true))?;
+        let now = now_iso();
+        let manifest = {
+            let mut guard = self.state.write().expect("ExtensionHub write lock");
+            let mut pkg_mut = pkg;
+            pkg_mut.builtin = true;
+            let manifest =
+                pkg_mut.to_manifest_proto(pkg_mut.doc.enabled_by_default, pkg_mut.doc.priority);
+
+            if let Some(cycle) = detect_dag_cycle_for_candidate(&guard.extensions, &manifest) {
+                return Err(anyhow!(
+                    "Cyclic extension dependency detected for '{}': {}",
+                    manifest.extension_id,
+                    cycle.join(" -> ")
+                ));
+            }
+
+            let installed_at = guard
+                .extensions
+                .get(&pkg_mut.extension_id)
+                .map(|e| e.installed_at.clone())
+                .unwrap_or_else(|| now.clone());
+            let health = if pkg_mut.has_catalog_rules() && !pkg_mut.has_live_http() {
+                "healthy"
+            } else {
+                "ready"
+            };
+            let manifest_yaml_owned = Some(pkg_mut.manifest_yaml.clone());
+            let openapi_yaml_owned = pkg_mut.openapi_yaml.clone();
+            guard.extensions.insert(
+                pkg_mut.extension_id.clone(),
+                RegisteredExtensionEntry {
+                    extension_id: pkg_mut.extension_id.clone(),
+                    manifest: manifest.clone(),
+                    driver_slot: Arc::new(ExtensionDriverSlot::DeclarativeOrOpenApi(Arc::new(
+                        pkg_mut,
+                    ))),
+                    manifest_yaml: manifest_yaml_owned,
+                    openapi_yaml: openapi_yaml_owned,
+                    config_json: "{}".to_string(),
+                    health_status: health.to_string(),
+                    last_checked_at: None,
+                    installed_at,
+                    updated_at: now,
+                },
+            );
+            guard.cached_snapshot = None;
+            manifest
+        };
+
+        self.bump_and_refresh();
+        Ok(manifest)
+    }
+
     /// Removes a custom extension (`builtin == false`). Built-in packages cannot be deleted, only disabled.
     pub fn uninstall(&self, extension_id: &str) -> Result<bool> {
         let clean = extension_id.trim();
@@ -1030,6 +1092,39 @@ impl ExtensionHub {
                     if manifest.sharing.is_none() {
                         manifest.sharing = prev.manifest.sharing.clone();
                     }
+                    if manifest.source_attribution.is_none()
+                        && prev.manifest.source_attribution.is_some()
+                    {
+                        manifest.source_attribution = prev.manifest.source_attribution.clone();
+                    }
+                    if manifest
+                        .homepage_url
+                        .as_deref()
+                        .map(|s| s.trim().is_empty())
+                        .unwrap_or(true)
+                        && prev
+                            .manifest
+                            .homepage_url
+                            .as_deref()
+                            .map(|s| !s.trim().is_empty())
+                            .unwrap_or(false)
+                    {
+                        manifest.homepage_url = prev.manifest.homepage_url.clone();
+                    }
+                    if manifest
+                        .documentation_url
+                        .as_deref()
+                        .map(|s| s.trim().is_empty())
+                        .unwrap_or(true)
+                        && prev
+                            .manifest
+                            .documentation_url
+                            .as_deref()
+                            .map(|s| !s.trim().is_empty())
+                            .unwrap_or(false)
+                    {
+                        manifest.documentation_url = prev.manifest.documentation_url.clone();
+                    }
                     (
                         prev.manifest_yaml.clone(),
                         prev.openapi_yaml.clone(),
@@ -1074,6 +1169,90 @@ impl ExtensionHub {
                 .then_with(|| a.extension_id.cmp(&b.extension_id))
         });
         out
+    }
+
+    /// Resolves a live reference URL for `extension_id` (and optional catalog `rule_id`) using
+    /// the extension's current `ExtensionManifestProto` (falling back to `ExtensionHub::global()`).
+    pub fn resolve_extension_reference_url(
+        &self,
+        extension_id: &str,
+        rule_id: Option<&str>,
+        query: &ExtensionQueryProto,
+    ) -> Option<String> {
+        let raw_id = extension_id.trim();
+        if raw_id.is_empty() {
+            return None;
+        }
+        let clean_id = match raw_id {
+            "fcc_broadband_bdc_live" => "fcc_broadband_bdc",
+            "epa_echo_sdwis" | "sdwis_water" => "epa_sdwis_water",
+            "usgs_asce7" => "usgs_asce7_seismic",
+            other => other,
+        };
+        let manifest_opt = {
+            let guard = self.state.read().expect("ExtensionHub read lock");
+            guard.extensions.get(clean_id).map(|e| e.manifest.clone())
+        }
+        .or_else(|| {
+            let guard = Self::global().state.read().expect("ExtensionHub read lock");
+            guard.extensions.get(clean_id).map(|e| e.manifest.clone())
+        });
+        let manifest = manifest_opt?;
+        crate::extensions::yaml_runner::resolve_manifest_proto_reference_url(
+            &manifest, rule_id, query,
+        )
+    }
+
+    /// Collects all unique lowercase hostnames declared across registered extension manifests
+    /// (`homepage_url`, `documentation_url`, `source_attribution`, and catalog rules).
+    pub fn registered_reference_hosts(&self) -> Vec<String> {
+        let mut hosts = std::collections::BTreeSet::new();
+        let mut collect_from = |hub: &ExtensionHub| {
+            let guard = hub.state.read().expect("ExtensionHub read lock");
+            for entry in guard.extensions.values() {
+                let m = &entry.manifest;
+                let mut candidates: Vec<&str> = Vec::new();
+                if let Some(ref u) = m.homepage_url {
+                    candidates.push(u.as_str());
+                }
+                if let Some(ref u) = m.documentation_url {
+                    candidates.push(u.as_str());
+                }
+                if let Some(ref sa) = m.source_attribution {
+                    candidates.push(sa.url.as_str());
+                    candidates.push(sa.reference_url_template.as_str());
+                }
+                if let Some(ref tc) = m.tariff_catalog {
+                    for r in &tc.electric_rules {
+                        candidates.push(r.tariff_url.as_str());
+                    }
+                    for r in &tc.gas_rules {
+                        candidates.push(r.tariff_url.as_str());
+                    }
+                    for r in &tc.water_sewer_trash_rules {
+                        if let Some(ref u) = r.water_tariff_url {
+                            candidates.push(u.as_str());
+                        }
+                    }
+                }
+                if let Some(ref fc) = m.footprint_catalog {
+                    for r in &fc.broadband_rules {
+                        candidates.push(r.check_url.as_str());
+                    }
+                }
+                for raw in candidates {
+                    let clean_tpl = raw.split("?").next().unwrap_or(raw).trim();
+                    if let Ok(parsed) = url::Url::parse(clean_tpl) {
+                        if let Some(h) = parsed.host_str() {
+                            hosts.insert(h.to_ascii_lowercase());
+                        }
+                    }
+                }
+            }
+        };
+        collect_from(self);
+        collect_from(Self::global());
+        hosts.into_iter().collect()
     }
 
     /// Rich JSON representation of all registered extensions for `/api/admin/extensions`.
@@ -2499,7 +2678,9 @@ fn entry_to_admin_json(
         "cacheTtlSecs": m.cache_ttl_secs,
         "protoMessageType": m.proto_message_type,
         "defaultProvenance": provenance_tier_slug(prov),
+        "homepageUrl": m.homepage_url,
         "documentationUrl": m.documentation_url,
+        "sourceAttribution": m.source_attribution,
         "codeowners": m.codeowners,
         "geoScope": m.geo_scope,
         "authType": auth_type,

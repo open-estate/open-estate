@@ -2,10 +2,7 @@
 //! persisted lazy artifacts (`property_lazy_artifacts`), and section-ready subscriptions
 //! (`report_section_subscriptions`).
 
-use crate::db::{
-    mysql_opt_str, report_has_osrm_router_down, sqlite_opt_str, DbBackend, DbRowExt, DbStore,
-    SqlParam,
-};
+use crate::db::{DbRowExt, DbStore, SqlParam};
 use crate::shared::{now_iso, now_unix_secs};
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
@@ -923,7 +920,7 @@ impl DbStore {
         Ok(())
     }
 
-    /// Fetches the raw `cached_reports` row directly from the database (bypassing `l1_reports`).
+    /// Fetches the `cached_reports` record directly from the database (bypassing `l1_reports`).
     pub async fn get_cached_report_from_db_bypass_l1(
         &self,
         slug: &str,
@@ -932,60 +929,8 @@ impl DbStore {
         if clean_slug.is_empty() {
             return Ok(None);
         }
-        self.ensure_schema().await?;
-        let sql = "SELECT slug, display_address, zip, report_json, rendered_html, osrm_degraded, updated_at FROM cached_reports WHERE slug = ?";
-        let raw_tuple = match &self.backend {
-            DbBackend::Sqlite(pool) => sqlx::query(sql)
-                .bind(clean_slug)
-                .fetch_optional(pool)
-                .await?
-                .map(|r| {
-                    (
-                        sqlite_opt_str(&r, "slug").unwrap_or_default(),
-                        sqlite_opt_str(&r, "display_address").unwrap_or_default(),
-                        sqlite_opt_str(&r, "zip"),
-                        sqlite_opt_str(&r, "report_json").unwrap_or_default(),
-                        sqlite_opt_str(&r, "rendered_html"),
-                        crate::db::sqlite_opt_i64(&r, "osrm_degraded").unwrap_or(0) != 0,
-                        sqlite_opt_str(&r, "updated_at").unwrap_or_default(),
-                    )
-                }),
-            DbBackend::MySql { pool, .. } => sqlx::query(sql)
-                .bind(clean_slug)
-                .fetch_optional(pool)
-                .await?
-                .map(|r| {
-                    (
-                        mysql_opt_str(&r, "slug").unwrap_or_default(),
-                        mysql_opt_str(&r, "display_address").unwrap_or_default(),
-                        mysql_opt_str(&r, "zip"),
-                        mysql_opt_str(&r, "report_json").unwrap_or_default(),
-                        mysql_opt_str(&r, "rendered_html"),
-                        crate::db::mysql_opt_i64(&r, "osrm_degraded").unwrap_or(0) != 0,
-                        mysql_opt_str(&r, "updated_at").unwrap_or_default(),
-                    )
-                }),
-        };
-
-        let Some((s, display_address, zip, report_json, rendered_html, col_degraded, updated_at)) =
-            raw_tuple
-        else {
-            return Ok(None);
-        };
-        let report: Value = match serde_json::from_str(&report_json) {
-            Ok(v) => v,
-            Err(_) => return Ok(None),
-        };
-        let osrm_degraded = col_degraded || report_has_osrm_router_down(&report);
-        Ok(Some(crate::db::CachedReportRecord {
-            slug: s,
-            display_address,
-            zip,
-            report,
-            rendered_html,
-            osrm_degraded,
-            updated_at,
-        }))
+        self.l1_reports.invalidate(clean_slug).await;
+        self.get_cached_report(clean_slug).await
     }
 
     /// Patches `cached_reports` in DB with a strictly advanced `updated_at` timestamp (invalidating
@@ -994,7 +939,7 @@ impl DbStore {
         &self,
         slug: &str,
         report: &Value,
-        rendered_html: Option<&str>,
+        _rendered_html: Option<&str>,
         new_updated_at: &str,
     ) -> Result<()> {
         let clean_slug: String = slug.trim().chars().take(180).collect();
@@ -1012,56 +957,16 @@ impl DbStore {
             obj.remove("coBranding");
         }
 
-        let zip = clean_report
-            .pointer("/geo/zip")
-            .and_then(Value::as_str)
-            .or_else(|| {
-                clean_report
-                    .pointer("/modules/geocode/data/zip")
-                    .and_then(Value::as_str)
-            })
-            .or_else(|| clean_report.pointer("/facts/zip").and_then(Value::as_str))
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(|s| s.chars().take(5).collect::<String>());
-
-        let display_address: String = clean_report
-            .pointer("/meta/displayAddress")
-            .and_then(Value::as_str)
-            .or_else(|| {
-                clean_report
-                    .pointer("/geo/displayAddress")
-                    .and_then(Value::as_str)
-            })
-            .or_else(|| {
-                clean_report
-                    .pointer("/meta/inputAddress")
-                    .and_then(Value::as_str)
-            })
-            .or_else(|| clean_report.pointer("/meta/input").and_then(Value::as_str))
-            .unwrap_or(&clean_slug)
-            .chars()
-            .take(255)
-            .collect();
-
-        let osrm_degraded = report_has_osrm_router_down(&clean_report);
-        let report_json = serde_json::to_string(&clean_report)?;
-
         self.l1_reports.invalidate(&clean_slug).await;
-        self.upsert_row(
-            "cached_reports",
-            &[
-                ("slug", clean_slug.clone().into()),
-                ("display_address", display_address.into()),
-                ("zip", zip.into()),
-                ("report_json", report_json.into()),
-                ("rendered_html", rendered_html.into()),
-                ("osrm_degraded", i64::from(osrm_degraded).into()),
-                ("updated_at", new_updated_at.trim().into()),
-            ],
-            &["slug"],
-        )
-        .await?;
+        self.put_cached_report(&clean_slug, &clean_report, None).await?;
+        if let Some(upd_ts) = crate::db::proto::iso_to_unix_ts(new_updated_at.trim()) {
+            let _ = self
+                .execute_params_raw(
+                    "UPDATE cached_reports SET updated_ts = ? WHERE slug = ?",
+                    &[SqlParam::I64(upd_ts), SqlParam::from(clean_slug.as_str())],
+                )
+                .await;
+        }
         self.l1_reports.invalidate(&clean_slug).await;
         Ok(())
     }

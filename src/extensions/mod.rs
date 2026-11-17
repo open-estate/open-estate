@@ -23,7 +23,8 @@ pub use registry::{ExtensionHub, ExtensionTestFetchResult, RuntimeRegistrySnapsh
 pub use yaml_runner::{
     build_extension_rate_limiter, build_template_context, execute_catalog_rules, execute_live_http,
     execute_upstream_yaml_mapper, is_optional_auth_missing, map_json_to_envelopes,
-    normalize_carrier_brand_key, render_query_template, CachedEnvelopeEntry,
+    normalize_carrier_brand_key, render_query_template, resolve_manifest_reference_url,
+    CachedEnvelopeEntry,
 };
 
 #[cfg(test)]
@@ -43,7 +44,7 @@ mod tests {
         for id in [
             "census_geocoder",
             "ip_geolocation",
-            "fcc_broadband_bdc",
+            "fcc_broadband_bdc_live",
             "fema_nfhl",
             "usgs_asce7_seismic",
             "epa_sdwis_water",
@@ -65,6 +66,8 @@ mod tests {
                 "Built-in extension '{id}' should be registered and enabled by default"
             );
         }
+        assert!(manifests.iter().any(|m| m.extension_id == "fcc_broadband_bdc"));
+        assert!(!hub.is_enabled("fcc_broadband_bdc"));
         assert!(!hub.is_enabled("sonic_fiber_availability"));
     }
 

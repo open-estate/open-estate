@@ -49,6 +49,7 @@ sharing:
 source_attribution:
   name: "US EPA SDWIS — Community Water System Service Area Boundaries"
   url: "https://services.arcgis.com/cJ9YHowT8TU7DUyn/ArcGIS/rest/services/Water_System_Boundaries/FeatureServer/0"
+  reference_url_template: "https://echo.epa.gov/detailed-facility-report?fid={{pwsid}}&sys=SDWIS"
   notes: "Excludes Wholesaler of Water entities (e.g. wholesale districts) so features[0] resolves the parcel's retail community water system."
 openapi:
   spec_file: "openapi.yaml"

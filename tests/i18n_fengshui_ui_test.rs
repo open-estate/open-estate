@@ -965,6 +965,11 @@ function assert(cond, msg) {{
         viewport: {{ width: 1360, height: 900 }},
       }});
       const page = await ctx.newPage();
+      const pageErrors = [];
+      page.on('pageerror', (err) => pageErrors.push(String(err)));
+      page.on('console', (msg) => {{
+        if (msg.type() === 'error') pageErrors.push('console.error: ' + msg.text());
+      }});
       const translateCalls = [];
       page.on('request', (req) => {{
         const u = req.url();
@@ -973,14 +978,26 @@ function assert(cond, msg) {{
       // Block external CDN map tiles so headless page settles instantaneously without internet dependency
       await page.route('https://**/*', (route) => route.abort());
 
-      await page.goto(`${{BASE}}/r/{primary_slug}/?lang=en`, {{
+      const navResp = await page.goto(`${{BASE}}/r/{primary_slug}/?lang=en`, {{
         waitUntil: 'domcontentloaded',
       }});
-      await page.waitForFunction(() => {{
-        const fs = document.getElementById('fengshui');
-        const dil = document.getElementById('diligence');
-        return fs && fs.innerHTML.includes('堪舆风水') && dil && dil.innerHTML.length > 200;
-      }}, {{ timeout: 15000 }});
+      try {{
+        await page.waitForFunction(() => {{
+          const fs = document.getElementById('fengshui');
+          const dil = document.getElementById('diligence');
+          return fs && fs.innerHTML.includes('堪舆风水') && dil && dil.innerHTML.length > 200;
+        }}, null, {{ timeout: 15000 }});
+      }} catch (waitErr) {{
+        const diag = await page.evaluate(() => ({{
+          title: document.title,
+          fsLen: document.getElementById('fengshui')?.innerHTML.length || 0,
+          fsHead: (document.getElementById('fengshui')?.innerHTML || '').slice(0, 200),
+          dilLen: document.getElementById('diligence')?.innerHTML.length || 0,
+          dilHead: (document.getElementById('diligence')?.innerHTML || '').slice(0, 200),
+        }})).catch((e) => ({{ evalErr: String(e) }}));
+        console.error('PLAYWRIGHT_WAIT_DIAG:', JSON.stringify({{ scheme, status: navResp?.status(), pageErrors, diag }}));
+        throw waitErr;
+      }}
 
       const snapEn = await page.evaluate(() => {{
         const htmlOf = (id) => document.getElementById(id)?.innerHTML || '';

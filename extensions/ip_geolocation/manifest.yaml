@@ -59,5 +59,6 @@ response_mapping:
 attribution:
   source_name: "ipwho.is Keyless IP Geolocation + U.S. Census Bureau TIGER Geographies"
   source_url: "https://ipwho.is/"
+  reference_url_template: "https://ipwho.is/"
   schedule_or_version: "IPv4 /24 & IPv6 /48 + Census TIGER Current_Current"
   notes: "Falls back across ipwho.is, FreeIPAPI, and ipapi.co, then resolves exact 5-digit ZCTA5 and CBSA metro via Census geographies/coordinates. Never returns synthetic fallback ZIP codes."

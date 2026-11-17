@@ -610,8 +610,8 @@ fn school_metrics_table_ships_for_both_dialects() {
         .expect("MySQL DDL");
     assert!(my.contains("PRIMARY KEY") && my.contains("INDEX idx_school_metrics_nces_year"));
     assert!(
-        my.contains("LONGTEXT"),
-        "HeatWave compatibility check requires LONGTEXT"
+        !my.contains("LONGTEXT") && !my.contains(" JSON "),
+        "v3 HeatWave Rapid school_metrics table must have zero LONGTEXT/JSON columns"
     );
     assert!(sqlite_ddl()
         .iter()
@@ -620,17 +620,19 @@ fn school_metrics_table_ships_for_both_dialects() {
         .iter()
         .any(|s| s.contains("idx_school_metrics_nces_year")));
     for col in [
-        "state",
+        "metric_sk",
+        "metric_key",
+        "state_code",
         "nces_id",
         "cds_code",
         "level",
-        "year",
+        "academic_year",
         "ela_pct",
         "math_pct",
         "combined_pct",
         "percentile",
-        "source",
-        "updated_at",
+        "source_citation",
+        "updated_ts",
     ] {
         assert!(my.contains(&format!("{col} ")), "MySQL DDL lacks {col}");
     }
@@ -639,10 +641,10 @@ fn school_metrics_table_ships_for_both_dialects() {
         up.contains("AS new_row ON DUPLICATE KEY UPDATE") && !up.contains("VALUES("),
         "{up}"
     );
-    assert_eq!(up.matches('?').count(), 24);
+    assert_eq!(up.matches('?').count(), 26);
     let up = build_school_metrics_upsert("sqlite", 3);
-    assert!(up.contains("ON CONFLICT(id) DO UPDATE SET"), "{up}");
-    assert_eq!(up.matches('?').count(), 36);
+    assert!(up.contains("ON CONFLICT(metric_key) DO UPDATE SET"), "{up}");
+    assert_eq!(up.matches('?').count(), 39);
 }
 
 #[tokio::test]

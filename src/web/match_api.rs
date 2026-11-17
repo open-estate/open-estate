@@ -12,9 +12,8 @@
 //! no LLM ever sets or alters a numeric score, and `openEstateScore` (`report.summary.scores.overall`)
 //! stays untouched and strictly separate from `scored.matchScore`.
 
-use crate::db::{
-    mysql_opt_i64, mysql_opt_str, sqlite_opt_i64, sqlite_opt_str, DbBackend,
-};
+use crate::db::proto::listing_status_from_code;
+use crate::db::{extract_section_json, ReportSectionKind};
 use crate::guardrails::{
     enforce_allowed_body_keys, validate_address_input, validate_slug_param, validate_zip_list,
     verify_same_origin, GuardrailError,
@@ -38,7 +37,7 @@ use crate::search::rank::{
 };
 use crate::search::{ingest_listings, query_listings, IngestListingsRequest};
 use crate::search::sync::seed_reports_from_dir;
-use crate::web::hooks::authorize_cached_report;
+use crate::web::hooks::{authorize_cached_report, authorize_narrow_report};
 use crate::web::server::{
     json_response, map_anyhow, map_guardrail, parse_json_body, req_host_str,
     resolve_client_ip_from_req, ApiResult, AppState,
@@ -140,138 +139,89 @@ pub async fn handle_match_areas(
     let needle = raw_q.trim().to_lowercase();
     let limit = q.limit.unwrap_or(50).clamp(1, 200);
 
-    let zip_sql = "SELECT zip, status, COUNT(*) AS cnt, MIN(city) AS city, MIN(state) AS state \
-                   FROM listings \
-                   WHERE zip IS NOT NULL AND TRIM(zip) <> '' \
-                     AND status IN ('for_sale', 'pending', 'sold') \
-                   GROUP BY zip, status";
+    let hint = state.db.rapid_query_hint_for_scan(0, false);
+    let zip_sql = format!(
+        "SELECT {hint} zip, status, COUNT(*) AS cnt, MIN(city) AS city, MIN(state_code) AS state_code \
+         FROM listings \
+         WHERE zip != '' AND status IN (1, 2, 3) \
+         GROUP BY zip, status"
+    );
+    let city_sql = format!(
+        "SELECT {hint} city, state_code, status, COUNT(*) AS cnt \
+         FROM listings \
+         WHERE city IS NOT NULL AND TRIM(city) != '' AND status IN (1, 2, 3) \
+         GROUP BY city, state_code, status"
+    );
 
-    let city_sql = "SELECT city, state, status, COUNT(*) AS cnt \
-                    FROM listings \
-                    WHERE city IS NOT NULL AND TRIM(city) <> '' \
-                      AND status IN ('for_sale', 'pending', 'sold') \
-                    GROUP BY city, state, status";
+    let (zrows, crows) = tokio::try_join!(
+        state.db.fetch_all_mapped_raw(&zip_sql, &[], |r| {
+            (
+                r.opt_str("zip"),
+                r.opt_i64("status").unwrap_or(1) as i32,
+                r.opt_i64("cnt").unwrap_or(0),
+                r.opt_str("city"),
+                r.opt_str("state_code"),
+            )
+        }),
+        state.db.fetch_all_mapped_raw(&city_sql, &[], |r| {
+            (
+                r.opt_str("city"),
+                r.opt_str("state_code"),
+                r.opt_i64("status").unwrap_or(1) as i32,
+                r.opt_i64("cnt").unwrap_or(0),
+            )
+        }),
+    )
+    .map_err(map_anyhow)?;
 
     let mut zips_map: HashMap<String, ZipAreaItem> = HashMap::new();
     let mut cities_map: HashMap<(String, String), CityAreaItem> = HashMap::new();
 
-    match &state.db.backend {
-        DbBackend::Sqlite(pool) => {
-            let zrows = sqlx::query(zip_sql)
-                .fetch_all(pool)
-                .await
-                .map_err(|e| map_anyhow(e.into()))?;
-            for r in &zrows {
-                let Some(zip) = clean_opt(sqlite_opt_str(r, "zip")) else {
-                    continue;
-                };
-                let status = sqlite_opt_str(r, "status").unwrap_or_default();
-                let cnt = sqlite_opt_i64(r, "cnt").unwrap_or(0);
-                let city = clean_opt(sqlite_opt_str(r, "city"));
-                let st = clean_opt(sqlite_opt_str(r, "state")).map(|s| s.to_ascii_uppercase());
-                let entry = zips_map.entry(zip.clone()).or_insert_with(|| ZipAreaItem {
-                    zip,
-                    ..Default::default()
-                });
-                entry.count += cnt;
-                add_status_count(&mut entry.active_count, &mut entry.sold_count, &status, cnt);
-                if entry.city.is_none() {
-                    entry.city = city;
-                }
-                if entry.state.is_none() {
-                    entry.state = st;
-                }
-            }
-
-            let crows = sqlx::query(city_sql)
-                .fetch_all(pool)
-                .await
-                .map_err(|e| map_anyhow(e.into()))?;
-            for r in &crows {
-                let Some(city) = clean_opt(sqlite_opt_str(r, "city")) else {
-                    continue;
-                };
-                let st = clean_opt(sqlite_opt_str(r, "state"))
-                    .map(|s| s.to_ascii_uppercase())
-                    .unwrap_or_default();
-                let status = sqlite_opt_str(r, "status").unwrap_or_default();
-                let cnt = sqlite_opt_i64(r, "cnt").unwrap_or(0);
-                let key = (city.to_ascii_lowercase(), st.clone());
-                let entry = cities_map.entry(key).or_insert_with(|| {
-                    let label = if st.is_empty() {
-                        city.clone()
-                    } else {
-                        format!("{city}, {st}")
-                    };
-                    CityAreaItem {
-                        city,
-                        state: st,
-                        label,
-                        ..Default::default()
-                    }
-                });
-                entry.count += cnt;
-                add_status_count(&mut entry.active_count, &mut entry.sold_count, &status, cnt);
-            }
+    for (zip_opt, status_code, cnt, city_opt, st_opt) in zrows {
+        let Some(zip) = clean_opt(zip_opt) else {
+            continue;
+        };
+        let status = listing_status_from_code(status_code);
+        let city = clean_opt(city_opt);
+        let st = clean_opt(st_opt).map(|s| s.to_ascii_uppercase());
+        let entry = zips_map.entry(zip.clone()).or_insert_with(|| ZipAreaItem {
+            zip,
+            ..Default::default()
+        });
+        entry.count += cnt;
+        add_status_count(&mut entry.active_count, &mut entry.sold_count, status, cnt);
+        if entry.city.is_none() {
+            entry.city = city;
         }
-        DbBackend::MySql { pool, .. } => {
-            let zrows = sqlx::query(zip_sql)
-                .fetch_all(pool)
-                .await
-                .map_err(|e| map_anyhow(e.into()))?;
-            for r in &zrows {
-                let Some(zip) = clean_opt(mysql_opt_str(r, "zip")) else {
-                    continue;
-                };
-                let status = mysql_opt_str(r, "status").unwrap_or_default();
-                let cnt = mysql_opt_i64(r, "cnt").unwrap_or(0);
-                let city = clean_opt(mysql_opt_str(r, "city"));
-                let st = clean_opt(mysql_opt_str(r, "state")).map(|s| s.to_ascii_uppercase());
-                let entry = zips_map.entry(zip.clone()).or_insert_with(|| ZipAreaItem {
-                    zip,
-                    ..Default::default()
-                });
-                entry.count += cnt;
-                add_status_count(&mut entry.active_count, &mut entry.sold_count, &status, cnt);
-                if entry.city.is_none() {
-                    entry.city = city;
-                }
-                if entry.state.is_none() {
-                    entry.state = st;
-                }
-            }
-
-            let crows = sqlx::query(city_sql)
-                .fetch_all(pool)
-                .await
-                .map_err(|e| map_anyhow(e.into()))?;
-            for r in &crows {
-                let Some(city) = clean_opt(mysql_opt_str(r, "city")) else {
-                    continue;
-                };
-                let st = clean_opt(mysql_opt_str(r, "state"))
-                    .map(|s| s.to_ascii_uppercase())
-                    .unwrap_or_default();
-                let status = mysql_opt_str(r, "status").unwrap_or_default();
-                let cnt = mysql_opt_i64(r, "cnt").unwrap_or(0);
-                let key = (city.to_ascii_lowercase(), st.clone());
-                let entry = cities_map.entry(key).or_insert_with(|| {
-                    let label = if st.is_empty() {
-                        city.clone()
-                    } else {
-                        format!("{city}, {st}")
-                    };
-                    CityAreaItem {
-                        city,
-                        state: st,
-                        label,
-                        ..Default::default()
-                    }
-                });
-                entry.count += cnt;
-                add_status_count(&mut entry.active_count, &mut entry.sold_count, &status, cnt);
-            }
+        if entry.state.is_none() {
+            entry.state = st;
         }
+    }
+
+    for (city_opt, st_opt, status_code, cnt) in crows {
+        let Some(city) = clean_opt(city_opt) else {
+            continue;
+        };
+        let st = clean_opt(st_opt)
+            .map(|s| s.to_ascii_uppercase())
+            .unwrap_or_default();
+        let status = listing_status_from_code(status_code);
+        let key = (city.to_ascii_lowercase(), st.clone());
+        let entry = cities_map.entry(key).or_insert_with(|| {
+            let label = if st.is_empty() {
+                city.clone()
+            } else {
+                format!("{city}, {st}")
+            };
+            CityAreaItem {
+                city,
+                state: st,
+                label,
+                ..Default::default()
+            }
+        });
+        entry.count += cnt;
+        add_status_count(&mut entry.active_count, &mut entry.sold_count, status, cnt);
     }
 
     let mut zips: Vec<ZipAreaItem> = zips_map
@@ -690,7 +640,8 @@ pub async fn handle_match_score(
         Profile::default()
     };
 
-    // 2. Load report via slug (`state.db.get_cached_report` / disk cache) or inline `report` JSON
+    // 2. Load narrow `ReportHeaderProto` + `ReportSectionFactors` (~1 KB) when available,
+    //    falling back to full cached/disk report or inline `report` JSON when needed.
     let slug_opt = body
         .get("slug")
         .and_then(Value::as_str)
@@ -698,69 +649,133 @@ pub async fn handle_match_score(
         .filter(|s| !s.is_empty());
     let inline_report = body.get("report").filter(|v| !v.is_null());
 
-    let report: Value = if let Some(raw_slug) = slug_opt {
+    let mut narrow_factors_hit: Option<(HomeFactors, Value, Option<LatLon>)> = None;
+    let private_reports = state
+        .env
+        .get("PRIVATE_REPORTS_REQUIRED")
+        .map(crate::shared::is_truthy_flag)
+        .unwrap_or(false);
+    let raw_q_str = raw_query.as_deref().unwrap_or("");
+    if let Some(raw_slug) = slug_opt {
         let clean_slug = validate_slug_param(raw_slug).map_err(map_guardrail)?;
-        match authorize_cached_report(
-            &state,
-            &clean_slug,
-            &headers,
-            raw_query.as_deref().unwrap_or(""),
-            false,
-        )
-        .await
-        {
-            Ok(auth) => auth.record.report,
-            Err(err_resp) if err_resp.status() != StatusCode::NOT_FOUND => return Ok(err_resp),
-            Err(_) => {
-                if let Some(rep) = inline_report {
-                    if !rep.is_object() {
-                        return Err(map_guardrail(GuardrailError::new(
-                            "INVALID_REPORT",
-                            "Inline report must be a JSON object.",
-                            400,
-                        )));
+        if !private_reports && !crate::web::cdn_cache::raw_query_has_share_or_api_key(raw_q_str) {
+            if let Some(hdr) = state
+                .db
+                .get_report_header(&clean_slug)
+                .await
+                .map_err(map_anyhow)?
+            {
+                let fac_bit = 1_i32 << (ReportSectionKind::ReportSectionFactors as u32);
+                if (hdr.section_mask & fac_bit) != 0 {
+                    if let Ok(Some(sec_env)) = state
+                        .db
+                        .get_report_section(&hdr.slug, ReportSectionKind::ReportSectionFactors)
+                        .await
+                    {
+                        if let Ok(sec_val) = extract_section_json(&sec_env) {
+                            let f_val = sec_val
+                                .pointer("/root/factors")
+                                .or_else(|| sec_val.get("factors"))
+                                .unwrap_or(&sec_val);
+                            if let Ok(mut hf) = serde_json::from_value::<HomeFactors>(f_val.clone())
+                            {
+                                if hf.id.is_empty() {
+                                    hf.id = hdr.slug.clone();
+                                }
+                                if let Err(err_resp) = authorize_narrow_report(
+                                    &state,
+                                    &hdr.slug,
+                                    Some(&hdr),
+                                    json!({ "factors": f_val }),
+                                    &headers,
+                                    raw_q_str,
+                                    false,
+                                )
+                                .await
+                                {
+                                    return Ok(err_resp);
+                                }
+                                let oe_score = hdr
+                                    .overall_score
+                                    .map(|s| json!(crate::shared::round_n(s, 1)))
+                                    .unwrap_or(Value::Null);
+                                let home_pt = hdr
+                                    .lat
+                                    .zip(hdr.lon)
+                                    .map(|(la, lo)| LatLon::new(la, lo))
+                                    .filter(|pt| pt.is_valid());
+                                narrow_factors_hit = Some((hf, oe_score, home_pt));
+                            }
+                        }
                     }
-                    rep.clone()
-                } else {
-                    return Err(json_response(
-                        StatusCode::NOT_FOUND,
-                        json!({
-                            "ok": false,
-                            "code": "REPORT_NOT_FOUND",
-                            "error": format!("Cached report `{clean_slug}` was not found."),
-                        }),
-                    ));
                 }
             }
         }
-    } else if let Some(rep) = inline_report {
-        if !rep.is_object() {
-            return Err(map_guardrail(GuardrailError::new(
-                "INVALID_REPORT",
-                "Inline report must be a JSON object.",
-                400,
-            )));
-        }
-        rep.clone()
-    } else {
-        return Err(json_response(
-            StatusCode::BAD_REQUEST,
-            json!({
-                "ok": false,
-                "code": "MISSING_REPORT",
-                "error": "Provide either `slug` or inline `report` JSON.",
-            }),
-        ));
-    };
+    }
 
-    // Keep objective Open Estate Score completely untouched
-    let open_estate_score = report
-        .pointer("/summary/scores/overall")
-        .cloned()
-        .unwrap_or(Value::Null);
+    let (mut factors, open_estate_score, home_pt_opt): (HomeFactors, Value, Option<LatLon>) =
+        if let Some(hit) = narrow_factors_hit {
+            hit
+        } else {
+            let report: Value = if let Some(raw_slug) = slug_opt {
+                let clean_slug = validate_slug_param(raw_slug).map_err(map_guardrail)?;
+                match authorize_cached_report(&state, &clean_slug, &headers, raw_q_str, false).await
+                {
+                    Ok(auth) => auth.record.report,
+                    Err(err_resp) if err_resp.status() != StatusCode::NOT_FOUND => {
+                        return Ok(err_resp);
+                    }
+                    Err(_) => {
+                        if let Some(rep) = inline_report {
+                            if !rep.is_object() {
+                                return Err(map_guardrail(GuardrailError::new(
+                                    "INVALID_REPORT",
+                                    "Inline report must be a JSON object.",
+                                    400,
+                                )));
+                            }
+                            rep.clone()
+                        } else {
+                            return Err(json_response(
+                                StatusCode::NOT_FOUND,
+                                json!({
+                                    "ok": false,
+                                    "code": "REPORT_NOT_FOUND",
+                                    "error": format!("Cached report `{clean_slug}` was not found."),
+                                }),
+                            ));
+                        }
+                    }
+                }
+            } else if let Some(rep) = inline_report {
+                if !rep.is_object() {
+                    return Err(map_guardrail(GuardrailError::new(
+                        "INVALID_REPORT",
+                        "Inline report must be a JSON object.",
+                        400,
+                    )));
+                }
+                rep.clone()
+            } else {
+                return Err(json_response(
+                    StatusCode::BAD_REQUEST,
+                    json!({
+                        "ok": false,
+                        "code": "MISSING_REPORT",
+                        "error": "Provide either `slug` or inline `report` JSON.",
+                    }),
+                ));
+            };
 
-    // 3. Extract factors & compute commute matrix if places are provided
-    let mut factors = HomeFactors::from_report(&report);
+            let oe_score = report
+                .pointer("/summary/scores/overall")
+                .cloned()
+                .unwrap_or(Value::Null);
+            let hf = HomeFactors::from_report(&report);
+            let pt = extract_report_lat_lon(&report);
+            (hf, oe_score, pt)
+        };
+
     if factors.id.is_empty() {
         factors.id = slug_opt.unwrap_or("subject").to_string();
     }
@@ -768,7 +783,7 @@ pub async fn handle_match_score(
     let mut commute = CommuteMatrix::new();
     let mut commute_details: Vec<Value> = Vec::new();
     if !profile.places.is_empty() {
-        if let Some(home_pt) = extract_report_lat_lon(&report) {
+        if let Some(home_pt) = home_pt_opt {
             let place_pts: Vec<LatLon> = profile
                 .places
                 .iter()
@@ -1419,30 +1434,19 @@ async fn seed_live_forsale_for_zips(state: &AppState, zips: &[String]) {
 }
 
 async fn fetch_top_indexed_zips(state: &AppState, limit: usize) -> anyhow::Result<Vec<String>> {
-    let sql = "SELECT zip FROM listings WHERE zip IS NOT NULL AND TRIM(zip) <> '' GROUP BY zip ORDER BY COUNT(*) DESC LIMIT 10";
+    let hint = state.db.rapid_query_hint_for_scan(0, false);
+    let sql = format!(
+        "SELECT {hint} zip FROM listings WHERE zip != '' GROUP BY zip ORDER BY COUNT(*) DESC LIMIT 10"
+    );
+    let rows = state
+        .db
+        .fetch_all_mapped_raw(&sql, &[], |r| r.opt_str("zip"))
+        .await?;
     let mut zips = Vec::new();
-    match &state.db.backend {
-        DbBackend::Sqlite(pool) => {
-            let rows = sqlx::query(sql).fetch_all(pool).await?;
-            for r in &rows {
-                if let Some(z) = sqlite_opt_str(r, "zip") {
-                    let clean: String = z.chars().filter(|c| c.is_ascii_digit()).take(5).collect();
-                    if clean.len() == 5 && !zips.contains(&clean) {
-                        zips.push(clean);
-                    }
-                }
-            }
-        }
-        DbBackend::MySql { pool, .. } => {
-            let rows = sqlx::query(sql).fetch_all(pool).await?;
-            for r in &rows {
-                if let Some(z) = mysql_opt_str(r, "zip") {
-                    let clean: String = z.chars().filter(|c| c.is_ascii_digit()).take(5).collect();
-                    if clean.len() == 5 && !zips.contains(&clean) {
-                        zips.push(clean);
-                    }
-                }
-            }
+    for z in rows.into_iter().flatten() {
+        let clean: String = z.chars().filter(|c| c.is_ascii_digit()).take(5).collect();
+        if clean.len() == 5 && !zips.contains(&clean) {
+            zips.push(clean);
         }
     }
     zips.truncate(limit);

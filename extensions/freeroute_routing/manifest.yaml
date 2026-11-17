@@ -48,10 +48,11 @@ sharing:
 source_attribution:
   name: "FreeRoute Matrix API · © OpenStreetMap"
   url: "https://maps.freeroute.org"
+  reference_url_template: "https://maps.freeroute.org/"
 openapi:
   spec_file: "openapi.yaml"
   operation_id: "postFreeRouteDrivingMatrix"
-  body_template: '{"locations":[[{{ lon }},{{ lat }}],[{{ lon }},{{ lat }}]],"sources":[0],"destinations":[1],"metrics":["duration","distance"]}'
+  body_template: '{"locations":[[{{ lon }},{{ lat }}],[{{ dest_lon }},{{ dest_lat }}]],"sources":[0],"destinations":[1],"metrics":["duration","distance"]}'
 response_mapping:
   root_path: "$"
   require_non_empty: true

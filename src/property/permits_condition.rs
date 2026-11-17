@@ -9,7 +9,8 @@ use crate::ai::llm::{responses_json, LlmCacheBackend, LlmCallOptions, LlmInput};
 use crate::ai::title_review::redact_title_pii;
 use crate::guardrails::{clean_untrusted_text, wrap_untrusted_block};
 use crate::property::facts::strip_pii_keys;
-use crate::property::public_records::{resolve_official_record_links, with_data_point_anchor};
+use crate::property::public_records::resolve_official_record_links;
+use crate::shared::with_verified_data_anchor;
 use crate::shared::{round_n, EnvConfig, HttpClient, ModuleOutput, SourceItem};
 use anyhow::Result;
 use chrono::Datelike;
@@ -506,12 +507,12 @@ pub fn normalize_permit_record(
         .and_then(|v| v.as_str())
         .and_then(|u| sanitize_permit_url(Some(u)))
         .or_else(|| sanitize_permit_url(default_source_url))
-        .map(|u| with_data_point_anchor(&u, None, p_anchor_hint.as_deref()));
+        .map(|u| with_verified_data_anchor(&u, None, p_anchor_hint.as_deref()));
     let ds_url = obj
         .get("datasetUrl")
         .and_then(|v| v.as_str())
         .and_then(|u| sanitize_permit_url(Some(u)))
-        .map(|u| with_data_point_anchor(&u, None, p_anchor_hint.as_deref()));
+        .map(|u| with_verified_data_anchor(&u, None, p_anchor_hint.as_deref()));
 
     let mut out = json!({
         "permitNumber": if permit_no.is_empty() { Value::Null } else { json!(permit_no) },
@@ -620,7 +621,7 @@ fn extract_unverified_disclosure_upgrades(
                     let hint = yr.map(|y| y.to_string()).or_else(|| {
                         (!matched_phrase.is_empty()).then(|| matched_phrase.to_string())
                     });
-                    with_data_point_anchor(u, None, hint.as_deref())
+                    with_verified_data_anchor(u, None, hint.as_deref())
                 });
                 out.push(json!({
                     "permitNumber": Value::Null,

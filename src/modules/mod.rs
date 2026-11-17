@@ -2,6 +2,7 @@ pub mod access;
 pub mod agent_recommend;
 pub mod amenities;
 pub mod broadband_live;
+pub mod buyer_copilot;
 pub mod buyer_diligence; // [feat/buyer-decision-complete]
 pub mod buyer_living_nuances;
 pub mod civic;

@@ -468,170 +468,219 @@ impl HomeFactors {
         serde_json::to_value(self).unwrap_or(Value::Null)
     }
 
-    /// Canonical [`ListingRow`](crate::db::ListingRow) -> [`HomeFactors`] conversion for listings
+    ///Canonical [`ListingRow`](crate::db::ListingRow) -> [`HomeFactors`] conversion for listings
     /// without a full cached report or pre-computed `listing_factors` row.
+    ///
+    /// Operates directly on typed `ListingRow` columns (zero `raw_json` parsing and zero
+    /// intermediate `serde_json::Value` allocation) and aligns provenance cleanly with
+    /// [`HomeFactorsRowProto`](crate::db::HomeFactorsRowProto) /
+    /// [`FactorProvenanceProto`](crate::db::FactorProvenanceProto).
     pub fn from_listing_row(listing: &crate::db::ListingRow) -> HomeFactors {
-        use serde_json::json;
+        const FACTS_SOURCE: &str = "Report facts (MLS, county records, listing research)";
+        let as_of_year = current_year();
 
-        let list_price = listing.list_price.or(listing.price).filter(|&p| p > 0);
-        let ownership = list_price.map(|p| {
-            let (total, pi) = estimate_listing_monthly_ownership(
-                p,
-                listing.hoa_monthly.unwrap_or(0),
-                listing.state.as_deref(),
-            );
-            json!({
-                "price": p as f64,
-                "downPaymentPct": 20.0,
-                "rate30": 6.5,
-                "monthly": {
-                    "total": total,
-                    "principalInterest": pi,
-                    "hoa": std::cmp::Ord::max(listing.hoa_monthly.unwrap_or(0), 0) as f64,
-                }
-            })
+        let list_price_num = listing.list_price.or(listing.price).filter(|&p| p > 0);
+        let (monthly_total, monthly_principal_interest, assumed_down_payment_pct, model_price) =
+            if let Some(p) = list_price_num {
+                let (total, pi) = estimate_listing_monthly_ownership(
+                    p,
+                    listing.hoa_monthly.unwrap_or(0),
+                    listing.state.as_deref(),
+                );
+                let mt = (total > 0.0).then(|| {
+                    Factor::new(
+                        total,
+                        "Open Estate cost model (20% down, 30-year fixed at 6.5%)",
+                        Grade::Area,
+                    )
+                    .mark_estimated()
+                });
+                let pr = Factor::new(p as f64, "Open Estate cost-model price", Grade::Report);
+                (mt, Some(pi), Some(20.0), Some(pr))
+            } else {
+                let pr = listing
+                    .price
+                    .filter(|&p| p > 0)
+                    .map(|p| Factor::new(p as f64, "Listing price", Grade::Listing));
+                (None, None, None, pr)
+            };
+
+        let cost = CostFactors {
+            monthly_total,
+            monthly_principal_interest,
+            assumed_down_payment_pct,
+            price: model_price,
+            estimate: listing
+                .estimated_value
+                .filter(|&ev| ev > 0)
+                .map(|ev| Factor::new(ev as f64, "Open Estate value estimate", Grade::Report)),
+            list_price: list_price_num
+                .map(|p| Factor::new(p as f64, "MLS list price", Grade::Listing)),
+            hoa_monthly: listing
+                .hoa_monthly
+                .filter(|&h| h >= 0)
+                .map(|h| Factor::new(h as f64, "Listing and public records", Grade::Listing)),
+            cash_to_close: None,
+            monthly_by_loan: None,
+        };
+
+        let year_built = listing
+            .year_built
+            .map(|y| y as i32)
+            .filter(|y| (1600..=as_of_year + 2).contains(y))
+            .map(|y| Factor::new(y, FACTS_SOURCE, Grade::Listing));
+        let stories = listing
+            .stories
+            .filter(|s| s.is_finite() && *s > 0.0)
+            .map(|s| Factor::new(s, FACTS_SOURCE, Grade::Listing));
+
+        let yb_val = year_built.as_ref().map(|f| f.value);
+        let stories_val = stories.as_ref().map(|f| f.value);
+        let valid_eff_year =
+            |y: i32| y >= 1800 && y <= as_of_year + 1 && yb_val.map_or(true, |b| y >= b);
+        let effective_year = [
+            listing.property_type.as_deref(),
+            listing.features_text.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .find_map(|t| {
+            EFFECTIVE_YEAR_RE
+                .captures(t)
+                .and_then(|c| c.get(1))
+                .and_then(|m| m.as_str().parse::<i32>().ok())
+                .filter(|y| valid_eff_year(*y))
+                .map(|y| {
+                    Factor::new(
+                        y,
+                        "Assessor effective year quoted in the listing facts",
+                        Grade::Listing,
+                    )
+                })
         });
 
-        let mut facts_map = serde_json::Map::new();
-        facts_map.insert("fullAddress".to_string(), json!(listing.address));
-        if let Some(ref pt) = listing.property_type {
-            facts_map.insert("propertyType".to_string(), json!(pt));
-        }
-        if let Some(b) = listing.beds {
-            facts_map.insert("beds".to_string(), json!(b));
-        }
-        if let Some(ba) = listing.baths {
-            facts_map.insert("baths".to_string(), json!(ba));
-        }
-        if let Some(sq) = listing.sqft {
-            facts_map.insert("sqft".to_string(), json!(sq));
-        }
-        if let Some(lot) = listing.lot_sqft {
-            facts_map.insert("lotSqft".to_string(), json!(lot));
-        }
-        if let Some(yb) = listing.year_built {
-            facts_map.insert("yearBuilt".to_string(), json!(yb));
-        }
-        if let Some(st) = listing.stories {
-            facts_map.insert("stories".to_string(), json!(st));
-        }
-        if let Some(hoa) = listing.hoa_monthly {
-            facts_map.insert("hoaMonthly".to_string(), json!(hoa));
-        }
-        if let Some(ref ft) = listing.features_text {
-            facts_map.insert("features".to_string(), json!(ft));
-            facts_map.insert(
-                "mlsListing".to_string(),
-                json!({ "listPrice": list_price, "remarks": ft }),
-            );
-        } else if let Some(lp) = list_price {
-            facts_map.insert("mlsListing".to_string(), json!({ "listPrice": lp }));
-        }
+        let adu = extract_adu_from_listing_fields(
+            listing.features_text.as_deref(),
+            listing.property_type.as_deref(),
+            listing.has_adu == Some(1),
+        );
+        let adu_feasibility = (listing.adu_feasible == Some(1)).then(|| {
+            Factor::new(
+                "Strong".to_string(),
+                "Open Estate lot and ADU screen (open lot area, state ADU law)",
+                Grade::Listing,
+            )
+        });
 
-        if let Some(ref raw) = listing.raw_json {
-            if let Ok(v) = serde_json::from_str::<Value>(raw) {
-                if let Some(style) = v
-                    .get("architecturalStyle")
-                    .or_else(|| v.get("architectureType"))
-                    .and_then(Value::as_str)
-                {
-                    facts_map.insert("architecturalStyle".to_string(), json!(style));
-                }
-                if let Some(rem) = v
-                    .get("remarks")
-                    .or_else(|| v.get("description"))
-                    .and_then(Value::as_str)
-                {
-                    let mls = facts_map.entry("mlsListing").or_insert_with(|| json!({}));
-                    if let Some(obj) = mls.as_object_mut() {
-                        obj.insert("remarks".to_string(), json!(rem));
-                    }
-                }
-            }
-        }
+        let home = HomeFitFactors {
+            property_type: listing
+                .property_type
+                .as_deref()
+                .and_then(PropertyKind::classify)
+                .map(|k| Factor::new(k, FACTS_SOURCE, Grade::Listing)),
+            beds: listing
+                .beds
+                .filter(|b| b.is_finite() && *b >= 0.0)
+                .map(|b| Factor::new(b, FACTS_SOURCE, Grade::Listing)),
+            baths: listing
+                .baths
+                .filter(|b| b.is_finite() && *b >= 0.0)
+                .map(|b| Factor::new(b, FACTS_SOURCE, Grade::Listing)),
+            sqft: listing
+                .sqft
+                .filter(|&s| s > 0)
+                .map(|s| Factor::new(s as f64, FACTS_SOURCE, Grade::Listing)),
+            lot_sqft: listing
+                .lot_sqft
+                .filter(|&s| s > 0)
+                .map(|s| Factor::new(s as f64, FACTS_SOURCE, Grade::Listing)),
+            stories,
+            year_built,
+            effective_year,
+            adu,
+            adu_feasibility,
+            main_level_bedrooms: None,
+            main_level_bathrooms: None,
+            parking_spaces: listing
+                .garage_spaces
+                .filter(|p| p.is_finite() && *p >= 0.0)
+                .map(|p| Factor::new(p, FACTS_SOURCE, Grade::Listing)),
+        };
 
-        let mut modules_map = serde_json::Map::new();
-        if let Some(own) = ownership {
-            modules_map.insert(
-                "valuation".to_string(),
-                json!({
-                    "data": {
-                        "ownership": own,
-                        "estimate": listing.estimated_value.map(|ev| json!({ "value": ev })),
-                    }
-                }),
-            );
-        }
-        if let Some(ws) = listing.walk_score.filter(|&w| (0.0..=100.0).contains(&w)) {
-            modules_map.insert(
-                "civic".to_string(),
-                json!({ "data": { "scores": { "walkability": ws } } }),
-            );
-        }
+        let style = extract_style_from_listing_fields(
+            listing.architectural_style.as_deref(),
+            listing.property_type.as_deref(),
+            listing.features_text.as_deref(),
+            yb_val,
+            stories_val,
+        );
 
-        let mut hz = serde_json::Map::new();
-        if let Some(ref fz) = listing
+        let features = extract_features_from_listing_fields(
+            listing.features_text.as_deref(),
+            listing.has_pool == Some(1),
+            listing.has_ev_charger == Some(1),
+            listing.has_hardwood_floors == Some(1),
+            listing.tags_json.as_deref(),
+            stories_val,
+        );
+
+        let convenience = listing
+            .walk_score
+            .filter(|w| w.is_finite() && (0.0..=100.0).contains(w))
+            .map(|ws| Factor::new(ws, "EPA National Walkability Index", Grade::Area));
+
+        let crime = listing
+            .safety_score
+            .filter(|s| s.is_finite() && (0.0..=100.0).contains(s))
+            .map(|sc| Factor::new(sc, "FBI Crime Data Explorer, agency rates", Grade::Area));
+
+        let (sfha, flood_zone) = match listing
             .flood_zone
             .as_deref()
             .map(str::trim)
             .filter(|s| !s.is_empty())
         {
-            let u = fz.to_ascii_uppercase();
-            let sfha = matches!(
-                u.as_str(),
-                "AE" | "A" | "AO" | "AH" | "VE" | "V" | "AR" | "A99"
-            ) || u.starts_with("A ")
-                || u.starts_with("V ");
-            hz.insert("flood".to_string(), json!({ "zone": fz, "sfha": sfha }));
-        }
-        if let Some(ref wf) = listing
+            Some(fz) => {
+                let u = fz.to_ascii_uppercase();
+                let is_sfha = matches!(
+                    u.as_str(),
+                    "AE" | "A" | "AO" | "AH" | "VE" | "V" | "AR" | "A99"
+                ) || u.starts_with("A ")
+                    || u.starts_with("V ");
+                (
+                    Some(Factor::new(
+                        is_sfha,
+                        "FEMA National Flood Hazard Layer",
+                        Grade::Area,
+                    )),
+                    Some(fz.to_string()),
+                )
+            }
+            None => (None, None),
+        };
+
+        let very_high_fire = listing
             .wildfire_zone
             .as_deref()
             .map(str::trim)
             .filter(|s| !s.is_empty())
-        {
-            let low = wf.to_ascii_lowercase();
-            let cls = if low.contains("very high") {
-                5
-            } else if low.contains("high") {
-                4
-            } else if low.contains("moderate") {
-                3
-            } else {
-                1
-            };
-            hz.insert("wildfire".to_string(), json!({ "whp": { "class": cls } }));
-        }
-        if !hz.is_empty() {
-            modules_map.insert("hazards".to_string(), json!({ "data": Value::Object(hz) }));
-        }
+            .map(|wf| {
+                let low = wf.to_ascii_lowercase();
+                let vh = low.contains("very high") && !low.starts_with("not");
+                Factor::new(vh, "USFS Wildfire Hazard Potential", Grade::Area)
+            });
 
-        let synthetic = json!({
-            "meta": {
-                "slug": listing.id,
-                "displayAddress": listing.address,
-                "generatedAt": crate::shared::now_iso(),
-            },
-            "geo": {
-                "displayAddress": listing.address,
-            },
-            "facts": Value::Object(facts_map),
-            "modules": Value::Object(modules_map),
-        });
+        let gates = GateInputs {
+            sfha,
+            flood_zone,
+            very_high_fire,
+            freeway_distance_m: None,
+            freeway_within_500ft: None,
+            t_junction: None,
+            house_number: house_number_from_address(&listing.address),
+        };
 
-        let mut factors = HomeFactors::from_report(&synthetic);
-        factors.id = listing.id.clone();
-
-        if factors.cost.price.is_none() {
-            if let Some(p) = listing.price.filter(|&p| p > 0) {
-                factors.cost.price = Some(Factor::new(p as f64, "Listing price", Grade::Listing));
-            }
-        }
-        if let Some(mt) = factors.cost.monthly_total.as_mut() {
-            mt.grade = Grade::Area;
-            mt.estimated = true;
-        }
-
+        let mut schools = SchoolFactors::default();
         let mut set_school = |lvl: SchoolLevel, name: Option<&str>, rating_10: Option<f64>| {
             if let Some(r) = rating_10.filter(|v| v.is_finite() && *v > 0.0) {
                 let pct = (r * 10.0).clamp(0.0, 100.0);
@@ -639,7 +688,7 @@ impl HomeFactors {
                     .map(str::trim)
                     .filter(|s| !s.is_empty())
                     .unwrap_or("Assigned Public School");
-                factors.schools.set(
+                schools.set(
                     lvl,
                     Factor::new(
                         SchoolScore {
@@ -676,12 +725,12 @@ impl HomeFactors {
                 (SchoolLevel::Middle, listing.school_mid_name.as_deref()),
                 (SchoolLevel::High, listing.school_high_name.as_deref()),
             ] {
-                if factors.schools.get(lvl).is_none() {
+                if schools.get(lvl).is_none() {
                     let nm = nm_opt
                         .map(str::trim)
                         .filter(|s| !s.is_empty())
                         .unwrap_or("Assigned Public School");
-                    factors.schools.set(
+                    schools.set(
                         lvl,
                         Factor::new(
                             SchoolScore {
@@ -697,7 +746,291 @@ impl HomeFactors {
             }
         }
 
-        factors
+        HomeFactors {
+            id: listing.id.clone(),
+            version: FACTORS_VERSION,
+            as_of_year,
+            cost,
+            schools,
+            crime,
+            convenience,
+            hazards: None,
+            environment: None,
+            investment: None,
+            fengshui: None,
+            gates,
+            home,
+            style,
+            features,
+        }
+    }
+
+    /// Narrow [`ListingCoreProto`](crate::db::ListingCoreProto) -> [`HomeFactors`] conversion for
+    /// cold-fallback scoring directly off the 42-column core `listings` table without 7-table hydration.
+    pub fn from_listing_core(core: &crate::db::ListingCoreProto) -> HomeFactors {
+        use crate::db::proto::{feature_tag_bit, property_category_from_code, FeatureTag};
+
+        const FACTS_SOURCE: &str = "Report facts (MLS, county records, listing research)";
+        let as_of_year = current_year();
+
+        let list_price_num = core.list_price.or(core.price).filter(|&p| p > 0);
+        let hoa_i64 = core.hoa_monthly.map(i64::from);
+        let (monthly_total, monthly_principal_interest, assumed_down_payment_pct, model_price) =
+            if let Some(am) = core.all_in_monthly.filter(|&m| m > 0) {
+                let mt = Factor::new(
+                    am as f64,
+                    "Open Estate cost model",
+                    Grade::Area,
+                )
+                .mark_estimated();
+                let pr = list_price_num
+                    .map(|p| Factor::new(p as f64, "Open Estate cost-model price", Grade::Report));
+                (Some(mt), None, Some(20.0), pr)
+            } else if let Some(p) = list_price_num {
+                let (total, pi) = estimate_listing_monthly_ownership(
+                    p,
+                    hoa_i64.unwrap_or(0),
+                    core.state_code.as_deref(),
+                );
+                let mt = (total > 0.0).then(|| {
+                    Factor::new(
+                        total,
+                        "Open Estate cost model (20% down, 30-year fixed at 6.5%)",
+                        Grade::Area,
+                    )
+                    .mark_estimated()
+                });
+                let pr = Factor::new(p as f64, "Open Estate cost-model price", Grade::Report);
+                (mt, Some(pi), Some(20.0), Some(pr))
+            } else {
+                let pr = core
+                    .price
+                    .filter(|&p| p > 0)
+                    .map(|p| Factor::new(p as f64, "Listing price", Grade::Listing));
+                (None, None, None, pr)
+            };
+
+        let cost = CostFactors {
+            monthly_total,
+            monthly_principal_interest,
+            assumed_down_payment_pct,
+            price: model_price,
+            estimate: core
+                .estimated_value
+                .filter(|&ev| ev > 0)
+                .map(|ev| Factor::new(ev as f64, "Open Estate value estimate", Grade::Report)),
+            list_price: list_price_num
+                .map(|p| Factor::new(p as f64, "MLS list price", Grade::Listing)),
+            hoa_monthly: hoa_i64
+                .filter(|&h| h >= 0)
+                .map(|h| Factor::new(h as f64, "Listing and public records", Grade::Listing)),
+            cash_to_close: None,
+            monthly_by_loan: None,
+        };
+
+        let year_built = core
+            .year_built
+            .filter(|y| (1600..=as_of_year + 2).contains(y))
+            .map(|y| Factor::new(y, FACTS_SOURCE, Grade::Listing));
+        let stories = core
+            .stories
+            .filter(|s| s.is_finite() && *s > 0.0)
+            .map(|s| Factor::new(s, FACTS_SOURCE, Grade::Listing));
+
+        let has_tag = |t: FeatureTag| (core.tag_bits & feature_tag_bit(t)) != 0;
+        let known_tag = |t: FeatureTag| (core.known_bits & feature_tag_bit(t)) != 0;
+
+        let home = HomeFitFactors {
+            property_type: property_category_from_code(core.property_category)
+                .and_then(PropertyKind::classify)
+                .map(|k| Factor::new(k, FACTS_SOURCE, Grade::Listing)),
+            beds: core
+                .beds
+                .filter(|b| b.is_finite() && *b >= 0.0)
+                .map(|b| Factor::new(b, FACTS_SOURCE, Grade::Listing)),
+            baths: core
+                .baths
+                .filter(|b| b.is_finite() && *b >= 0.0)
+                .map(|b| Factor::new(b, FACTS_SOURCE, Grade::Listing)),
+            sqft: core
+                .sqft
+                .filter(|&s| s > 0)
+                .map(|s| Factor::new(s as f64, FACTS_SOURCE, Grade::Listing)),
+            lot_sqft: core
+                .lot_sqft
+                .filter(|&s| s > 0)
+                .map(|s| Factor::new(s as f64, FACTS_SOURCE, Grade::Listing)),
+            stories,
+            year_built,
+            effective_year: None,
+            adu: has_tag(FeatureTag::Adu)
+                .then(|| Factor::new(Adu::default(), "Listing features", Grade::Listing)),
+            adu_feasibility: has_tag(FeatureTag::AduFeasible).then(|| {
+                Factor::new(
+                    "Strong".to_string(),
+                    "Open Estate lot and ADU screen (open lot area, state ADU law)",
+                    Grade::Listing,
+                )
+            }),
+            main_level_bedrooms: None,
+            main_level_bathrooms: None,
+            parking_spaces: None,
+        };
+
+        let yb_val = home.year_built.as_ref().map(|f| f.value);
+        let st_val = home.stories.as_ref().map(|f| f.value);
+        let style = extract_style_from_listing_fields(None, None, None, yb_val, st_val);
+
+        let mut feat_set = BTreeSet::new();
+        for (tag, feat) in [
+            (FeatureTag::OpenPlan, Feature::OpenPlan),
+            (FeatureTag::HighCeilings, Feature::HighCeilings),
+            (FeatureTag::NaturalLight, Feature::NaturalLight),
+            (FeatureTag::HardwoodFloors, Feature::Hardwood),
+            (FeatureTag::Fireplace, Feature::Fireplace),
+            (FeatureTag::Pool, Feature::Pool),
+            (FeatureTag::View, Feature::View),
+            (FeatureTag::SingleStory, Feature::MainLevelPrimary),
+            (FeatureTag::HomeOffice, Feature::Office),
+            (FeatureTag::WorkshopGarage, Feature::WorkshopGarage),
+            (FeatureTag::EvCharger, Feature::EvReady),
+        ] {
+            if has_tag(tag) {
+                feat_set.insert(feat);
+            }
+        }
+        let features = if !feat_set.is_empty() || core.known_bits != 0 {
+            if st_val.map_or(false, |s| s < 1.5) {
+                feat_set.insert(Feature::MainLevelPrimary);
+            }
+            Some(Factor::new(
+                feat_set,
+                "MLS feature fields and listing text",
+                Grade::Listing,
+            ))
+        } else {
+            None
+        };
+
+        let mut schools = SchoolFactors::default();
+        if let Some(sc) = core.school_score.filter(|v| v.is_finite() && *v > 0.0) {
+            let pct = (sc * 10.0).clamp(0.0, 100.0);
+            for lvl in SchoolLevel::ALL {
+                schools.set(
+                    lvl,
+                    Factor::new(
+                        SchoolScore {
+                            name: "Assigned Public School".to_string(),
+                            score: pct,
+                            metric: SchoolMetric::StatePercentile,
+                        },
+                        "Public school score (listing record)",
+                        Grade::Area,
+                    ),
+                );
+            }
+        }
+
+        let sfha = if known_tag(FeatureTag::InSfhaFlood) || has_tag(FeatureTag::InSfhaFlood) {
+            Some(Factor::new(
+                has_tag(FeatureTag::InSfhaFlood),
+                "FEMA National Flood Hazard Layer",
+                Grade::Area,
+            ))
+        } else {
+            None
+        };
+        let very_high_fire =
+            if known_tag(FeatureTag::HighWildfire) || has_tag(FeatureTag::HighWildfire) {
+                Some(Factor::new(
+                    has_tag(FeatureTag::HighWildfire),
+                    "USFS Wildfire Hazard Potential",
+                    Grade::Area,
+                ))
+            } else {
+                None
+            };
+
+        HomeFactors {
+            id: core.external_id.clone(),
+            version: FACTORS_VERSION,
+            as_of_year,
+            cost,
+            schools,
+            crime: core
+                .safety_score
+                .filter(|s| s.is_finite() && (0.0..=100.0).contains(s))
+                .map(|sc| Factor::new(sc, "FBI Crime Data Explorer, agency rates", Grade::Area)),
+            convenience: core
+                .walk_score
+                .filter(|w| w.is_finite() && (0.0..=100.0).contains(w))
+                .map(|ws| Factor::new(ws, "EPA National Walkability Index", Grade::Area)),
+            hazards: None,
+            environment: None,
+            investment: None,
+            fengshui: None,
+            gates: GateInputs {
+                sfha,
+                flood_zone: has_tag(FeatureTag::InSfhaFlood).then(|| "AE".to_string()),
+                very_high_fire,
+                freeway_distance_m: None,
+                freeway_within_500ft: None,
+                t_junction: None,
+                house_number: house_number_from_address(&core.address),
+            },
+            home,
+            style,
+            features,
+        }
+    }
+
+    /// Encodes `self` into the typed 52-column [`HomeFactorsRowProto`](crate::db::HomeFactorsRowProto)
+    /// and sidecar [`FactorProvenanceProto`](crate::db::FactorProvenanceProto).
+    #[allow(clippy::too_many_arguments)]
+    pub fn to_proto(
+        &self,
+        listing_sk: i64,
+        external_id: &str,
+        source_tier: &str,
+        completeness_pct: f64,
+        walk_score: Option<f64>,
+        school_composite_score: Option<f64>,
+        style_family_override: Option<&str>,
+        wildfire_zone: Option<&str>,
+        zip: Option<&str>,
+        lat: Option<f64>,
+        lon: Option<f64>,
+        scanned_ts: i64,
+        updated_ts: i64,
+    ) -> (
+        crate::db::HomeFactorsRowProto,
+        crate::db::FactorProvenanceProto,
+    ) {
+        crate::db::proto::home_factors_to_proto(
+            listing_sk,
+            external_id,
+            source_tier,
+            completeness_pct,
+            walk_score,
+            school_composite_score,
+            style_family_override,
+            wildfire_zone,
+            zip,
+            lat,
+            lon,
+            scanned_ts,
+            updated_ts,
+            self,
+        )
+    }
+
+    /// Reconstructs [`HomeFactors`] directly from [`HomeFactorsRowProto`](crate::db::HomeFactorsRowProto)
+    /// and optional [`FactorProvenanceProto`](crate::db::FactorProvenanceProto) with zero JSON parsing.
+    pub fn from_proto(
+        row: &crate::db::HomeFactorsRowProto,
+        prov: Option<&crate::db::FactorProvenanceProto>,
+    ) -> Self {
+        crate::db::proto::home_factors_from_proto(row, prov)
     }
 }
 
@@ -1629,12 +1962,243 @@ fn t_junction_flag(fs: Option<&Value>, brand_name: &str) -> Option<Factor<bool>>
     Some(Factor::new(hit, source, Grade::Report))
 }
 
-fn house_number(report: &Value) -> Option<String> {
+fn house_number_from_address(address: &str) -> Option<String> {
     static RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"^\s*(\d+)").expect("valid regex"));
+    RE.captures(address)
+        .and_then(|c| c.get(1))
+        .map(|m| m.as_str().to_string())
+}
+
+fn house_number(report: &Value) -> Option<String> {
     ["/geo/displayAddress", "/geo/matchedAddress", "/meta/displayAddress", "/geo/input", "/meta/input"]
         .iter()
         .filter_map(|p| report.pointer(p).and_then(Value::as_str))
-        .find_map(|a| RE.captures(a).and_then(|c| c.get(1)).map(|m| m.as_str().to_string()))
+        .find_map(house_number_from_address)
+}
+
+fn extract_adu_from_listing_fields(
+    features_text: Option<&str>,
+    property_type: Option<&str>,
+    has_adu_flag: bool,
+) -> Option<Factor<Adu>> {
+    if let Some(ft) = features_text {
+        for raw_item in ft.split([',', ';']) {
+            let item = raw_item.trim();
+            if item.is_empty() {
+                continue;
+            }
+            if mentions_existing_adu(item) {
+                let sqft = SQFT_RE
+                    .captures(item)
+                    .and_then(|c| c.get(1))
+                    .and_then(|m| m.as_str().replace(',', "").parse::<f64>().ok())
+                    .filter(|s| (100.0..=3000.0).contains(s));
+                let (beds, baths) = BED_BATH_RE
+                    .captures(item)
+                    .map(|c| {
+                        (
+                            c.get(1).and_then(|m| m.as_str().parse::<f64>().ok()),
+                            c.get(2).and_then(|m| m.as_str().parse::<f64>().ok()),
+                        )
+                    })
+                    .unwrap_or((None, None));
+                return Some(Factor::new(
+                    Adu { sqft, beds, baths },
+                    "Listing features",
+                    Grade::Listing,
+                ));
+            }
+        }
+    }
+    if let Some(pt) = property_type {
+        if mentions_existing_adu(pt) {
+            return Some(Factor::new(Adu::default(), "Listing facts", Grade::Listing));
+        }
+    }
+    if has_adu_flag {
+        return Some(Factor::new(
+            Adu::default(),
+            "Listing features",
+            Grade::Listing,
+        ));
+    }
+    None
+}
+
+fn extract_style_from_listing_fields(
+    architectural_style: Option<&str>,
+    property_type: Option<&str>,
+    features_text: Option<&str>,
+    year_built: Option<i32>,
+    stories: Option<f64>,
+) -> StyleEvidence {
+    let mut clues: Vec<StyleClue> = Vec::new();
+    if let Some(style_str) = architectural_style {
+        for raw_part in style_str.split([',', ';']) {
+            let raw = raw_part.trim();
+            if raw.is_empty() {
+                continue;
+            }
+            let families = style_families_for_value(raw);
+            clues.push(StyleClue {
+                source: StyleSource::Mls,
+                raw: raw.to_string(),
+                families,
+            });
+        }
+    }
+
+    let mut texts: Vec<&str> = Vec::with_capacity(2);
+    if let Some(pt) = property_type.map(str::trim).filter(|s| !s.is_empty()) {
+        texts.push(pt);
+    }
+    if let Some(ft) = features_text.map(str::trim).filter(|s| !s.is_empty()) {
+        texts.push(ft);
+    }
+    for (raw, family) in text_style_matches(&texts) {
+        clues.push(StyleClue {
+            source: StyleSource::ListingText,
+            raw,
+            families: vec![family],
+        });
+    }
+
+    for source in [
+        StyleSource::Mls,
+        StyleSource::CountyRecord,
+        StyleSource::ListingText,
+    ] {
+        let mut families: Vec<StyleFamily> = Vec::new();
+        for c in clues.iter().filter(|c| c.source == source) {
+            for f in &c.families {
+                if !families.contains(f) {
+                    families.push(*f);
+                }
+            }
+        }
+        if !families.is_empty() {
+            let share = source.trust() / families.len() as f64;
+            return StyleEvidence {
+                probabilities: families.into_iter().map(|f| (f, share)).collect(),
+                basis: Some(source),
+                clues,
+            };
+        }
+    }
+
+    if let Some((raw, family)) = era_prior(year_built, stories) {
+        clues.push(StyleClue {
+            source: StyleSource::EraPrior,
+            raw,
+            families: vec![family],
+        });
+        return StyleEvidence {
+            probabilities: BTreeMap::from([(family, StyleSource::EraPrior.trust())]),
+            basis: Some(StyleSource::EraPrior),
+            clues,
+        };
+    }
+
+    StyleEvidence {
+        probabilities: BTreeMap::new(),
+        basis: None,
+        clues,
+    }
+}
+
+fn extract_features_from_listing_fields(
+    features_text: Option<&str>,
+    has_pool: bool,
+    has_ev_charger: bool,
+    has_hardwood_floors: bool,
+    tags_json: Option<&str>,
+    stories: Option<f64>,
+) -> Option<Factor<BTreeSet<Feature>>> {
+    let ft_clean = features_text.map(str::trim).filter(|s| !s.is_empty());
+    let mut tag_features = BTreeSet::new();
+    let mut had_tags = false;
+    if let Some(tj) = tags_json.map(str::trim).filter(|s| !s.is_empty() && *s != "[]") {
+        for raw_tok in tj.split([',', '"', '[', ']']) {
+            let tok = raw_tok.trim();
+            if tok.is_empty() {
+                continue;
+            }
+            had_tags = true;
+            if let Some(ftag) = crate::db::proto::feature_tag_from_slug(tok) {
+                use crate::db::proto::FeatureTag;
+                match ftag {
+                    FeatureTag::OpenPlan => {
+                        tag_features.insert(Feature::OpenPlan);
+                    }
+                    FeatureTag::HighCeilings => {
+                        tag_features.insert(Feature::HighCeilings);
+                    }
+                    FeatureTag::NaturalLight | FeatureTag::Sunroom => {
+                        tag_features.insert(Feature::NaturalLight);
+                    }
+                    FeatureTag::HardwoodFloors => {
+                        tag_features.insert(Feature::Hardwood);
+                    }
+                    FeatureTag::Fireplace => {
+                        tag_features.insert(Feature::Fireplace);
+                    }
+                    FeatureTag::Pool => {
+                        tag_features.insert(Feature::Pool);
+                    }
+                    FeatureTag::View => {
+                        tag_features.insert(Feature::View);
+                    }
+                    FeatureTag::SingleStory => {
+                        tag_features.insert(Feature::MainLevelPrimary);
+                    }
+                    FeatureTag::HomeOffice => {
+                        tag_features.insert(Feature::Office);
+                    }
+                    FeatureTag::WorkshopGarage => {
+                        tag_features.insert(Feature::WorkshopGarage);
+                    }
+                    FeatureTag::EvCharger => {
+                        tag_features.insert(Feature::EvReady);
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    let has_flag = has_pool || has_ev_charger || has_hardwood_floors || had_tags;
+    if ft_clean.is_none() && !has_flag {
+        return None;
+    }
+
+    let mut found = tag_features;
+    if let Some(t) = ft_clean {
+        for (feature, re) in FEATURE_PATTERNS.iter() {
+            let hit = re.find_iter(t).any(|m| {
+                !(*feature == Feature::Pool && t[m.end()..].to_lowercase().starts_with(" table"))
+            });
+            if hit {
+                found.insert(*feature);
+            }
+        }
+    }
+    if has_pool {
+        found.insert(Feature::Pool);
+    }
+    if has_ev_charger {
+        found.insert(Feature::EvReady);
+    }
+    if has_hardwood_floors {
+        found.insert(Feature::Hardwood);
+    }
+    if stories.map_or(false, |s| s < 1.5) {
+        found.insert(Feature::MainLevelPrimary);
+    }
+    Some(Factor::new(
+        found,
+        "MLS feature fields and listing text",
+        Grade::Listing,
+    ))
 }
 
 fn extract_gates(report: &Value, _facts: &Value) -> GateInputs {
@@ -1707,5 +2271,142 @@ mod tests {
         assert_eq!(fam("craftsmanship throughout"), Vec::<StyleFamily>::new());
         assert_eq!(fam("经典工匠风格住宅"), vec![StyleFamily::Craftsman]);
         assert_eq!(fam("Hermosa casa victoriana"), vec![StyleFamily::Victorian]);
+    }
+
+    #[test]
+    fn from_listing_row_and_core_roundtrip_proto_without_raw_json() {
+        use crate::db::proto::{feature_tag_bit, FeatureTag};
+        use crate::db::{
+            ListingCoreProto, ListingDescriptionsProto, ListingFeaturesProto, ListingFullView,
+            ListingHazardsProto, ListingSchoolsProto,
+        };
+
+        let tag_bits = feature_tag_bit(FeatureTag::Pool)
+            | feature_tag_bit(FeatureTag::EvCharger)
+            | feature_tag_bit(FeatureTag::HardwoodFloors)
+            | feature_tag_bit(FeatureTag::AduFeasible);
+
+        let core = ListingCoreProto {
+            listing_sk: 4242,
+            external_id: "synth-95008-proto".to_string(),
+            report_slug: Some("200-synth-ave-campbell-ca-95008".to_string()),
+            zip: "95008".to_string(),
+            state_code: Some("CA".to_string()),
+            city: Some("Campbell".to_string()),
+            address: "200 Synth Ave, Campbell, CA 95008".to_string(),
+            lat: Some(37.282),
+            lon: Some(-121.954),
+            status: 1,
+            property_category: 1,
+            price: Some(1_750_000),
+            list_price: Some(1_750_000),
+            estimated_value: Some(1_800_000),
+            hoa_monthly: Some(0),
+            beds: Some(4.0),
+            baths: Some(2.5),
+            sqft: Some(2_150),
+            lot_sqft: Some(7_200),
+            year_built: Some(1958),
+            stories: Some(1.0),
+            school_score: Some(8.6),
+            walk_score: Some(72.0),
+            safety_score: Some(81.5),
+            tag_bits,
+            known_bits: tag_bits,
+            ..Default::default()
+        };
+
+        let view = ListingFullView {
+            core: core.clone(),
+            schools: Some(ListingSchoolsProto {
+                listing_sk: 4242,
+                school_score: Some(8.6),
+                elem_name: Some("Campbell Synth Elementary".to_string()),
+                elem_rating: Some(9.0),
+                mid_name: Some("Campbell Synth Middle".to_string()),
+                mid_rating: Some(8.4),
+                high_name: Some("Campbell Synth High".to_string()),
+                high_rating: Some(8.5),
+                ..Default::default()
+            }),
+            utilities: None,
+            hazards: Some(ListingHazardsProto {
+                listing_sk: 4242,
+                flood_zone: Some("X".to_string()),
+                wildfire_label: Some("Low".to_string()),
+                safety_score: Some(81.5),
+                ..Default::default()
+            }),
+            features: Some(ListingFeaturesProto {
+                listing_sk: 4242,
+                architectural_style: Some("Craftsman".to_string()),
+                property_type_label: Some("Single Family Residential".to_string()),
+                garage_spaces: Some(2.0),
+                adu_feasible: Some(true),
+                has_pool: Some(true),
+                has_ev_charger: Some(true),
+                has_hardwood_floors: Some(true),
+                ..Default::default()
+            }),
+            engagement: None,
+            descriptions: Some(ListingDescriptionsProto {
+                listing_sk: 4242,
+                features_text: Some(
+                    "Permitted 540 sqft 1BD/1BA ADU, vaulted ceilings, home office".to_string(),
+                ),
+                mls_remarks: None,
+            }),
+            tags: vec!["pool".to_string(), "ev_charger".to_string()],
+        };
+
+        let mut row = view.to_listing_row();
+        // Ensure raw_json is ignored even if populated with conflicting legacy data.
+        row.raw_json = Some(r#"{"architecturalStyle":"Victorian"}"#.to_string());
+
+        let hf = HomeFactors::from_listing_row(&row);
+        assert_eq!(hf.style.top_family(), Some(StyleFamily::Craftsman));
+        assert!(hf.cost.monthly_total.as_ref().unwrap().estimated);
+        assert_eq!(hf.home.parking_spaces.as_ref().unwrap().value, 2.0);
+        assert_eq!(hf.home.adu.as_ref().unwrap().value.sqft, Some(540.0));
+        assert_eq!(hf.gates.house_number.as_deref(), Some("200"));
+        assert_eq!(hf.gates.sfha.as_ref().unwrap().value, false);
+        assert_eq!(hf.crime.as_ref().unwrap().value, 81.5);
+        let feats = &hf.features.as_ref().unwrap().value;
+        assert!(feats.contains(&Feature::Pool));
+        assert!(feats.contains(&Feature::EvReady));
+        assert!(feats.contains(&Feature::Hardwood));
+        assert!(feats.contains(&Feature::HighCeilings));
+        assert!(feats.contains(&Feature::MainLevelPrimary));
+
+        let (row_proto, prov_proto) = hf.to_proto(
+            4242,
+            &row.id,
+            "light_scan",
+            88.2,
+            row.walk_score,
+            row.school_score,
+            None,
+            Some("Low"),
+            Some(&row.zip),
+            row.lat,
+            row.lon,
+            1_700_000_000,
+            1_700_000_000,
+        );
+        let fast_hf = HomeFactors::from_proto(&row_proto, None);
+        assert_eq!(fast_hf.style.top_family(), Some(StyleFamily::Craftsman));
+        assert_eq!(fast_hf.features.as_ref().unwrap().value, *feats);
+        assert_eq!(
+            fast_hf.cost.monthly_total.as_ref().unwrap().estimated,
+            true
+        );
+
+        let full_hf = HomeFactors::from_proto(&row_proto, Some(&prov_proto));
+        assert_eq!(full_hf, hf);
+
+        let core_hf = HomeFactors::from_listing_core(&core);
+        assert_eq!(core_hf.id, "synth-95008-proto");
+        assert!(core_hf.features.as_ref().unwrap().value.contains(&Feature::Pool));
+        assert!(core_hf.features.as_ref().unwrap().value.contains(&Feature::EvReady));
     }
 }

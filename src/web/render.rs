@@ -4,6 +4,13 @@ use html_escape::encode_double_quoted_attribute;
 use once_cell::sync::Lazy;
 use regex::Regex;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
+use std::path::{Path, PathBuf};
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc, Mutex,
+};
+use std::time::SystemTime;
 
 static MODEL_ID_SCRUB_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(
@@ -369,18 +376,70 @@ pub fn safe_open_estate_core_js() -> String {
 pub const HOUSE3D_JS: &str = include_str!("../../assets/house3d.js");
 pub const REPORT_WORKSPACE_JS: &str = include_str!("../../assets/report_workspace.js");
 pub const WALKIN_MEDIA_JS: &str = include_str!("../../assets/walkin_media.js");
+pub const PDF_STUDIO_JS: &str = include_str!("../../assets/pdf_studio.js");
+pub const BUYER_COPILOT_JS: &str = include_str!("../../assets/buyer_copilot.js");
 pub const REPORT_MOTION_JS: &str = include_str!("../../assets/report_motion.js");
 pub const REPORT_DASHBOARD_JS: &str = include_str!("../../assets/report_dashboard.js");
 pub const I18NEXT_JS: &str = include_str!("../../assets/vendor/i18next.min.js");
+pub const FFLATE_MIN_JS: &str = include_str!("../../assets/vendor/fflate.min.js");
+pub const PDFJS_MIN_MJS: &str = include_str!("../../assets/vendor/pdf.min.mjs");
+pub const PDFJS_WORKER_MIN_MJS: &str = include_str!("../../assets/vendor/pdf.worker.min.mjs");
+pub const PDFJS_VIEWER_MIN_CSS: &str = include_str!("../../assets/vendor/pdf_viewer.min.css");
 pub const I18N_EN_JSON: &str = include_str!("../../assets/locales/en.json");
 pub const I18N_ZH_JSON: &str = include_str!("../../assets/locales/zh-CN.json");
 pub const I18N_ES_JSON: &str = include_str!("../../assets/locales/es.json");
 
-/// Escapes inline JSON before embedding inside a `<script>` tag.
+pub fn safe_buyer_copilot_js() -> String {
+    safe_inline_js(BUYER_COPILOT_JS)
+}
+
+pub fn safe_pdf_studio_js() -> String {
+    safe_inline_js(PDF_STUDIO_JS)
+}
+
+/// Escapes inline JSON before embedding inside a `<script>` tag in a single pass.
 pub fn safe_inline_json(raw: &str) -> String {
-    raw.replace('<', "\\u003c")
-        .replace('\u{2028}', "\\u2028")
-        .replace('\u{2029}', "\\u2029")
+    let bytes = raw.as_bytes();
+    let len = bytes.len();
+    let mut out: Option<String> = None;
+    let mut last = 0usize;
+    let mut i = 0usize;
+
+    while i < len {
+        let b = bytes[i];
+        if b == b'<' {
+            let buf = out.get_or_insert_with(|| String::with_capacity(len + 32));
+            buf.push_str(&raw[last..i]);
+            buf.push_str("\\u003c");
+            i += 1;
+            last = i;
+        } else if b == 0xE2
+            && i + 2 < len
+            && bytes[i + 1] == 0x80
+            && (bytes[i + 2] == 0xA8 || bytes[i + 2] == 0xA9)
+        {
+            let repl = if bytes[i + 2] == 0xA8 {
+                "\\u2028"
+            } else {
+                "\\u2029"
+            };
+            let buf = out.get_or_insert_with(|| String::with_capacity(len + 32));
+            buf.push_str(&raw[last..i]);
+            buf.push_str(repl);
+            i += 3;
+            last = i;
+        } else {
+            i += 1;
+        }
+    }
+
+    match out {
+        Some(mut buf) => {
+            buf.push_str(&raw[last..]);
+            buf
+        }
+        None => raw.to_string(),
+    }
 }
 
 /// Escapes closing `</script` sequences inside vendored inline JS.
@@ -417,6 +476,417 @@ pub fn render_template_single_pass(template: &str, pairs: &[(&str, &str)]) -> St
         }
     }
     out
+}
+
+#[derive(Debug, Clone)]
+enum ReportTemplatePart {
+    Literal(String),
+    Title,
+    Desc,
+    BrandWordmark,
+    BrandName,
+    BrandDomain,
+    BrandNameJson,
+    BrandDomainJson,
+    I18nEn,
+    I18nZh,
+    I18nEs,
+    ReportJson,
+}
+
+#[derive(Debug, Clone)]
+struct CompiledReportTemplate {
+    parts: Vec<ReportTemplatePart>,
+    default_en: String,
+    default_zh: String,
+    default_es: String,
+    static_bytes_len: usize,
+    bundle_hash: String,
+}
+
+impl CompiledReportTemplate {
+    #[allow(clippy::too_many_arguments)]
+    fn compile(
+        template_html: &str,
+        i18next_js: &str,
+        core_js: &str,
+        house3d_js: &str,
+        report_workspace_js: &str,
+        walkin_media_js: &str,
+        pdf_studio_js: &str,
+        buyer_copilot_js: &str,
+        report_motion_js: &str,
+        report_dashboard_js: &str,
+        i18n_en_json: &str,
+        i18n_zh_json: &str,
+        i18n_es_json: &str,
+    ) -> Self {
+        let safe_i18next = safe_inline_js(i18next_js);
+        let safe_core_js = safe_inline_js(core_js);
+        let safe_house3d = safe_inline_js(house3d_js);
+        let combined_workspace_js = format!(
+            "{report_workspace_js}\n;\n{walkin_media_js}\n;\n{pdf_studio_js}\n;\n{buyer_copilot_js}"
+        );
+        let safe_report_workspace = safe_inline_js(&combined_workspace_js);
+        let safe_report_motion = safe_inline_js(report_motion_js);
+        let safe_report_dashboard = safe_inline_js(report_dashboard_js);
+        let default_en = safe_inline_json(&localize_i18n_json_for_brand(
+            i18n_en_json,
+            "Open Estate",
+            "open-estate.local",
+        ));
+        let default_zh = safe_inline_json(&localize_i18n_json_for_brand(
+            i18n_zh_json,
+            "Open Estate",
+            "open-estate.local",
+        ));
+        let default_es = safe_inline_json(&localize_i18n_json_for_brand(
+            i18n_es_json,
+            "Open Estate",
+            "open-estate.local",
+        ));
+
+        enum Action<'a> {
+            Static(&'a str),
+            Slot(ReportTemplatePart),
+        }
+
+        let specs: [(&str, Action<'_>); 17] = [
+            ("__REPORT_TITLE__", Action::Slot(ReportTemplatePart::Title)),
+            ("__REPORT_DESC__", Action::Slot(ReportTemplatePart::Desc)),
+            (
+                "__REPORT_BRAND_WORDMARK__",
+                Action::Slot(ReportTemplatePart::BrandWordmark),
+            ),
+            (
+                "__REPORT_BRAND_NAME__",
+                Action::Slot(ReportTemplatePart::BrandName),
+            ),
+            (
+                "__REPORT_BRAND_DOMAIN__",
+                Action::Slot(ReportTemplatePart::BrandDomain),
+            ),
+            (
+                "__REPORT_BRAND_NAME_JSON__",
+                Action::Slot(ReportTemplatePart::BrandNameJson),
+            ),
+            (
+                "__REPORT_BRAND_DOMAIN_JSON__",
+                Action::Slot(ReportTemplatePart::BrandDomainJson),
+            ),
+            ("__I18NEXT_JS__", Action::Static(safe_i18next.as_str())),
+            (
+                "__OPEN_ESTATE_CORE_JS__",
+                Action::Static(safe_core_js.as_str()),
+            ),
+            ("__HOUSE3D_JS__", Action::Static(safe_house3d.as_str())),
+            (
+                "__REPORT_WORKSPACE_JS__",
+                Action::Static(safe_report_workspace.as_str()),
+            ),
+            (
+                "__REPORT_MOTION_JS__",
+                Action::Static(safe_report_motion.as_str()),
+            ),
+            (
+                "__REPORT_DASHBOARD_JS__",
+                Action::Static(safe_report_dashboard.as_str()),
+            ),
+            ("__I18N_EN_JSON__", Action::Slot(ReportTemplatePart::I18nEn)),
+            ("__I18N_ZH_JSON__", Action::Slot(ReportTemplatePart::I18nZh)),
+            ("__I18N_ES_JSON__", Action::Slot(ReportTemplatePart::I18nEs)),
+            (
+                "__REPORT_JSON__",
+                Action::Slot(ReportTemplatePart::ReportJson),
+            ),
+        ];
+
+        let mut parts: Vec<ReportTemplatePart> = Vec::with_capacity(16);
+        let mut cur_lit = String::with_capacity(template_html.len() + 1_100_000);
+        let mut rest = template_html;
+
+        while !rest.is_empty() {
+            let mut earliest: Option<(usize, usize)> = None;
+            for (idx, (needle, _)) in specs.iter().enumerate() {
+                if let Some(pos) = rest.find(needle) {
+                    if earliest.map(|(best, _)| pos < best).unwrap_or(true) {
+                        earliest = Some((pos, idx));
+                    }
+                }
+            }
+            match earliest {
+                Some((pos, idx)) => {
+                    let (needle, action) = &specs[idx];
+                    cur_lit.push_str(&rest[..pos]);
+                    match action {
+                        Action::Static(repl) => {
+                            cur_lit.push_str(repl);
+                        }
+                        Action::Slot(slot) => {
+                            if !cur_lit.is_empty() {
+                                parts.push(ReportTemplatePart::Literal(std::mem::take(
+                                    &mut cur_lit,
+                                )));
+                            }
+                            parts.push(slot.clone());
+                        }
+                    }
+                    rest = &rest[pos + needle.len()..];
+                }
+                None => {
+                    cur_lit.push_str(rest);
+                    break;
+                }
+            }
+        }
+        if !cur_lit.is_empty() {
+            parts.push(ReportTemplatePart::Literal(cur_lit));
+        }
+
+        let mut static_bytes_len = 0usize;
+        let mut hasher = Sha256::new();
+        for p in &parts {
+            match p {
+                ReportTemplatePart::Literal(s) => {
+                    static_bytes_len += s.len();
+                    hasher.update(b"L:");
+                    hasher.update((s.len() as u64).to_le_bytes());
+                    hasher.update(s.as_bytes());
+                }
+                ReportTemplatePart::Title => hasher.update(b"S:T;"),
+                ReportTemplatePart::Desc => hasher.update(b"S:D;"),
+                ReportTemplatePart::BrandWordmark => hasher.update(b"S:B;"),
+                ReportTemplatePart::BrandName => hasher.update(b"S:BN;"),
+                ReportTemplatePart::BrandDomain => hasher.update(b"S:BD;"),
+                ReportTemplatePart::BrandNameJson => hasher.update(b"S:BNJ;"),
+                ReportTemplatePart::BrandDomainJson => hasher.update(b"S:BDJ;"),
+                ReportTemplatePart::I18nEn => {
+                    hasher.update(b"S:EN:");
+                    hasher.update((default_en.len() as u64).to_le_bytes());
+                    hasher.update(default_en.as_bytes());
+                }
+                ReportTemplatePart::I18nZh => {
+                    hasher.update(b"S:ZH:");
+                    hasher.update((default_zh.len() as u64).to_le_bytes());
+                    hasher.update(default_zh.as_bytes());
+                }
+                ReportTemplatePart::I18nEs => {
+                    hasher.update(b"S:ES:");
+                    hasher.update((default_es.len() as u64).to_le_bytes());
+                    hasher.update(default_es.as_bytes());
+                }
+                ReportTemplatePart::ReportJson => hasher.update(b"S:J;"),
+            }
+        }
+        let digest = hasher.finalize();
+        let bundle_hash = hex::encode(&digest[..12]);
+
+        Self {
+            parts,
+            default_en,
+            default_zh,
+            default_es,
+            static_bytes_len,
+            bundle_hash,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render(
+        &self,
+        title: &str,
+        desc: &str,
+        brand_wordmark: &str,
+        brand_name: &str,
+        brand_domain: &str,
+        brand_name_json: &str,
+        brand_domain_json: &str,
+        custom_i18n: Option<(&str, &str, &str)>,
+        safe_json: &str,
+    ) -> String {
+        let (en_s, zh_s, es_s) =
+            custom_i18n.unwrap_or((&self.default_en, &self.default_zh, &self.default_es));
+        let mut out = String::with_capacity(
+            self.static_bytes_len
+                + title.len()
+                + desc.len()
+                + brand_wordmark.len()
+                + brand_name.len()
+                + brand_domain.len()
+                + brand_name_json.len()
+                + brand_domain_json.len()
+                + en_s.len()
+                + zh_s.len()
+                + es_s.len()
+                + safe_json.len(),
+        );
+        for part in &self.parts {
+            match part {
+                ReportTemplatePart::Literal(s) => out.push_str(s),
+                ReportTemplatePart::Title => out.push_str(title),
+                ReportTemplatePart::Desc => out.push_str(desc),
+                ReportTemplatePart::BrandWordmark => out.push_str(brand_wordmark),
+                ReportTemplatePart::BrandName => out.push_str(brand_name),
+                ReportTemplatePart::BrandDomain => out.push_str(brand_domain),
+                ReportTemplatePart::BrandNameJson => out.push_str(brand_name_json),
+                ReportTemplatePart::BrandDomainJson => out.push_str(brand_domain_json),
+                ReportTemplatePart::I18nEn => out.push_str(en_s),
+                ReportTemplatePart::I18nZh => out.push_str(zh_s),
+                ReportTemplatePart::I18nEs => out.push_str(es_s),
+                ReportTemplatePart::ReportJson => out.push_str(safe_json),
+            }
+        }
+        out
+    }
+}
+
+static COMPILED_EMBEDDED_TEMPLATE: Lazy<CompiledReportTemplate> = Lazy::new(|| {
+    CompiledReportTemplate::compile(
+        REPORT_TEMPLATE_HTML,
+        I18NEXT_JS,
+        OPEN_ESTATE_CORE_JS,
+        HOUSE3D_JS,
+        REPORT_WORKSPACE_JS,
+        WALKIN_MEDIA_JS,
+        PDF_STUDIO_JS,
+        BUYER_COPILOT_JS,
+        REPORT_MOTION_JS,
+        REPORT_DASHBOARD_JS,
+        I18N_EN_JSON,
+        I18N_ZH_JSON,
+        I18N_ES_JSON,
+    )
+});
+
+fn resolve_live_assets_dir() -> Option<PathBuf> {
+    if let Ok(dir) = std::env::var("OPEN_ESTATE_ASSETS_DIR") {
+        let trimmed = dir.trim();
+        if !trimmed.is_empty() {
+            let pb = PathBuf::from(trimmed);
+            if pb.is_dir() {
+                return Some(pb);
+            }
+        }
+    }
+    if let Ok(flag) = std::env::var("OPEN_ESTATE_TEMPLATE_DEV_RELOAD") {
+        if crate::shared::is_truthy_flag(&flag) {
+            let pb = PathBuf::from("assets");
+            if pb.is_dir() {
+                return Some(pb);
+            }
+        }
+    }
+    None
+}
+
+fn read_asset_or_fallback(dir: &Path, rel: &str, fallback: &'static str) -> std::borrow::Cow<'static, str> {
+    match std::fs::read_to_string(dir.join(rel)) {
+        Ok(s) if !s.is_empty() => std::borrow::Cow::Owned(s),
+        _ => std::borrow::Cow::Borrowed(fallback),
+    }
+}
+
+fn load_live_compiled_template(dir: &Path) -> CompiledReportTemplate {
+    let tpl = read_asset_or_fallback(dir, "template.html", REPORT_TEMPLATE_HTML);
+    let i18next = read_asset_or_fallback(dir, "vendor/i18next.min.js", I18NEXT_JS);
+    let core = read_asset_or_fallback(dir, "shared/open_estate_core.js", OPEN_ESTATE_CORE_JS);
+    let house3d = read_asset_or_fallback(dir, "house3d.js", HOUSE3D_JS);
+    let workspace = read_asset_or_fallback(dir, "report_workspace.js", REPORT_WORKSPACE_JS);
+    let walkin = read_asset_or_fallback(dir, "walkin_media.js", WALKIN_MEDIA_JS);
+    let pdf_studio = read_asset_or_fallback(dir, "pdf_studio.js", PDF_STUDIO_JS);
+    let copilot = read_asset_or_fallback(dir, "buyer_copilot.js", BUYER_COPILOT_JS);
+    let motion = read_asset_or_fallback(dir, "report_motion.js", REPORT_MOTION_JS);
+    let dashboard = read_asset_or_fallback(dir, "report_dashboard.js", REPORT_DASHBOARD_JS);
+    let en = read_asset_or_fallback(dir, "locales/en.json", I18N_EN_JSON);
+    let zh = read_asset_or_fallback(dir, "locales/zh-CN.json", I18N_ZH_JSON);
+    let es = read_asset_or_fallback(dir, "locales/es.json", I18N_ES_JSON);
+
+    CompiledReportTemplate::compile(
+        &tpl,
+        &i18next,
+        &core,
+        &house3d,
+        &workspace,
+        &walkin,
+        &pdf_studio,
+        &copilot,
+        &motion,
+        &dashboard,
+        &en,
+        &zh,
+        &es,
+    )
+}
+
+const LIVE_ASSET_REL_PATHS: [&str; 13] = [
+    "template.html",
+    "vendor/i18next.min.js",
+    "shared/open_estate_core.js",
+    "house3d.js",
+    "report_workspace.js",
+    "walkin_media.js",
+    "pdf_studio.js",
+    "buyer_copilot.js",
+    "report_motion.js",
+    "report_dashboard.js",
+    "locales/en.json",
+    "locales/zh-CN.json",
+    "locales/es.json",
+];
+
+type LiveAssetMetadata = [Option<(u64, Option<SystemTime>)>; 13];
+
+struct LiveTemplateCache {
+    dir: PathBuf,
+    metadata: LiveAssetMetadata,
+    compiled: Arc<CompiledReportTemplate>,
+}
+
+static LIVE_TEMPLATE_CACHE: Lazy<Mutex<Option<LiveTemplateCache>>> =
+    Lazy::new(|| Mutex::new(None));
+static LIVE_TEMPLATE_COMPILE_COUNT: AtomicU64 = AtomicU64::new(0);
+
+/// Number of times `load_live_compiled_template` has compiled live assets from disk (used by diagnostics/tests).
+pub fn live_template_compile_count() -> u64 {
+    LIVE_TEMPLATE_COMPILE_COUNT.load(Ordering::Relaxed)
+}
+
+fn collect_live_asset_metadata(dir: &Path) -> LiveAssetMetadata {
+    std::array::from_fn(|idx| {
+        std::fs::metadata(dir.join(LIVE_ASSET_REL_PATHS[idx]))
+            .ok()
+            .map(|m| (m.len(), m.modified().ok()))
+    })
+}
+
+fn get_live_compiled_template(dir: &Path) -> Arc<CompiledReportTemplate> {
+    let meta = collect_live_asset_metadata(dir);
+    let mut guard = LIVE_TEMPLATE_CACHE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if let Some(ref cached) = *guard {
+        if cached.dir == dir && cached.metadata == meta {
+            return Arc::clone(&cached.compiled);
+        }
+    }
+    let compiled = Arc::new(load_live_compiled_template(dir));
+    LIVE_TEMPLATE_COMPILE_COUNT.fetch_add(1, Ordering::Relaxed);
+    *guard = Some(LiveTemplateCache {
+        dir: dir.to_path_buf(),
+        metadata: meta,
+        compiled: Arc::clone(&compiled),
+    });
+    compiled
+}
+
+/// Deterministic digest of the active report HTML template + inline JS/CSS/i18n asset bundle,
+/// used by HTTP `ETag` calculation so template or JS/CSS edits immediately invalidate stale caches.
+pub fn report_template_bundle_hash() -> String {
+    if let Some(dir) = resolve_live_assets_dir() {
+        get_live_compiled_template(&dir).bundle_hash.clone()
+    } else {
+        COMPILED_EMBEDDED_TEMPLATE.bundle_hash.clone()
+    }
 }
 
 // Strip internal LLM tech metadata (model names, effort, provider, fallbackUsed)
@@ -484,6 +954,184 @@ fn rename_html_safe_key(k: &str) -> String {
     }
 }
 
+fn rename_html_safe_key_needed(k: &str) -> bool {
+    k.contains("provider")
+        || k.contains("Provider")
+        || k.contains("effort")
+        || k.contains("Effort")
+        || k.contains("fallbackUsed")
+}
+
+#[inline]
+fn contains_ascii_ci(haystack: &str, needle_lower_ascii: &[u8]) -> bool {
+    let n = needle_lower_ascii.len();
+    let h = haystack.as_bytes();
+    if n == 0 {
+        return true;
+    }
+    if h.len() < n {
+        return false;
+    }
+    h.windows(n).any(|w| {
+        w.iter()
+            .zip(needle_lower_ascii.iter())
+            .all(|(&a, &b)| a.to_ascii_lowercase() == b)
+    })
+}
+
+#[inline]
+fn might_need_tech_scrub(s: &str) -> bool {
+    let b = s.as_bytes();
+    let len = b.len();
+    if len < 2 {
+        return false;
+    }
+    for i in 0..len - 1 {
+        match b[i] {
+            b'o' | b'O' => {
+                if matches!(b[i + 1], b'1' | b'3' | b'4')
+                    || (i + 14 <= len && b[i..i + 14].eq_ignore_ascii_case(b"openai_api_key"))
+                {
+                    return true;
+                }
+            }
+            b'g' | b'G' => {
+                if (i + 4 <= len && b[i..i + 4].eq_ignore_ascii_case(b"gpt-"))
+                    || (i + 7 <= len && b[i..i + 7].eq_ignore_ascii_case(b"gemini-"))
+                {
+                    return true;
+                }
+            }
+            b'c' | b'C' => {
+                if i + 7 <= len && b[i..i + 7].eq_ignore_ascii_case(b"claude-") {
+                    return true;
+                }
+            }
+            b'p' | b'P' => {
+                if i + 8 <= len && b[i..i + 8].eq_ignore_ascii_case(b"provider") {
+                    return true;
+                }
+            }
+            b'e' | b'E' => {
+                if i + 6 <= len && b[i..i + 6].eq_ignore_ascii_case(b"effort") {
+                    return true;
+                }
+            }
+            b'd' | b'D' => {
+                if i + 22 <= len && b[i..i + 22].eq_ignore_ascii_case(b"deterministic-fallback") {
+                    return true;
+                }
+            }
+            b'm' | b'M' => {
+                if i + 13 <= len && b[i..i + 13].eq_ignore_ascii_case(b"max reasoning") {
+                    return true;
+                }
+            }
+            b'f' | b'F' => {
+                if i + 12 <= len && b[i..i + 12].eq_ignore_ascii_case(b"fallbackused") {
+                    return true;
+                }
+            }
+            b'h' | b'H' => {
+                if i + 8 <= len
+                    && b[i..i + 4].eq_ignore_ascii_case(b"home")
+                    && contains_ascii_ci(&s[i + 4..], b"lens")
+                {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+#[inline]
+fn might_have_competitor_brand(s: &str) -> bool {
+    let b = s.as_bytes();
+    let len = b.len();
+    if len < 4 {
+        return false;
+    }
+    for i in 0..=len - 4 {
+        match b[i] {
+            b'z' | b'Z' => {
+                if (i + 6 <= len && b[i..i + 6].eq_ignore_ascii_case(b"zillow"))
+                    || (i + 9 <= len && b[i..i + 9].eq_ignore_ascii_case(b"zestimate"))
+                    || b[i..i + 4].eq_ignore_ascii_case(b"zhvi")
+                    || b[i..i + 4].eq_ignore_ascii_case(b"zori")
+                {
+                    return true;
+                }
+            }
+            b'r' | b'R' => {
+                if (i + 6 <= len && b[i..i + 6].eq_ignore_ascii_case(b"redfin"))
+                    || (i + 11 <= len && b[i..i + 11].eq_ignore_ascii_case(b"realtor.com"))
+                {
+                    return true;
+                }
+            }
+            b'w' | b'W' => {
+                if b[i..i + 4].eq_ignore_ascii_case(b"walk") {
+                    return true;
+                }
+            }
+            b'h' | b'H' => {
+                if (i + 9 <= len && b[i..i + 9].eq_ignore_ascii_case(b"homes.com"))
+                    || (i + 11 <= len && b[i..i + 11].eq_ignore_ascii_case(b"housecanary"))
+                {
+                    return true;
+                }
+            }
+            b't' | b'T' => {
+                if i + 6 <= len && b[i..i + 6].eq_ignore_ascii_case(b"trulia") {
+                    return true;
+                }
+            }
+            b'm' | b'M' => {
+                if i + 6 <= len && b[i..i + 6].eq_ignore_ascii_case(b"movoto") {
+                    return true;
+                }
+            }
+            b'o' | b'O' => {
+                if i + 8 <= len && b[i..i + 8].eq_ignore_ascii_case(b"opendoor") {
+                    return true;
+                }
+            }
+            b'l' | b'L' => {
+                if i + 7 <= len && b[i..i + 7].eq_ignore_ascii_case(b"loopnet") {
+                    return true;
+                }
+            }
+            b'c' | b'C' => {
+                if (i + 5 <= len && b[i..i + 5].eq_ignore_ascii_case(b"crexi"))
+                    || (i + 8 <= len && b[i..i + 8].eq_ignore_ascii_case(b"coldwell"))
+                    || (b[i] == b'C' && i + 7 <= len && &b[i..i + 7] == b"Compass")
+                {
+                    return true;
+                }
+            }
+            b'k' | b'K' => {
+                if i + 6 <= len && b[i..i + 6].eq_ignore_ascii_case(b"keller") {
+                    return true;
+                }
+            }
+            b'x' | b'X' => {
+                if b[i..i + 4].eq_ignore_ascii_case(b"xome") {
+                    return true;
+                }
+            }
+            b'e' | b'E' => {
+                if i + 8 <= len && b[i..i + 8].eq_ignore_ascii_case(b"estately") {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
 fn is_internal_id_or_url_key(k: &str) -> bool {
     matches!(
         k,
@@ -514,22 +1162,28 @@ fn sanitize_html_value_recursive(
 ) {
     match v {
         Value::String(s) => {
-            let low = s.to_ascii_lowercase();
-            if MODEL_ID_SCRUB_RE.is_match(s)
-                || low.contains("deterministic-fallback")
-                || low.contains("max reasoning")
-                || low.contains("provider")
-                || low.contains("effort")
-                || low.contains("fallbackused")
-                || low.contains("openai_api_key")
-                || low.contains("openai_base_url")
-                || crate::shared::has_retired_brand(s)
+            if s.len() < 2 {
+                return;
+            }
+            if might_need_tech_scrub(s)
+                && (MODEL_ID_SCRUB_RE.is_match(s)
+                    || contains_ascii_ci(s, b"deterministic-fallback")
+                    || contains_ascii_ci(s, b"max reasoning")
+                    || contains_ascii_ci(s, b"provider")
+                    || contains_ascii_ci(s, b"effort")
+                    || contains_ascii_ci(s, b"fallbackused")
+                    || contains_ascii_ci(s, b"openai_api_key")
+                    || contains_ascii_ci(s, b"openai_base_url")
+                    || crate::shared::has_retired_brand(s))
             {
                 *s = scrub_tech_str(s);
             }
             let skip_brand = preserve_sources_credit
                 || parent_key.map(is_internal_id_or_url_key).unwrap_or(false);
-            if !skip_brand && crate::shared::has_competitor_brand(s) {
+            if !skip_brand
+                && might_have_competitor_brand(s)
+                && crate::shared::has_competitor_brand(s)
+            {
                 *s = crate::shared::scrub_competitor_brands(s);
             }
         }
@@ -544,6 +1198,25 @@ fn sanitize_html_value_recursive(
             }
         }
         Value::Object(map) => {
+            let needs_key_rewrite = map.keys().any(|k| {
+                matches!(k.as_str(), "model" | "effort" | "fallbackUsed" | "aiModel")
+                    || rename_html_safe_key_needed(k)
+            });
+            if !needs_key_rewrite {
+                for (k, child) in map.iter_mut() {
+                    let child_preserve_sources = preserve_sources_credit
+                        || (k == "sources"
+                            && (depth == 0
+                                || matches!(parent_key, Some("facts") | Some("data"))));
+                    sanitize_html_value_recursive(
+                        child,
+                        child_preserve_sources,
+                        Some(k.as_str()),
+                        depth + 1,
+                    );
+                }
+                return;
+            }
             let keys: Vec<String> = map.keys().cloned().collect();
             for k in keys {
                 if matches!(k.as_str(), "model" | "effort" | "fallbackUsed" | "aiModel") {
@@ -771,7 +1444,10 @@ pub fn localize_i18n_json_for_brand(
 ) -> String {
     let eff_name = effective_brand_name(brand_name);
     let eff_domain = effective_brand_domain(brand_domain);
-    if eff_name == "Open Estate" && eff_domain == "open-estate.local" {
+    if eff_name == "Open Estate"
+        && eff_domain == "open-estate.local"
+        && !crate::shared::has_retired_brand(raw_json)
+    {
         return raw_json.to_string();
     }
     fn walk_json(v: &mut Value, eff_name: &str, eff_domain: &str) {
@@ -807,7 +1483,7 @@ pub fn localize_i18n_json_for_brand(
     let esc_domain = serde_json::to_string(eff_domain)
         .map(|s| s.trim_matches('"').to_string())
         .unwrap_or_else(|_| eff_domain.to_string());
-    let mut out = raw_json.to_string();
+    let mut out = crate::shared::normalize_retired_brand(raw_json);
     if eff_domain != "open-estate.local" {
         out = out.replace("open-estate.local", &esc_domain);
     }
@@ -817,8 +1493,8 @@ pub fn localize_i18n_json_for_brand(
     out
 }
 
-/// Recursively localizes default `"Open Estate"` / `"open-estate.local"` strings inside a report
-/// JSON value for white-label serving while preserving internal identifiers and third-party URLs.
+/// Recursively localizes default `"Open Estate"` / `"open-estate.local"` (and any retired brand) strings
+/// inside a report JSON value for white-label serving while preserving internal identifiers and third-party URLs.
 pub fn localize_report_value_for_brand(val: &mut Value, brand_name: &str, brand_domain: &str) {
     let eff_name = effective_brand_name(brand_name);
     let eff_domain = effective_brand_domain(brand_domain);
@@ -842,9 +1518,6 @@ pub fn localize_report_value_for_brand(val: &mut Value, brand_name: &str, brand_
             meta.insert("brand".to_string(), Value::Object(mbrand));
         }
     }
-    if eff_name == "Open Estate" && eff_domain == "open-estate.local" {
-        return;
-    }
     fn walk(v: &mut Value, key_hint: Option<&str>, eff_name: &str, eff_domain: &str) {
         match v {
             Value::String(s) => {
@@ -863,6 +1536,9 @@ pub fn localize_report_value_for_brand(val: &mut Value, brand_name: &str, brand_
                     return;
                 }
                 if matches!(key_hint, Some("url" | "sourceUrl" | "href" | "portalUrl")) {
+                    if crate::shared::has_retired_brand(s) {
+                        *s = crate::shared::normalize_retired_brand(s);
+                    }
                     if eff_domain != "open-estate.local" && s.contains("open-estate.local") {
                         *s = s.replace("open-estate.local", eff_domain);
                     }
@@ -913,39 +1589,18 @@ pub fn render_report_html_with_brand(
         "Value, upside/downside, hazards, pollution, neighborhood, buyer diligence and feng shui for {display_addr}"
     );
 
-    let mut sanitized = if report.get("propertyFeatures").is_none() || report.get("propertyTags").is_none() {
-        let mut with_features = report.clone();
-        crate::modules::property_features::attach_property_features_and_tags(&mut with_features);
-        sanitize_report_for_html(&with_features)
-    } else {
-        sanitize_report_for_html(report)
-    };
+    let mut sanitized =
+        if report.get("propertyFeatures").is_none() || report.get("propertyTags").is_none() {
+            let mut with_features = report.clone();
+            crate::modules::property_features::attach_property_features_and_tags(&mut with_features);
+            sanitize_report_for_html(&with_features)
+        } else {
+            sanitize_report_for_html(report)
+        };
     localize_report_value_for_brand(&mut sanitized, eff_name, eff_domain);
     let wordmark_html = crate::shared::format_brand_wordmark_html(eff_name);
     let raw_json = serde_json::to_string(&sanitized).unwrap_or_else(|_| "{}".to_string());
     let safe_json = safe_inline_json(&raw_json);
-    let safe_i18next = safe_inline_js(I18NEXT_JS);
-    let safe_core_js = safe_open_estate_core_js();
-    let safe_house3d = safe_inline_js(HOUSE3D_JS);
-    let combined_workspace_js = format!("{REPORT_WORKSPACE_JS}\n;\n{WALKIN_MEDIA_JS}");
-    let safe_report_workspace = safe_inline_js(&combined_workspace_js);
-    let safe_report_motion = safe_inline_js(REPORT_MOTION_JS);
-    let safe_report_dashboard = safe_inline_js(REPORT_DASHBOARD_JS);
-    let safe_en = safe_inline_json(&localize_i18n_json_for_brand(
-        I18N_EN_JSON,
-        eff_name,
-        eff_domain,
-    ));
-    let safe_zh = safe_inline_json(&localize_i18n_json_for_brand(
-        I18N_ZH_JSON,
-        eff_name,
-        eff_domain,
-    ));
-    let safe_es = safe_inline_json(&localize_i18n_json_for_brand(
-        I18N_ES_JSON,
-        eff_name,
-        eff_domain,
-    ));
     let esc_title = encode_double_quoted_attribute(&title);
     let esc_desc = encode_double_quoted_attribute(&desc);
     let esc_brand_name = encode_double_quoted_attribute(eff_name);
@@ -957,28 +1612,56 @@ pub fn render_report_html_with_brand(
         &serde_json::to_string(eff_domain).unwrap_or_else(|_| "\"open-estate.local\"".into()),
     );
 
-    render_template_single_pass(
-        REPORT_TEMPLATE_HTML,
-        &[
-            ("__REPORT_TITLE__", esc_title.as_ref()),
-            ("__REPORT_DESC__", esc_desc.as_ref()),
-            ("__REPORT_BRAND_WORDMARK__", wordmark_html.as_str()),
-            ("__REPORT_BRAND_NAME__", esc_brand_name.as_ref()),
-            ("__REPORT_BRAND_DOMAIN__", esc_brand_domain.as_ref()),
-            ("__REPORT_BRAND_NAME_JSON__", brand_name_js.as_str()),
-            ("__REPORT_BRAND_DOMAIN_JSON__", brand_domain_js.as_str()),
-            ("__I18NEXT_JS__", safe_i18next.as_str()),
-            ("__OPEN_ESTATE_CORE_JS__", safe_core_js.as_str()),
-            ("__HOUSE3D_JS__", safe_house3d.as_str()),
-            ("__REPORT_WORKSPACE_JS__", safe_report_workspace.as_str()),
-            ("__REPORT_MOTION_JS__", safe_report_motion.as_str()),
-            ("__REPORT_DASHBOARD_JS__", safe_report_dashboard.as_str()),
-            ("__I18N_EN_JSON__", safe_en.as_str()),
-            ("__I18N_ZH_JSON__", safe_zh.as_str()),
-            ("__I18N_ES_JSON__", safe_es.as_str()),
-            ("__REPORT_JSON__", safe_json.as_str()),
-        ],
-    )
+    let custom_i18n_owned = if eff_name != "Open Estate" || eff_domain != "open-estate.local" {
+        Some((
+            safe_inline_json(&localize_i18n_json_for_brand(
+                I18N_EN_JSON,
+                eff_name,
+                eff_domain,
+            )),
+            safe_inline_json(&localize_i18n_json_for_brand(
+                I18N_ZH_JSON,
+                eff_name,
+                eff_domain,
+            )),
+            safe_inline_json(&localize_i18n_json_for_brand(
+                I18N_ES_JSON,
+                eff_name,
+                eff_domain,
+            )),
+        ))
+    } else {
+        None
+    };
+    let custom_i18n_refs = custom_i18n_owned
+        .as_ref()
+        .map(|(en, zh, es)| (en.as_str(), zh.as_str(), es.as_str()));
+
+    if let Some(dir) = resolve_live_assets_dir() {
+        get_live_compiled_template(&dir).render(
+            esc_title.as_ref(),
+            esc_desc.as_ref(),
+            wordmark_html.as_str(),
+            esc_brand_name.as_ref(),
+            esc_brand_domain.as_ref(),
+            brand_name_js.as_str(),
+            brand_domain_js.as_str(),
+            custom_i18n_refs,
+            safe_json.as_str(),
+        )
+    } else {
+        COMPILED_EMBEDDED_TEMPLATE.render(
+            esc_title.as_ref(),
+            esc_desc.as_ref(),
+            wordmark_html.as_str(),
+            esc_brand_name.as_ref(),
+            esc_brand_domain.as_ref(),
+            brand_name_js.as_str(),
+            brand_domain_js.as_str(),
+            custom_i18n_refs,
+            safe_json.as_str(),
+        )
+    }
 }
 
 #[cfg(test)]

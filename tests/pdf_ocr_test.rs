@@ -982,15 +982,42 @@ async fn test_5_live_openai_vision_ocr_and_inspection_when_api_key_present() {
 
     let mut live_map = HashMap::new();
     live_map.insert("OPENAI_API_KEY".to_string(), live_key);
+    for extra in [
+        "OPENAI_BASE_URL",
+        "OPENAI_API_ENDPOINT",
+        "OPENAI_MODEL",
+        "OPENAI_FAST_MODEL",
+        "LLM_MODEL",
+        "LLM_FALLBACK_MODEL",
+        "LLM_PROFILE_WRITING_LIGHT",
+        "LLM_PROFILE_REASONING_STANDARD",
+        "LLM_PROFILE_DEEP_ANALYSIS",
+        "LLM_EFFORT",
+    ] {
+        if let Ok(v) = std::env::var(extra) {
+            if !v.trim().is_empty() {
+                live_map.insert(extra.to_string(), v);
+            }
+        }
+    }
     let live_env = EnvConfig::from_map(live_map);
     let live_http = HttpClient::from_env(&live_env, None);
 
     let insp_out = analyze_inspection(&live_http, &live_env, &real_report, vec![upload_dig], None)
         .await
         .expect("live analyze_inspection");
+    let has_findings = insp_out
+        .data
+        .get("findings")
+        .and_then(|v| v.as_array())
+        .map(|a| !a.is_empty())
+        .unwrap_or(false)
+        || insp_out.data.get("docSummary").is_some()
+        || insp_out.data.get("defects").is_some()
+        || insp_out.data.get("summary").is_some();
     assert!(
-        insp_out.data.get("defects").is_some() || insp_out.data.get("summary").is_some(),
-        "live inspection output must contain structured findings: {}",
+        has_findings,
+        "live inspection output must contain structured findings (`findings` / `docSummary`): {}",
         insp_out.data
     );
 }

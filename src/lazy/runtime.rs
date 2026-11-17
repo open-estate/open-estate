@@ -16,7 +16,6 @@ use crate::lazy::types::{
 use crate::search::mailer::{send_section_ready_email, SectionReadyNotification};
 use crate::shared::{sanitize_user_warning, EnvConfig, HttpClient};
 use crate::web::hooks::ServerExtensionHooks;
-use crate::web::render::render_report_html_with_brand;
 use anyhow::{anyhow, Result};
 use dashmap::DashMap;
 use once_cell::sync::Lazy;
@@ -219,7 +218,7 @@ pub async fn heartbeat(
 /// advancing `updated_at` monotonically (to invalidate CDN ETags) and invalidating `db.l1_reports`.
 pub async fn patch_cached_report_for_slug(
     db: &DbStore,
-    env: &EnvConfig,
+    _env: &EnvConfig,
     slug: &str,
 ) -> Result<(bool, Option<String>)> {
     let clean_slug = slug.trim();
@@ -240,8 +239,7 @@ pub async fn patch_cached_report_for_slug(
         meta.insert("lazyUpdatedAt".to_string(), json!(new_updated_at));
     }
 
-    let html = render_report_html_with_brand(&rec.report, &env.brand_name(), &env.brand_domain());
-    db.patch_cached_report_and_invalidate_l1(&rec.slug, &rec.report, Some(&html), &new_updated_at)
+    db.patch_cached_report_and_invalidate_l1(&rec.slug, &rec.report, None, &new_updated_at)
         .await?;
 
     Ok((true, Some(new_updated_at)))

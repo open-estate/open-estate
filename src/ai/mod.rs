@@ -21,11 +21,15 @@ pub mod repair_addendum;
 
 pub use agent_harness::{
     build_agent_messages, build_agent_system_instructions,
-    build_agent_system_instructions_with_config, build_deterministic_qa_response,
-    build_housing_concept_tie_in, compact_housing_history, execute_housing_tool,
-    housing_agent_step_schema, match_housing_concept_id, run_housing_agent_loop,
-    run_housing_agent_loop_with_prompt, CompactedHistory, ConceptTieIn, HousingSkillTool,
-    UploadedDocContext, IMMUTABLE_HOUSING_AGENT_CONSTITUTION, MAX_COMPACTED_CHARS, MAX_TOOL_STEPS,
+    build_agent_system_instructions_with_config,
+    build_agent_system_instructions_with_config_and_extra,
+    build_agent_system_instructions_with_extra, build_deterministic_qa_response,
+    build_deterministic_qa_response_for_role, build_housing_concept_tie_in,
+    compact_housing_history, execute_housing_tool, housing_agent_step_schema,
+    match_housing_concept_id, run_housing_agent_loop, run_housing_agent_loop_with_prompt,
+    run_housing_agent_loop_with_prompt_and_role, CompactedHistory, ConceptTieIn,
+    HousingSkillTool, UploadedDocContext, IMMUTABLE_HOUSING_AGENT_CONSTITUTION,
+    MAX_COMPACTED_CHARS, MAX_TOOL_STEPS,
 };
 pub use analyst::{
     analysis_schema, build_deterministic_analyst_fallback, derive_neighborhood_scope,
@@ -40,8 +44,10 @@ pub use artifact_canvas::{
     DEFAULT_ARTIFACT_INSTRUCTIONS,
 };
 pub use ask::{
-    ask_property_question, ask_property_question_with_config, ask_schema, AskPromptConfig,
-    ASK_INSTRUCTIONS, DEFAULT_CHATBOX_MAX_WORDS, DEFAULT_CHATBOX_STYLE_PROMPT,
+    ask_property_question, ask_property_question_for_role,
+    ask_property_question_for_role_with_config, ask_property_question_with_config, ask_schema,
+    normalize_assistant_role, role_system_prompt, AskPromptConfig, ASK_INSTRUCTIONS,
+    DEFAULT_CHATBOX_MAX_WORDS, DEFAULT_CHATBOX_STYLE_PROMPT,
 };
 pub use brief::{build_brief, build_brief_with_limit, BRIEF_VERSION, DEFAULT_MAX_BRIEF_BYTES};
 pub use inspect::{

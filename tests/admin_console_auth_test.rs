@@ -733,16 +733,17 @@ async fn admin_users_crud_filtering_inspection_deactivate_and_csv() {
         .to_string();
 
     let now = now_iso();
+    let now_ts = open_estate::shared::now_unix_secs();
     state
         .db
         .execute_params(
-            "INSERT INTO user_search_history (actor_key, slug, raw_slug, display_address, updated_at) VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO user_search_history (actor_key, slug, raw_slug, display_address, updated_ts) VALUES (?, ?, ?, ?, ?)",
             &[
                 SqlParam::from(format!("user:{u1_id}").as_str()),
                 SqlParam::from("100-synthadminalpha-ln-san-jose-ca-95118"),
                 SqlParam::from("100 Synthadminalpha Ln, San Jose, CA 95118"),
                 SqlParam::from("100 Synthadminalpha Ln, San Jose, CA 95118"),
-                SqlParam::from(now.as_str()),
+                SqlParam::from(now_ts),
             ],
         )
         .await
@@ -750,40 +751,48 @@ async fn admin_users_crud_filtering_inspection_deactivate_and_csv() {
 
     state
         .db
-        .execute_params(
-            "INSERT INTO agent_match_requests (id, slug, display_address, buyer_name, buyer_email, need_type, doc_needed, smtp_status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            &[
-                SqlParam::from("amr-1"),
-                SqlParam::from("100-synthadminalpha-ln-san-jose-ca-95118"),
-                SqlParam::from("100 Synthadminalpha Ln, San Jose, CA 95118"),
-                SqlParam::from("VIP Buyer"),
-                SqlParam::from("vip-buyer@example.com"),
-                SqlParam::from("tour"),
-                SqlParam::from("disclosures"),
-                SqlParam::from("sent"),
-                SqlParam::from(now.as_str()),
-            ],
-        )
+        .upsert_agent_match_request(&open_estate::db::AgentMatchRequestRow {
+            id: "amr-1".to_string(),
+            slug: "100-synthadminalpha-ln-san-jose-ca-95118".to_string(),
+            display_address: "100 Synthadminalpha Ln, San Jose, CA 95118".to_string(),
+            city: Some("San Jose".to_string()),
+            state: Some("CA".to_string()),
+            zip: Some("95118".to_string()),
+            need_type: "tour".to_string(),
+            doc_needed: Some("disclosures".to_string()),
+            buyer_name: Some("VIP Buyer".to_string()),
+            buyer_email: "vip-buyer@example.com".to_string(),
+            buyer_phone: None,
+            preferred_partner_id: None,
+            notes: None,
+            client_id: None,
+            smtp_status: "sent".to_string(),
+            created_at: now.clone(),
+        })
         .await
         .unwrap();
 
     state
         .db
-        .execute_params(
-            "INSERT INTO subscription_notifications (id, subscription_id, listing_id, event_key, email_to, subject, match_score, delivery_status, delivery_error, sent_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            &[
-                SqlParam::from("notif-u1"),
-                SqlParam::from(sub_id.as_str()),
-                SqlParam::from("lst-100"),
-                SqlParam::from("ev-notif-u1"),
-                SqlParam::from("vip-buyer@example.com"),
-                SqlParam::from("Daily Cupertino Match"),
-                SqlParam::from(94i64),
-                SqlParam::from("sent"),
-                SqlParam::from(None::<&str>),
-                SqlParam::from(now.as_str()),
-            ],
-        )
+        .insert_subscription_notifications_batch(&[
+            open_estate::db::proto::SubscriptionNotificationProto {
+                notification_sk: open_estate::db::schema::deterministic_sk("notif-u1"),
+                public_id: "notif-u1".to_string(),
+                subscription_sk: open_estate::db::schema::deterministic_sk(&sub_id),
+                subscription_public_id: sub_id.clone(),
+                listing_sk: open_estate::db::schema::deterministic_sk("lst-100"),
+                listing_external_id: "lst-100".to_string(),
+                email_to: "vip-buyer@example.com".to_string(),
+                subject: "Daily Cupertino Match".to_string(),
+                event_kind: 1,
+                event_key: "ev-notif-u1".to_string(),
+                match_score: Some(94),
+                match_reason: None,
+                delivery_status: open_estate::db::proto::delivery_status_to_code("sent"),
+                delivery_error: None,
+                sent_ts: now_ts,
+            },
+        ])
         .await
         .unwrap();
 
@@ -965,43 +974,46 @@ async fn admin_subscriptions_crud_frequency_retranslate_delivery_logs_and_csv() 
     assert_eq!(c2["subscription"]["frequency"], "weekly");
 
     // 2. Seed delivery notifications for sub1 (one sent, one failed)
-    let now = now_iso();
+    let now_ts = open_estate::shared::now_unix_secs();
+    let sub1_sk = open_estate::db::schema::deterministic_sk(&sub1_id);
     state
         .db
-        .execute_params(
-            "INSERT INTO subscription_notifications (id, subscription_id, listing_id, event_key, email_to, subject, match_score, delivery_status, delivery_error, sent_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            &[
-                SqlParam::from("dn-1"),
-                SqlParam::from(sub1_id.as_str()),
-                SqlParam::from("lst-1"),
-                SqlParam::from("ev-dn-1"),
-                SqlParam::from("daily-hunter@example.com"),
-                SqlParam::from("New Match: SynthListing-01"),
-                SqlParam::from(92i64),
-                SqlParam::from("sent"),
-                SqlParam::from(None::<&str>),
-                SqlParam::from("2026-11-15T06:00:00Z"),
-            ],
-        )
-        .await
-        .unwrap();
-    state
-        .db
-        .execute_params(
-            "INSERT INTO subscription_notifications (id, subscription_id, listing_id, event_key, email_to, subject, match_score, delivery_status, delivery_error, sent_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            &[
-                SqlParam::from("dn-2"),
-                SqlParam::from(sub1_id.as_str()),
-                SqlParam::from("lst-2"),
-                SqlParam::from("ev-dn-2"),
-                SqlParam::from("daily-hunter@example.com"),
-                SqlParam::from("New Match: SynthListing-02"),
-                SqlParam::from(88i64),
-                SqlParam::from("failed"),
-                SqlParam::from("SMTP relay 421 temporary deferral"),
-                SqlParam::from(now.as_str()),
-            ],
-        )
+        .insert_subscription_notifications_batch(&[
+            open_estate::db::proto::SubscriptionNotificationProto {
+                notification_sk: open_estate::db::schema::deterministic_sk("dn-1"),
+                public_id: "dn-1".to_string(),
+                subscription_sk: sub1_sk,
+                subscription_public_id: sub1_id.clone(),
+                listing_sk: open_estate::db::schema::deterministic_sk("lst-1"),
+                listing_external_id: "lst-1".to_string(),
+                email_to: "daily-hunter@example.com".to_string(),
+                subject: "New Match: SynthListing-01".to_string(),
+                event_kind: 1,
+                event_key: "ev-dn-1".to_string(),
+                match_score: Some(92),
+                match_reason: None,
+                delivery_status: open_estate::db::proto::delivery_status_to_code("sent"),
+                delivery_error: None,
+                sent_ts: now_ts - 86_400,
+            },
+            open_estate::db::proto::SubscriptionNotificationProto {
+                notification_sk: open_estate::db::schema::deterministic_sk("dn-2"),
+                public_id: "dn-2".to_string(),
+                subscription_sk: sub1_sk,
+                subscription_public_id: sub1_id.clone(),
+                listing_sk: open_estate::db::schema::deterministic_sk("lst-2"),
+                listing_external_id: "lst-2".to_string(),
+                email_to: "daily-hunter@example.com".to_string(),
+                subject: "New Match: SynthListing-02".to_string(),
+                event_kind: 1,
+                event_key: "ev-dn-2".to_string(),
+                match_score: Some(88),
+                match_reason: None,
+                delivery_status: open_estate::db::proto::delivery_status_to_code("failed"),
+                delivery_error: Some("SMTP relay 421 temporary deferral".to_string()),
+                sent_ts: now_ts,
+            },
+        ])
         .await
         .unwrap();
 

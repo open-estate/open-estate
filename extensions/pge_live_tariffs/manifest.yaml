@@ -49,3 +49,4 @@ sharing:
 source_attribution:
   name: "PG&E Official CPUC Tariffs & Silicon Valley Clean Energy"
   url: "https://www.pge.com/tariffs/index.page"
+  reference_url_template: "https://www.pge.com/tariffs/index.page"

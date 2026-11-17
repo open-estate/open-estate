@@ -28,8 +28,9 @@ use crate::property::media::{
 };
 use crate::registry::endpoints::{
     ARCGIS_BASEMAPS_WORLD_IMAGERY_BASE_URL, ARCGIS_WORLD_IMAGERY_EXPORT_FALLBACK_URL,
-    GOOGLE_MAP_TILES_2D_BASE_URL, GOOGLE_MAP_TILES_SESSION_URL, GOOGLE_STATIC_MAPS_URL,
-    KINGCO_ORTHO_2023_EXPORT_URL, KINGCO_ORTHO_2023_TILE_URL, MAPBOX_SATELLITE_STATIC_BASE_URL,
+    ARCGIS_WORLD_IMAGERY_TILE_FALLBACK_URL, GOOGLE_MAP_TILES_2D_BASE_URL,
+    GOOGLE_MAP_TILES_SESSION_URL, GOOGLE_STATIC_MAPS_URL, KINGCO_ORTHO_2023_EXPORT_URL,
+    KINGCO_ORTHO_2023_TILE_URL, MAPBOX_SATELLITE_STATIC_BASE_URL,
     MAPBOX_SATELLITE_TILES_BASE_URL, SCC_SJ_ORTHO_2025_EXPORT_URL, SCC_SJ_ORTHO_2025_TILE_URL,
     USGS_IMAGERY_ONLY_EXPORT_URL, USGS_IMAGERY_ONLY_TILE_URL,
 };
@@ -1872,7 +1873,12 @@ pub async fn handle_media_file_get(
             );
         }
 
-        if !manifest.remote_items.contains_key(clean_id) {
+        let needs_sync = manifest.remote_items.get(clean_id).is_none_or(|rem| {
+            [rem.remote_url.as_str(), rem.remote_thumb_url.as_str()]
+                .into_iter()
+                .any(|u| u.contains("USGSImageryTopo") || u.contains("USGSShadedReliefOnly"))
+        });
+        if needs_sync {
             let (changed, _, invalidated_stems) =
                 sync_report_items_into_manifest_collecting(&rec.report, &state.env, &mut manifest);
             if !invalidated_stems.is_empty() {
@@ -2658,6 +2664,13 @@ async fn fetch_bounded_satellite_image(
         })?;
 
     let status = resp.status();
+    if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
+        return Err(GuardrailError::new(
+            "SATELLITE_AUTH_REJECTED",
+            format!("Satellite imagery upstream rejected credentials (HTTP {}).", status.as_u16()),
+            502,
+        ));
+    }
     if status == reqwest::StatusCode::NOT_FOUND {
         return Err(GuardrailError::new(
             "SATELLITE_TILE_NOT_FOUND",
@@ -2764,7 +2777,7 @@ async fn build_tile_url_for_provider(
         SatelliteProviderKind::MapboxCommercial => {
             let key = non_empty_sat_key(env, &["MAPBOX_ACCESS_TOKEN", "MAPBOX_API_KEY"])?;
             let mut u =
-                Url::parse(&format!("{MAPBOX_SATELLITE_TILES_BASE_URL}/{z}/{x}/{y}@2x.jpg90")).ok()?;
+                Url::parse(&format!("{MAPBOX_SATELLITE_TILES_BASE_URL}/{z}/{x}/{y}@2x")).ok()?;
             u.query_pairs_mut().append_pair("access_token", key);
             Some(u.to_string())
         }
@@ -2798,9 +2811,11 @@ async fn fetch_satellite_tile_bytes(
     lat: f64,
     lon: f64,
 ) -> Result<(Bytes, ImageFormat), GuardrailError> {
+    let mut allow_arcgis_fallback = false;
     if let Some(primary_url) = build_tile_url_for_provider(env, resolved.provider, z, y, x).await {
-        if let Ok(pair) = fetch_bounded_satellite_image(env, &primary_url).await {
-            return Ok(pair);
+        match fetch_bounded_satellite_image(env, &primary_url).await {
+            Ok(pair) => return Ok(pair),
+            Err(ge) => allow_arcgis_fallback = ge.code != "SATELLITE_AUTH_REJECTED",
         }
     }
 
@@ -2816,6 +2831,12 @@ async fn fetch_satellite_tile_bytes(
                 if let Ok(pair) = fetch_bounded_satellite_image(env, &reg_url).await {
                     return Ok(pair);
                 }
+            }
+        }
+        if allow_arcgis_fallback && resolved.provider != SatelliteProviderKind::ArcGisCommercial {
+            let esri_url = format!("{ARCGIS_WORLD_IMAGERY_TILE_FALLBACK_URL}{z}/{y}/{x}");
+            if let Ok(pair) = fetch_bounded_satellite_image(env, &esri_url).await {
+                return Ok(pair);
             }
         }
     }
@@ -3532,6 +3553,24 @@ mod tests {
         .expect("arcgis url");
         assert!(arcgis_url.starts_with(ARCGIS_BASEMAPS_WORLD_IMAGERY_BASE_URL));
         assert!(arcgis_url.contains("token=arcgis-key-contract-val"));
+
+        let mapbox_env = EnvConfig::from_map(HashMap::from([(
+            "MAPBOX_ACCESS_TOKEN".to_string(),
+            "pk.mapbox-test-token".to_string(),
+        )]));
+        let mapbox_url = build_tile_url_for_provider(
+            &mapbox_env,
+            SatelliteProviderKind::MapboxCommercial,
+            19,
+            200559,
+            149968,
+        )
+        .await
+        .expect("mapbox url");
+        assert_eq!(
+            mapbox_url,
+            "https://api.mapbox.com/styles/v1/mapbox/satellite-v9/tiles/256/19/149968/200559@2x?access_token=pk.mapbox-test-token"
+        );
 
         let fp_a = sat_key_fingerprint(&arcgis_env, SatelliteProviderKind::ArcGisCommercial);
         let fp_b = sat_key_fingerprint(&empty_env, SatelliteProviderKind::ArcGisCommercial);

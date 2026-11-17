@@ -23,7 +23,7 @@ metering:
 builtin: true
 provenance: official_tariff
 homepage_url: "https://openei.org/apps/USURDB/"
-documentation_url: "https://api.openei.org/utility_rates"
+documentation_url: "https://openei.org/wiki/Utility_Rate_Database"
 codeowners:
   - "@openestate/utilities"
 geo_scope:
@@ -49,3 +49,4 @@ sharing:
 source_attribution:
   name: "NREL / US DOE OpenEI Utility Rate Database (URDB v7)"
   url: "https://openei.org/apps/USURDB/"
+  reference_url_template: "https://openei.org/apps/USURDB/"

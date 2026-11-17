@@ -136,8 +136,8 @@ pub fn encode_w3c_text_fragment(snippet: &str) -> String {
     out
 }
 
-/// Ensures every `sourceUrl` is a valid `https://` deep URL with either `#section` or `#:~:text=...`,
-/// containing zero forbidden tokens and zero PII.
+/// Ensures every `sourceUrl` is a valid `https://` URL containing zero forbidden tokens and zero PII,
+/// attaching `#:~:text=...` only on verifiable static HTML documents.
 pub fn ensure_anchored_https_url(base_url: Option<&str>, fallback_url: &str, anchor_hint: &str) -> String {
     let chosen = base_url
         .map(str::trim)
@@ -150,18 +150,7 @@ pub fn ensure_anchored_https_url(base_url: Option<&str>, fallback_url: &str, anc
     if !url.starts_with("https://") {
         url = fallback_url.to_string();
     }
-    let frag_encoded = encode_w3c_text_fragment(anchor_hint);
-    if let Some((before_hash, existing_hash)) = url.split_once('#') {
-        if existing_hash.is_empty() {
-            format!("{before_hash}#:~:text={frag_encoded}")
-        } else if existing_hash.contains(":~:text=") {
-            format!("{before_hash}#{existing_hash}")
-        } else {
-            format!("{before_hash}#{existing_hash}:~:text={frag_encoded}")
-        }
-    } else {
-        format!("{url}#:~:text={frag_encoded}")
-    }
+    crate::shared::with_verified_data_anchor(&url, None, Some(anchor_hint))
 }
 
 fn extract_year(text: &str) -> Option<i64> {
@@ -203,10 +192,10 @@ impl SignalCorpus {
             .or_else(|| report.get("property"))
             .unwrap_or(&Value::Null);
         let geo = report.get("geo").unwrap_or(&Value::Null);
-        let lat = num_f64(geo.get("lat"))
+        let _lat = num_f64(geo.get("lat"))
             .or_else(|| num_f64(geo.pointer("/refined/lat")))
             .filter(|&v| v.is_finite() && v != 0.0);
-        let lon = num_f64(geo.get("lon"))
+        let _lon = num_f64(geo.get("lon"))
             .or_else(|| num_f64(geo.pointer("/refined/lon")))
             .filter(|&v| v.is_finite() && v != 0.0);
         let address_hint = report
@@ -232,11 +221,13 @@ impl SignalCorpus {
         let default_census = format!(
             "https://geocoding.geo.census.gov/geocoder/geographies/onelineaddress?address={addr_q}&benchmark=Public_AR_Current&vintage=Current_Current&layers=all&format=json"
         );
-        let fema_url = match (lat, lon) {
-            (Some(la), Some(lo)) => format!(
-                "https://hazards-fema.maps.arcgis.com/apps/webappviewer/index.html?id=8b0adb51996444d4879338b5529aa9cd&marker={lo:.5},{la:.5}"
-            ),
-            _ => "https://hazards-fema.maps.arcgis.com/apps/webappviewer/index.html?id=8b0adb51996444d4879338b5529aa9cd".to_string(),
+        let fema_url = if !address_hint.trim().is_empty() {
+            format!(
+                "https://msc.fema.gov/portal/search?AddressQuery={}",
+                urlencoding::encode(address_hint.trim())
+            )
+        } else {
+            "https://msc.fema.gov/nfhl".to_string()
         };
         let tract_geoid = geo
             .pointer("/censusIds/tract")

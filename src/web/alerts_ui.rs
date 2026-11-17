@@ -13,7 +13,7 @@ use crate::web::render::{
     localize_i18n_json_for_brand, safe_inline_js, safe_inline_json, I18NEXT_JS, I18N_EN_JSON,
     I18N_ES_JSON, I18N_ZH_JSON,
 };
-use minijinja::{context, Environment};
+use minijinja::{context, AutoEscape, Environment};
 use once_cell::sync::Lazy;
 
 const ALERTS_MANAGER_TEMPLATE: &str = r###"<!doctype html>
@@ -111,6 +111,7 @@ const ALERTS_MANAGER_TEMPLATE: &str = r###"<!doctype html>
     .inline-form{display:flex;gap:9px;align-items:center;flex-wrap:wrap}
     .inline-form .tinput{flex:1 1 260px}
     footer{margin-top:28px;padding-top:14px;border-top:1px solid var(--line);display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;font-size:12px;color:var(--subtle)}
+    @media (prefers-color-scheme: dark){:root:not([data-theme="light"]){--ink:#f1f5f9;--muted:#cbd5e1;--subtle:#94a3b8;--line:#334155;--card-border:#334155;--bg:#0b1120}html:not([data-theme="light"]) .wrap .card,html:not([data-theme="light"]) .topbar .navlink:not(.on),html:not([data-theme="light"]) .topbar .langsw{background:#111827;border-color:#334155;color:#f1f5f9}html:not([data-theme="light"]) .btnsec,html:not([data-theme="light"]) .btnmut{background:#111827;border-color:#334155;color:#5eead4}html:not([data-theme="light"]) .langsw button:not(.on){color:#cbd5e1}html:not([data-theme="light"]) .wrap .tinput,html:not([data-theme="light"]) .wrap .nlarea,html:not([data-theme="light"]) .wrap .stsel{background:#1e293b;border-color:#334155;color:#f1f5f9}html:not([data-theme="light"]) .wrap .lbl,html:not([data-theme="light"]) .wrap .chkrow{color:#cbd5e1}}
   </style>
 </head>
 <body>
@@ -121,6 +122,7 @@ const ALERTS_MANAGER_TEMPLATE: &str = r###"<!doctype html>
         <a class="navlink" href="/" id="navSearch">{{ nav_search }}</a>
         <a class="navlink" href="/shop" id="navShop">{{ nav_shop }}</a>
         <a class="navlink" href="/?tab=alerts" id="navHomeAlerts">{{ nav_alerts_tab }}</a>
+        <a class="navlink" href="/assistant" id="navAssistant">{{ nav_assistant }}</a>
         <a class="navlink" href="/deal-room" id="navDealRoom">{{ nav_deal_room }}</a>
         <a class="navlink on" href="/alerts" id="navManageAlerts">{{ nav_manage_alerts }}</a>
         <div class="langsw" id="langSwitch" title="Switch language (English / 简体中文 / Español)">
@@ -137,6 +139,14 @@ const ALERTS_MANAGER_TEMPLATE: &str = r###"<!doctype html>
         <p class="sub" id="pageSub">{{ hero_sub }}</p>
       </div>
       <a class="btnmut" href="/alerts" id="backOverviewBtn" style="display:none"></a>
+    </div>
+
+    <div id="alertsSmtpDisabledBanner" class="banner banner-warn" style="margin:0 0 16px">
+      <div>
+        <div id="alertsSmtpDisabledTitle" style="font-weight:800;margin-bottom:2px">{{ alerts_smtp_disabled_title }}</div>
+        <div id="alertsSmtpDisabledBody" style="font-weight:500">{{ alerts_smtp_disabled_body }}</div>
+      </div>
+      <a class="btnsec" href="/assistant" id="alertsGoAssistantLink" style="white-space:nowrap">{{ alerts_go_assistant }}</a>
     </div>
 
     <div id="tokenBannerHost"></div>
@@ -380,7 +390,20 @@ const ALERTS_CLIENT_JS: &str = r###"
     setTxt('navSearch', L('Search', '首页搜索', 'Buscar'));
     setTxt('navShop', L('Shop', '条件选房', 'Comprar'));
     setTxt('navHomeAlerts', L('Alerts', '邮编订阅', 'Alertas'));
+    const assistBrandLabel = BRAND_NAME + ' AI';
+    setTxt('navAssistant', assistBrandLabel);
     setTxt('navDealRoom', L('Deal Room', '比房对比室', 'Deal Room'));
+    setTxt('alertsSmtpDisabledTitle', L(
+      'Outbound SMTP & background email monitoring are currently disabled by default',
+      '自动邮件发送与后台邮箱监控当前默认已停用',
+      'El envío SMTP y el monitoreo automático por correo están desactivados por defecto'
+    ));
+    setTxt('alertsSmtpDisabledBody', L(
+      'Use ' + assistBrandLabel + ' to draft prefilled mailto: disclosure/inspection requests from your mail app and run one-time private document analysis (original files discarded immediately).',
+      '请使用“' + assistBrandLabel + '”通过 mailto: 一键生成索取披露/验房邮件，并在收到后进行一次性私密文档解析（原始文件立即销毁）。',
+      'Use ' + assistBrandLabel + ' para redactar solicitudes vía mailto: desde su correo y realizar el análisis privado único (los archivos originales se descartan de inmediato).'
+    ));
+    setTxt('alertsGoAssistantLink', L('Open ' + assistBrandLabel + ' →', '打开 ' + assistBrandLabel + ' →', 'Abrir ' + assistBrandLabel + ' →'));
     setTxt('navManageAlerts', L('Manage Alerts', '管理订阅', 'Mis Alertas'));
     setTxt('footSearch', L('Search', '首页搜索', 'Buscar'));
     setTxt('footDealRoom', L('Deal Room', '比房对比室', 'Deal Room'));
@@ -989,9 +1012,17 @@ const ALERTS_CLIENT_JS: &str = r###"
 })();
 "###;
 
-static ALERTS_JINJA_ENV: Lazy<Environment<'static>> = Lazy::new(|| {
+static ALERTS_UI_JINJA_ENV: Lazy<Environment<'static>> = Lazy::new(|| {
     let mut env = Environment::new();
-    env.add_template("alerts", ALERTS_MANAGER_TEMPLATE).unwrap();
+    env.set_auto_escape_callback(|name| {
+        if name.ends_with(".html") {
+            AutoEscape::Html
+        } else {
+            minijinja::default_auto_escape_callback(name)
+        }
+    });
+    env.add_template("alerts.html", ALERTS_MANAGER_TEMPLATE)
+        .unwrap();
     env
 });
 
@@ -1040,7 +1071,7 @@ pub fn render_alerts_manager_html(lang: &str, brand_name: &str, brand_domain: &s
         .trim()
         .to_string();
 
-    let tmpl = ALERTS_JINJA_ENV.get_template("alerts").unwrap();
+    let tmpl = ALERTS_UI_JINJA_ENV.get_template("alerts.html").unwrap();
     tmpl.render(context! {
         favicon_tags => FAVICON_HEAD_TAGS.as_str(),
         logo_mark => logo_mark_img(34),
@@ -1054,7 +1085,27 @@ pub fn render_alerts_manager_html(lang: &str, brand_name: &str, brand_domain: &s
         nav_search => pick("Search", "首页搜索", "Buscar"),
         nav_shop => pick("Shop", "条件选房", "Comprar"),
         nav_alerts_tab => pick("Alerts", "邮编订阅", "Alertas"),
+        nav_assistant => format!("{eff_brand} AI"),
         nav_deal_room => deal_room_nav,
+        alerts_smtp_disabled_title => pick(
+            "Outbound SMTP & background email monitoring are currently disabled by default",
+            "自动邮件发送与后台邮箱监控当前默认已停用",
+            "El envío SMTP y el monitoreo automático por correo están desactivados por defecto",
+        ),
+        alerts_smtp_disabled_body => if zh {
+            format!("请使用“{eff_brand} AI”通过 mailto: 一键生成索取披露/验房邮件，并在收到后进行一次性私密文档解析（原始文件立即销毁）。")
+        } else if es {
+            format!("Use {eff_brand} AI para redactar solicitudes vía mailto: desde su correo y realizar el análisis privado único (los archivos originales se descartan de inmediato).")
+        } else {
+            format!("Use {eff_brand} AI to draft prefilled mailto: disclosure/inspection requests from your mail app and run one-time private document analysis (original files discarded immediately).")
+        },
+        alerts_go_assistant => if zh {
+            format!("打开 {eff_brand} AI →")
+        } else if es {
+            format!("Abrir {eff_brand} AI →")
+        } else {
+            format!("Open {eff_brand} AI →")
+        },
         nav_manage_alerts => pick("Manage Alerts", "管理订阅", "Mis Alertas"),
         hero_title => pick("Home Alert Preferences", "房源订阅管理中心", "Centro de alertas guardadas"),
         hero_sub => pick(

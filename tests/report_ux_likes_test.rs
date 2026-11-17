@@ -314,12 +314,12 @@ async fn test_1_daily_refresh_limit_and_24h_cooldown() {
     let built_429_json: Value = built_429.json().await.unwrap();
     assert_eq!(built_429_json["code"], json!("DAILY_REFRESH_LIMIT"));
 
-    // 8. Simulate >24h elapsed (`last_refreshed_unix = now - 90_000`) -> refresh becomes allowed!
+    // 8. Simulate >24h elapsed (`last_refreshed_ts = now - 90_000`) -> refresh becomes allowed!
     let old_unix = chrono::Utc::now().timestamp() - 90_000;
     srv.state
         .db
         .execute_params(
-            "UPDATE report_refresh_log SET last_refreshed_unix = ? WHERE slug = ?",
+            "UPDATE report_refresh_log SET last_refreshed_ts = ? WHERE slug = ?",
             &[
                 open_estate::db::SqlParam::from(old_unix),
                 open_estate::db::SqlParam::from(slug),

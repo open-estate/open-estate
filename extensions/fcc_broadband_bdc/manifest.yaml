@@ -8,7 +8,7 @@ domains:
 driver: openapi_yaml
 proto_message_type: "openestate.extension.v1.BroadbandCatalogProto"
 priority: 290
-enabled_by_default: true
+enabled_by_default: false
 tier: basic
 license_class: public_open_data
 execution_mode: eager
@@ -34,7 +34,10 @@ geo_scope:
   zip_codes: []
   cities: []
 auth:
-  auth_type: none
+  auth_type: api_key_header
+  env_var: "FCC_BDC_API_TOKEN"
+  header_name: "hash_value"
+  optional_key: true
 rate_limit:
   requests_per_second: 3
   burst: 6
@@ -48,6 +51,7 @@ sharing:
 source_attribution:
   name: "FCC National Broadband Map / Broadband Data Collection (BDC)"
   url: "https://broadbandmap.fcc.gov/"
+  reference_url_template: "https://broadbandmap.fcc.gov/location-summary/fixed?latlon={{lat}}%2C{{lon}}"
   notes: "Public map JSON endpoints may return HTTP 405 from automated server clients; see fcc_broadband_bdc_live for authenticated BDC queries and honest unverified reporting."
 openapi:
   spec_file: "openapi.yaml"

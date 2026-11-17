@@ -635,36 +635,51 @@ async fn live_public_county_recorder_liens_nyc_manhattan_and_brooklyn_acris() {
     let env = empty_env();
     let http = HttpClient::from_env(&env, None);
 
-    // 1. Direct extension hub path (`hub.test_fetch`) for Manhattan & Brooklyn
-    for (site, expected_stem) in [
-        (&NYC_CITY_HALL, "BROADWAY"),
-        (&BROOKLYN_BOROUGH_HALL, "JORALEMON"),
-    ] {
-        let (res, ev) = run_metered_test_fetch(
-            &hub,
-            "county_recorder_liens",
-            &site.to_extension_query(),
-            &http,
-            &env,
-        )
-        .await;
-        assert!(
-            res.ok,
-            "county_recorder_liens failed for {}: {:?}",
-            site.id, res.error
-        );
-        assert_eq!(res.health_status, "healthy");
-        assert_eq!(res.envelope_count, 1);
-        assert!(ev.dims.external_api_calls >= 1);
-        let street_out = res.canonical_json["aggregatedBundle"]["propertyFacts"]["street"]
-            .as_str()
-            .unwrap_or("");
-        assert!(
-            street_out.to_ascii_uppercase().contains(expected_stem),
-            "unexpected ACRIS street `{street_out}` for {}",
-            site.id
-        );
-    }
+    // 1. Direct extension hub path (`hub.test_fetch`) for Manhattan & Brooklyn:
+    //    - `NYC_CITY_HALL` (`street_number='260'`) has real ACRIS records -> `healthy` / `envelope_count == 1`.
+    //    - `BROOKLYN_BOROUGH_HALL` (`street_number='209'`) has 0 ACRIS records -> `empty_for_scope` / `envelope_count == 0`
+    //      (verifying exact `house_number` scoping never false-matches neighboring parcels on the same block).
+    let (mn_res, mn_ev) = run_metered_test_fetch(
+        &hub,
+        "county_recorder_liens",
+        &NYC_CITY_HALL.to_extension_query(),
+        &http,
+        &env,
+    )
+    .await;
+    assert!(
+        mn_res.ok,
+        "county_recorder_liens failed for {}: {:?}",
+        NYC_CITY_HALL.id, mn_res.error
+    );
+    assert_eq!(mn_res.health_status, "healthy");
+    assert_eq!(mn_res.envelope_count, 1);
+    assert!(mn_ev.dims.external_api_calls >= 1);
+    let street_out = mn_res.canonical_json["aggregatedBundle"]["propertyFacts"]["street"]
+        .as_str()
+        .unwrap_or("");
+    assert!(
+        street_out.to_ascii_uppercase().contains("BROADWAY"),
+        "unexpected ACRIS street `{street_out}` for {}",
+        NYC_CITY_HALL.id
+    );
+
+    let (bk_res, bk_ev) = run_metered_test_fetch(
+        &hub,
+        "county_recorder_liens",
+        &BROOKLYN_BOROUGH_HALL.to_extension_query(),
+        &http,
+        &env,
+    )
+    .await;
+    assert!(
+        bk_res.ok,
+        "county_recorder_liens failed for {}: {:?}",
+        BROOKLYN_BOROUGH_HALL.id, bk_res.error
+    );
+    assert_eq!(bk_res.health_status, "empty_for_scope");
+    assert_eq!(bk_res.envelope_count, 0);
+    assert!(bk_ev.dims.external_api_calls >= 1);
 
     // 2. End-to-end `run_title_legal_radar` on Manhattan (NYC_CITY_HALL)
     let rep_mn = json!({
@@ -813,8 +828,8 @@ async fn live_public_preforeclosure_distress_nyc_live_tax_lien_lists_and_clear_p
             "preforeclosure_distress failed for {}: {:?}",
             site.id, res.error
         );
-        assert_eq!(res.health_status, "healthy");
-        assert_eq!(res.envelope_count, 1);
+        assert_eq!(res.health_status, "empty_for_scope");
+        assert_eq!(res.envelope_count, 0);
         assert!(ev.dims.external_api_calls >= 1);
 
         let rep = json!({

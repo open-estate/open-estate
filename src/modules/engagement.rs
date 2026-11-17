@@ -3,7 +3,10 @@
 // combines them with durable Open Estate `property_likes`, DOM, and metro market velocity (`days_to_pending`
 // / `sale_to_list`), and NEVER fabricates fake portal counts (reports `null` + lookup URL when unreported).
 
-use crate::db::{DbStore, ListingRow};
+use crate::db::{
+    decompress_bytes_zstd_any, listing_slug, DbStore, ListingEngagementProto, ListingRow,
+    PortalPlatform, PortalSignalProto,
+};
 use crate::shared::round_n;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -241,15 +244,7 @@ pub fn portal_lookup_url(platform_id: &str, address: &str, slug: &str) -> Option
                 Some(format!("https://www.redfin.com/search?q={enc}"))
             }
         }
-        "realtor" => {
-            if clean_addr.is_empty() {
-                Some("https://www.realtor.com/".to_string())
-            } else {
-                Some(format!(
-                    "https://www.realtor.com/realestateandhomes-search?q={enc}"
-                ))
-            }
-        }
+        "realtor" => Some("https://www.realtor.com/".to_string()),
         "homes" => {
             if clean_addr.is_empty() {
                 Some("https://www.homes.com/".to_string())
@@ -478,7 +473,9 @@ pub fn extract_raw_engagement_json(v: &Value) -> Option<String> {
         "pageViewCount",
         "viewsCount",
         "hotHome",
+        "isHotHome",
         "hotTag",
+        "marketingTag",
         "source",
         "url",
         "portalEngagement",
@@ -495,11 +492,66 @@ pub fn extract_raw_engagement_json(v: &Value) -> Option<String> {
             }
         }
     }
+    if let Some(lc) = flat.likes_count {
+        if !out.contains_key("likesCount")
+            && !out.contains_key("favoriteCount")
+            && !out.contains_key("favorites")
+        {
+            out.insert("likesCount".to_string(), json!(lc));
+        }
+    }
+    if let Some(vc) = flat.views_count {
+        if !out.contains_key("viewsCount")
+            && !out.contains_key("pageViewCount")
+            && !out.contains_key("views")
+        {
+            out.insert("viewsCount".to_string(), json!(vc));
+        }
+    }
+    if let Some(ref tag) = flat.hot_tag {
+        out.entry("isHotHome".to_string())
+            .or_insert(Value::Bool(true));
+        out.entry("hotTag".to_string())
+            .or_insert_with(|| Value::String(tag.clone()));
+    }
     if out.is_empty() {
         None
     } else {
         let clean = sanitize_platform_signals_payload(&Value::Object(out), None);
         serde_json::to_string(&clean).ok()
+    }
+}
+
+fn platform_id_from_code(code: i32) -> Option<&'static str> {
+    match PortalPlatform::try_from(code).unwrap_or(PortalPlatform::Unspecified) {
+        PortalPlatform::Zillow => Some("zillow"),
+        PortalPlatform::Redfin => Some("redfin"),
+        PortalPlatform::Realtor => Some("realtor"),
+        PortalPlatform::Homes => Some("homes"),
+        _ => None,
+    }
+}
+
+fn portal_patch_from_signal_proto(
+    sig: &PortalSignalProto,
+    expected_pid: Option<&'static str>,
+) -> PortalSignalPatch {
+    let hot_tag = sig
+        .hot_tag
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.chars().take(48).collect::<String>())
+        .or_else(|| sig.is_hot_home.then(|| "Hot Home".to_string()));
+    let url = sig
+        .portal_url
+        .as_deref()
+        .and_then(|u| clean_portal_url_str(expected_pid, u));
+    PortalSignalPatch {
+        likes_count: sig.likes_count.filter(|&n| n >= 0).map(i64::from),
+        views_count: sig.views_count.filter(|&n| n >= 0).map(i64::from),
+        hot_tag,
+        url,
     }
 }
 
@@ -588,6 +640,40 @@ pub fn build_engagement_with_brand(
         }
     }
 
+    finalize_engagement_output(
+        slug,
+        address,
+        facts,
+        market_data,
+        portal_map,
+        listing_dom,
+        listing_status.as_deref(),
+        db_signals
+            .and_then(|s| s.get("daysOnMarket"))
+            .and_then(|v| v.as_i64()),
+        db_signals
+            .and_then(|s| s.get("status"))
+            .and_then(|v| v.as_str()),
+        in_app_likes,
+        eff_brand,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn finalize_engagement_output(
+    slug: &str,
+    address: &str,
+    facts: &Value,
+    market_data: Option<&Value>,
+    mut portal_map: HashMap<&'static str, PortalSignalPatch>,
+    listing_dom: Option<i64>,
+    listing_status: Option<&str>,
+    signal_dom: Option<i64>,
+    signal_status: Option<&str>,
+    in_app_likes: i64,
+    brand_name: &str,
+) -> Value {
+    let eff_brand = crate::shared::effective_brand_name(brand_name);
     let in_app_clean = in_app_likes.max(0);
     let mut platforms: Vec<PlatformEngagementItem> = Vec::with_capacity(5);
     let mut total_known_likes: i64 = in_app_clean;
@@ -637,19 +723,15 @@ pub fn build_engagement_with_brand(
         .and_then(|v| v.as_i64())
         .or_else(|| facts.get("daysOnMarket").and_then(|v| v.as_i64()))
         .or(listing_dom)
-        .or_else(|| {
-            db_signals
-                .and_then(|s| s.get("daysOnMarket"))
-                .and_then(|v| v.as_i64())
-        })
+        .or(signal_dom)
         .filter(|&d| d >= 0);
 
     let status_str = facts
         .pointer("/mlsListing/status")
         .and_then(|v| v.as_str())
         .or_else(|| facts.get("status").and_then(|v| v.as_str()))
-        .or(listing_status.as_deref())
-        .or_else(|| db_signals.and_then(|s| s.get("status")).and_then(|v| v.as_str()))
+        .or(listing_status)
+        .or(signal_status)
         .unwrap_or("")
         .to_ascii_lowercase();
     let is_pending = status_str.contains("pending") || status_str.contains("contingent");
@@ -782,6 +864,109 @@ pub fn build_engagement_with_brand(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
+fn build_engagement_narrow(
+    slug: &str,
+    address: &str,
+    facts: &Value,
+    market_data: Option<&Value>,
+    listing_status: Option<&str>,
+    listing_dom: Option<i64>,
+    listing_eng: Option<&(ListingEngagementProto, Vec<PortalSignalProto>)>,
+    prop_signals: &[PortalSignalProto],
+    in_app_likes: i64,
+    brand_name: &str,
+) -> Value {
+    let mut portal_map: HashMap<&'static str, PortalSignalPatch> = HashMap::new();
+    let mut signal_dom: Option<i64> = None;
+    let mut signal_status: Option<String> = None;
+
+    // 1. Explicit DB platform-signals overrides (`property_platform_signals` — highest precedence)
+    for p in prop_signals {
+        if let Some(pid) = platform_id_from_code(p.platform) {
+            let patch = portal_patch_from_signal_proto(p, Some(pid));
+            portal_map.entry(pid).or_default().overwrite_some(&patch);
+        }
+        if let Some(extra) = p.extra_proto_utf8.as_deref().filter(|b| !b.is_empty()) {
+            let decoded_val = decompress_bytes_zstd_any(extra)
+                .ok()
+                .and_then(|raw| serde_json::from_slice::<Value>(&raw).ok())
+                .or_else(|| serde_json::from_slice::<Value>(extra).ok());
+            if let Some(sig_val) = decoded_val {
+                if signal_dom.is_none() {
+                    signal_dom = sig_val.get("daysOnMarket").and_then(Value::as_i64);
+                }
+                if signal_status.is_none() {
+                    signal_status = sig_val
+                        .get("status")
+                        .and_then(Value::as_str)
+                        .map(str::to_string);
+                }
+                let mut sig_map = HashMap::new();
+                extract_portal_engagement_from_value(&sig_val, None, &mut sig_map);
+                for (pid, patch) in sig_map {
+                    portal_map.entry(pid).or_default().overwrite_some(&patch);
+                }
+            }
+        }
+    }
+
+    // 2. Facts & MLS listing payloads
+    if let Some(mls) = facts.get("mlsListing") {
+        extract_portal_engagement_from_value(mls, None, &mut portal_map);
+    }
+    extract_portal_engagement_from_value(facts, None, &mut portal_map);
+    if let Some(Value::Array(past)) = facts.get("pastListings") {
+        for item in past {
+            extract_portal_engagement_from_value(item, None, &mut portal_map);
+        }
+    }
+
+    // 3. Narrow PK-resolved `listing_engagement` + `listing_portal_signals` (`~80 B`, zero `raw_json`!)
+    if let Some((eng, sigs)) = listing_eng {
+        let default_pid = platform_id_from_code(eng.source_platform).or_else(|| {
+            detect_platform_id(eng.source_label.as_deref(), eng.listing_url.as_deref())
+        });
+        for sig in sigs {
+            if let Some(pid) = platform_id_from_code(sig.platform).or(default_pid) {
+                let patch = portal_patch_from_signal_proto(sig, Some(pid));
+                portal_map.entry(pid).or_default().merge_missing(&patch);
+            }
+        }
+        if let (Some(pid), Some(u)) = (
+            default_pid,
+            eng.listing_url
+                .as_deref()
+                .and_then(|u| clean_portal_url_str(default_pid, u)),
+        ) {
+            portal_map
+                .entry(pid)
+                .or_default()
+                .merge_missing(&PortalSignalPatch {
+                    url: Some(u),
+                    ..Default::default()
+                });
+        }
+    }
+
+    finalize_engagement_output(
+        slug,
+        address,
+        facts,
+        market_data,
+        portal_map,
+        listing_dom,
+        listing_status,
+        signal_dom,
+        signal_status.as_deref(),
+        in_app_likes,
+        brand_name,
+    )
+}
+
+/// `Q0a_slug` narrow engagement builder: 1-RTT parallelized `property_likes` + `property_platform_signals`
+/// and covering-index `listings` + PK `listing_engagement` + `listing_portal_signals` `LEFT JOIN`
+/// (`~120 B` total, zero `SELECT *`, zero ZIP fallback scan, zero `raw_json` parsing).
 pub async fn build_engagement_for_report(
     db: &DbStore,
     slug: &str,
@@ -811,22 +996,66 @@ pub async fn build_engagement_for_report_with_brand(
     market_data: Option<&Value>,
     brand_name: &str,
 ) -> Value {
-    let (in_app_likes, _) = db
-        .get_property_likes_state(slug, None)
-        .await
-        .unwrap_or((0, false));
-    let listing_rows = db
-        .list_listings_for_engagement(slug, zip)
-        .await
-        .unwrap_or_default();
-    let db_signals = db.get_platform_signals(slug).await.ok().flatten();
-    build_engagement_with_brand(
+    let clean_slug = slug.trim();
+    let (likes_sig_res, bundle_res) = tokio::join!(
+        db.get_property_likes_and_platform_signals(clean_slug),
+        db.get_listing_engagement_bundle_by_key(clean_slug),
+    );
+    let (in_app_likes, prop_signals) = likes_sig_res.unwrap_or((0, Vec::new()));
+    let mut bundle_opt = bundle_res.ok().flatten();
+
+    if bundle_opt.is_none() && !address.trim().is_empty() {
+        let addr_slug_zip = listing_slug(address, None, None, zip);
+        if !addr_slug_zip.is_empty() && addr_slug_zip != clean_slug {
+            bundle_opt = db
+                .get_listing_engagement_bundle_by_key(&addr_slug_zip)
+                .await
+                .ok()
+                .flatten();
+        }
+        if bundle_opt.is_none() && zip.is_some() {
+            let addr_slug_bare = listing_slug(address, None, None, None);
+            if !addr_slug_bare.is_empty()
+                && addr_slug_bare != clean_slug
+                && addr_slug_bare != addr_slug_zip
+            {
+                bundle_opt = db
+                    .get_listing_engagement_bundle_by_key(&addr_slug_bare)
+                    .await
+                    .ok()
+                    .flatten();
+            }
+        }
+    }
+
+    let facts_has_dom = facts
+        .pointer("/mlsListing/daysOnMarket")
+        .and_then(Value::as_i64)
+        .or_else(|| facts.get("daysOnMarket").and_then(Value::as_i64))
+        .is_some();
+
+    let (listing_status, listing_dom, listing_eng) =
+        if let Some((_sk, status_code, dom_opt, eng_opt)) = bundle_opt {
+            let status_label = crate::db::proto::listing_status_from_code(status_code).to_string();
+            let eff_dom = if facts_has_dom {
+                None
+            } else {
+                dom_opt.map(i64::from)
+            };
+            (Some(status_label), eff_dom, eng_opt)
+        } else {
+            (None, None, None)
+        };
+
+    build_engagement_narrow(
         slug,
         address,
         facts,
         market_data,
-        &listing_rows,
-        db_signals.as_ref(),
+        listing_status.as_deref(),
+        listing_dom,
+        listing_eng.as_ref(),
+        &prop_signals,
         in_app_likes,
         brand_name,
     )

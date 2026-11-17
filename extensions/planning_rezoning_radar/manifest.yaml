@@ -51,6 +51,7 @@ sharing:
 source_attribution:
   name: "OpenStreetMap Overpass Construction Ways & Municipal Planning Open GIS"
   url: "https://www.openstreetmap.org/copyright"
+  reference_url_template: "https://www.openstreetmap.org/#map=17/{{lat}}/{{lon}}"
   schedule_or_version: "ODbL Live Construction/Proposed Ways + Municipal Open Data"
   notes: "Queries active building/landuse/highway construction and proposed features within 600m alongside city ArcGIS/Socrata planning records; never fabricates unmapped projects."
 request:
@@ -60,5 +61,5 @@ request:
     data: "[out:json][timeout:6];(way[\"building\"=\"construction\"](around:600,{{ lat }},{{ lon }});way[\"landuse\"=\"construction\"](around:600,{{ lat }},{{ lon }});way[\"highway\"=\"construction\"](around:600,{{ lat }},{{ lon }});nw[\"proposed\"](around:600,{{ lat }},{{ lon }}););out center tags;"
 response_mapping:
   root_path: "$.elements"
-  require_non_empty: false
+  require_non_empty: true
   fields: {}

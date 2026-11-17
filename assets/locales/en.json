@@ -547,13 +547,13 @@
     "sourceDocCol": "Source Doc",
     "conflictCol": "Conflict / Counter-Evidence",
     "noContradictions": "No inter-document contradictions flagged across packet.",
-    "apiFetchedBadge": "Fetched via API",
-    "apiFetchedTitle": "Automatically fetched via API — no manual upload required",
-    "apiFetchedNote": "Open Estate retrieved and PII-scrubbed the property documentation below directly from connected feeds. You only need to upload files if you receive newer private reports.",
+    "apiFetchedBadge": "Found on file",
+    "apiFetchedTitle": "Automatically retrieved and reviewed — no manual upload required",
+    "apiFetchedNote": "Open Estate retrieved and PII-scrubbed the property documentation below directly from public and listing records. You only need to upload files if you receive newer private reports.",
     "supplementalUploadToggle": "Have an updated or supplemental report from your agent or inspector? Upload additional file(s)",
-    "apiUnavailableBadge": "Not available via API",
-    "apiUnavailableTitle": "Couldn't fetch report via API — request from your agent or upload below",
-    "apiUnavailableHint": "We only ask you to upload inspection reports, disclosures, title, or HOA packets when they cannot be fetched via API (most US pre-sale packets are gated inside agent-only portals like Disclosures.io or Glide). Ask your buyer's agent to pull the packet from the listing agent — if you don't have an agent yet, or need a local home inspector when no report exists, we can recommend one.",
+    "apiUnavailableBadge": "Upload or request from agent",
+    "apiUnavailableTitle": "Upload your inspection or disclosure packet below, or request it from the listing agent",
+    "apiUnavailableHint": "Most US pre-sale inspection reports, seller disclosures, preliminary title reports, and HOA packets are shared directly through the listing agent (Disclosures.io or Glide) rather than posted publicly. Ask your buyer's agent to request the packet — if you don't have an agent yet, or need a local home inspector when no report exists, we can recommend one.",
     "recommendAgentBtn": "Recommend a Buyer's Agent",
     "recommendInspectorBtn": "Need a Home Inspector?",
     "recDrawerTitle": "Get a Recommended Local Buyer's Agent or Home Inspector",
@@ -781,7 +781,7 @@
     "clearChat": "Clear chat",
     "minimizeChat": "Minimize",
     "launcherTitle": "Ask Open Estate about this property & real estate",
-    "launcherDesc": "Grounded in this property's verified records, permits, HOA filings & US housing rules. Click any question or open the floating Open Estate assistant from anywhere on the page."
+    "launcherDesc": "Grounded in this property's verified records, permits, HOA filings & US housing rules. Click any question or open Open Estate AI from anywhere on the page."
   },
   "verdict": {
     "realMonthlyCost": "Real Monthly Cost",

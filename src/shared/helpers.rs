@@ -54,6 +54,46 @@ impl LocalTangentFrame {
     }
 }
 
+fn round_coord_array_6dec(val: &mut Value) {
+    if let Some(arr) = val.as_array_mut() {
+        for elem in arr.iter_mut() {
+            if let Some(n) = elem.as_f64() {
+                if n.is_finite() {
+                    let r = round_n(n, 6);
+                    let r = if r == 0.0 { 0.0 } else { r };
+                    if let Some(num) = serde_json::Number::from_f64(r) {
+                        *elem = Value::Number(num);
+                    }
+                }
+            } else if elem.is_array() {
+                round_coord_array_6dec(elem);
+            }
+        }
+    }
+}
+
+/// Recursively rounds numeric coordinates inside GeoJSON `"coordinates"` arrays to 6 decimal
+/// places (~11 cm WGS84 precision) while leaving financial, score, tax, and ratio floats intact.
+pub fn round_geojson_coordinates_6dec(val: &mut Value) {
+    match val {
+        Value::Object(map) => {
+            for (k, v) in map.iter_mut() {
+                if k == "coordinates" {
+                    round_coord_array_6dec(v);
+                } else {
+                    round_geojson_coordinates_6dec(v);
+                }
+            }
+        }
+        Value::Array(arr) => {
+            for elem in arr.iter_mut() {
+                round_geojson_coordinates_6dec(elem);
+            }
+        }
+        _ => {}
+    }
+}
+
 // =================================================================================================
 // 1. Number, Currency, Distance & String Formatters
 // =================================================================================================
@@ -461,7 +501,7 @@ fn sanitize_anchor_fragment_text(raw: &str) -> Option<String> {
     let low = s.to_ascii_lowercase();
     if matches!(
         low.as_str(),
-        "n/a" | "none" | "null" | "undefined" | "unknown"
+        "n/a" | "none" | "null" | "undefined" | "unknown" | "yes" | "no" | "true" | "false" | "verify"
     ) {
         return None;
     }
@@ -575,5 +615,79 @@ pub fn with_data_point_anchor(
         (Some(sec), None) => format!("{base_no_hash}#{sec}"),
         (None, Some(tf)) => format!("{base_no_hash}#:~:text={tf}"),
         (None, None) => base_no_hash.to_string(),
+    }
+}
+
+/// Returns `true` only when `raw_url` points to a static HTML document/profile page where
+/// W3C Scroll-to-Text Fragments (`#:~:text=`) reliably match rendered text — never on generic
+/// homepages, search forms, SPAs/GIS viewers, JSON/REST APIs, or query-param parcel lookups.
+pub fn url_supports_text_fragment(raw_url: &str) -> bool {
+    let before_hash = raw_url.split('#').next().unwrap_or(raw_url).trim();
+    let low = before_hash.to_ascii_lowercase();
+    if low.is_empty()
+        || low.contains("/mapserver")
+        || low.contains("/featureserver")
+        || low.contains("/imageserver")
+        || low.contains("/rest/services/")
+        || low.contains("experiencebuilder")
+        || low.contains("webappviewer")
+        || low.contains("maps.arcgis.com")
+        || low.contains("experience.arcgis.com")
+        || low.contains("geocoding.geo.census.gov")
+        || low.contains("epqs.nationalmap.gov")
+        || low.ends_with(".json")
+        || low.contains(".json?")
+        || low.contains("f=json")
+        || low.contains("f=pjson")
+        || low.contains("f=html")
+    {
+        return false;
+    }
+    low.contains("censusreporter.org/profiles/")
+        || low.contains("flsenate.gov/laws/statutes/")
+        || low.contains("app.leg.wa.gov/")
+        || low.contains("leg.state.nv.us/")
+        || low.contains("ecfr.gov/")
+        || low.contains("epa.gov/lead/")
+        || low.contains("projects.propublica.org/nonprofits/organizations/")
+}
+
+/// Clean `base_url` and attach `#section` and/or `#:~:text=` ONLY when `url_supports_text_fragment`
+/// confirms the destination is a verifiable static HTML document (stripping any stale `#:~:text=`
+/// on homepages, SPAs, APIs, and query-param parcel portals).
+pub fn with_verified_data_anchor(
+    base_url: &str,
+    section_anchor: Option<&str>,
+    text_fragment: Option<&str>,
+) -> String {
+    let Some(u) = clean_http_url_verbatim(base_url) else {
+        return base_url.trim().to_string();
+    };
+    let (base_no_hash, raw_hash) = match u.find('#') {
+        Some(idx) => (&u[..idx], &u[idx + 1..]),
+        None => (u.as_str(), ""),
+    };
+    if raw_hash.to_ascii_lowercase().starts_with("map=") {
+        return u;
+    }
+    if url_supports_text_fragment(base_no_hash) {
+        return with_data_point_anchor(&u, section_anchor, text_fragment);
+    }
+    let existing_sec = match raw_hash.find(":~:text=") {
+        Some(idx) => &raw_hash[..idx],
+        None => raw_hash,
+    };
+    let eff_sec = section_anchor
+        .and_then(sanitize_anchor_fragment_text)
+        .or_else(|| (!existing_sec.is_empty()).then(|| existing_sec.to_string()))
+        .map(|sec| {
+            sec.chars()
+                .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '/' | ':'))
+                .collect::<String>()
+        })
+        .filter(|s| !s.is_empty());
+    match eff_sec {
+        Some(sec) => format!("{base_no_hash}#{sec}"),
+        None => base_no_hash.to_string(),
     }
 }

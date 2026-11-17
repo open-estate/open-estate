@@ -470,7 +470,7 @@ async fn fetch_private_schools(http: &HttpClient, lat: f64, lon: f64) -> Result<
                         "lon": round_n(slon, 5),
                         "ppin": ppin,
                         "url": ppin.as_deref().map(|id| format!("https://nces.ed.gov/surveys/pss/privateschoolsearch/school_detail.asp?ID={id}")),
-                        "gsUrl": format!("https://www.greatschools.org/search/search.page?q={search_q}"),
+                        "gsUrl": Value::Null,
                         "nicheUrl": format!("https://www.niche.com/k12/search/best-schools/?q={search_q}"),
                     }));
                 }

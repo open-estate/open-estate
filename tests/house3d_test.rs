@@ -221,7 +221,12 @@ fn fixtures_map_to_scene_inputs_and_footprint_scenes_label_their_heights() {
 #[tokio::test]
 async fn api_serves_cached_scene_with_etag_validation_and_access_control() {
     let (state, db, dir) = test_state(&[]).await;
-    db.put_cached_report(SJ, &fixture(SJ), None).await.unwrap();
+    // Use an isolated slug so concurrent/earlier tests sharing the process-global `HOT` cache on `SJ`
+    // cannot pre-warm this cache-miss -> cache-hit -> `llm_cache` persistence assertion.
+    let etag_slug = "100-synthparcelalpha-etag-san-jose-ca-95118";
+    let mut sj_rep = fixture(SJ);
+    sj_rep["meta"]["slug"] = json!(etag_slug);
+    db.put_cached_report(etag_slug, &sj_rep, None).await.unwrap();
 
     // Synthetic secondary report stripped of coordinates to verify `NO_LOCATION` 404
     let mut stripped_coords = fixture(CAMPBELL);
@@ -238,10 +243,10 @@ async fn api_serves_cached_scene_with_etag_validation_and_access_control() {
 
     let app = build_router(state);
 
-    let (st, body, cc) = get_json(&app, &format!("/api/house3d/{SJ}")).await;
+    let (st, body, cc) = get_json(&app, &format!("/api/house3d/{etag_slug}")).await;
     assert_eq!(st, StatusCode::OK, "{body}");
     assert_eq!(body["ok"], true);
-    assert_eq!(body["slug"], SJ);
+    assert_eq!(body["slug"], etag_slug);
     assert_eq!(body["cached"], false);
     assert_eq!(body["settled"], true);
     assert_eq!(body["scene"]["quality"], "footprint");
@@ -255,13 +260,13 @@ async fn api_serves_cached_scene_with_etag_validation_and_access_control() {
     assert_eq!(cc.as_deref(), Some("private, max-age=300"));
 
     // Second view: served from cache; unrelated query parameters are ignored.
-    let (st2, body2, _) = get_json(&app, &format!("/api/house3d/{SJ}?lang=zh")).await;
+    let (st2, body2, _) = get_json(&app, &format!("/api/house3d/{etag_slug}?lang=zh")).await;
     assert_eq!(st2, StatusCode::OK);
     assert_eq!(body2["cached"], true);
     assert_eq!(body2["scene"], body["scene"]);
 
     // Browser revalidates with `If-None-Match` ETag and gets an empty `304 Not Modified`.
-    let (st_e, hdrs, _) = get_raw(&app, &format!("/api/house3d/{SJ}"), &[]).await;
+    let (st_e, hdrs, _) = get_raw(&app, &format!("/api/house3d/{etag_slug}"), &[]).await;
     assert_eq!(st_e, StatusCode::OK);
     let etag = hdrs
         .get(header::ETAG)
@@ -271,7 +276,7 @@ async fn api_serves_cached_scene_with_etag_validation_and_access_control() {
     assert!(etag.starts_with("\"h3d-"), "{etag}");
     let (st_304, hdrs_304, body_304) = get_raw(
         &app,
-        &format!("/api/house3d/{SJ}"),
+        &format!("/api/house3d/{etag_slug}"),
         &[("if-none-match", etag.as_str())],
     )
     .await;
@@ -289,7 +294,7 @@ async fn api_serves_cached_scene_with_etag_validation_and_access_control() {
     );
     let (st_stale, _, _) = get_raw(
         &app,
-        &format!("/api/house3d/{SJ}"),
+        &format!("/api/house3d/{etag_slug}"),
         &[("if-none-match", "\"h3d-00000000000000000000\"")],
     )
     .await;
@@ -301,8 +306,8 @@ async fn api_serves_cached_scene_with_etag_validation_and_access_control() {
 
     // Persisted compressed payload in SQLite `llm_cache`
     let key = format!(
-        "house3d:v{SCENE_VERSION}:{SJ}:{}",
-        input_fingerprint(&scene_input_from_report(&fixture(SJ)).unwrap())
+        "house3d:v{SCENE_VERSION}:{etag_slug}:{}",
+        input_fingerprint(&scene_input_from_report(&sj_rep).unwrap())
     );
     let stored = db
         .get_llm_cache(&key)

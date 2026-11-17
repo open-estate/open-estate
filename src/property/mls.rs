@@ -31,6 +31,7 @@ pub struct MlsAndRecordsOutput {
     pub comps: Vec<Value>,
     pub rental_comps: Vec<Value>,
     pub nearby_listings: Vec<Value>,
+    pub nearby_pending: Vec<Value>,
     pub nearby_rentals: Vec<Value>,
     pub nearby_parcels: Vec<NeighborParcel>,
     pub rent_estimate: Option<i64>,
@@ -1001,6 +1002,7 @@ async fn fetch_mls_and_records_inner(
             || !v.sources.is_empty()
             || !v.comps.is_empty()
             || !v.nearby_listings.is_empty()
+            || !v.nearby_pending.is_empty()
         {
             combined.connectors_used.push(key.to_string());
         }
@@ -1108,6 +1110,9 @@ async fn fetch_mls_and_records_inner(
         }
         if combined.nearby_listings.is_empty() && !v.nearby_listings.is_empty() {
             combined.nearby_listings = v.nearby_listings;
+        }
+        if combined.nearby_pending.is_empty() && !v.nearby_pending.is_empty() {
+            combined.nearby_pending = v.nearby_pending;
         }
         if combined.nearby_rentals.is_empty() && !v.nearby_rentals.is_empty() {
             combined.nearby_rentals = v.nearby_rentals;

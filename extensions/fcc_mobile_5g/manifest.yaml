@@ -36,7 +36,10 @@ geo_scope:
   zip_codes: []
   cities: []
 auth:
-  auth_type: none
+  auth_type: api_key_header
+  env_var: "FCC_BDC_API_TOKEN"
+  header_name: "hash_value"
+  optional_key: true
 rate_limit:
   requests_per_second: 3
   burst: 6
@@ -51,6 +54,7 @@ sharing:
 source_attribution:
   name: "FCC National Broadband Map — Mobile Wireless Broadband Data Collection (BDC)"
   url: "https://broadbandmap.fcc.gov/"
+  reference_url_template: "https://broadbandmap.fcc.gov/location-summary/mobile?latlon={{lat}}%2C{{lon}}"
   schedule_or_version: "FCC BDC Semi-Annual Mobile Wireless Availability"
   notes: "Evaluates 5G-NR (500) and 4G LTE (400) carrier hexagons; public map JSON endpoint may return HTTP 405 without interactive session, in which case mobile 5G coverage reports unverified with zero fabricated carriers."
 request:

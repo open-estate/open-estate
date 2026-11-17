@@ -74,6 +74,9 @@ fn is_allowed_host(host: &str) -> bool {
         "debian.org",
         "crates.io",
         "w3.org",
+        "apache.org",
+        "mozilla.org",
+        "opensource.org",
         "openstreetmap.org",
         "overpass-api.de",
         "overpass.private.coffee",
@@ -117,6 +120,7 @@ fn is_allowed_host(host: &str) -> bool {
         "mapillary.com",
         "socrata.com",
         "accela.com",
+        "municode.com",
         "my.site.com",
         "ets.org",
         "caschooldashboard.org",
@@ -200,6 +204,7 @@ fn is_allowed_host(host: &str) -> bool {
         "optimum.com",
         "ziplyfiber.com",
         "quantumfiber.com",
+        "sonic.com",
         "starlink.com",
         "earthlink.net",
         "caionline.org",
@@ -210,6 +215,7 @@ fn is_allowed_host(host: &str) -> bool {
         "naic.org",
         "astm.org",
         "nachi.org",
+        "nacrc.org",
         "nahb.org",
         "jlconline.com",
         "iccsafe.org",
@@ -233,6 +239,7 @@ fn is_allowed_host(host: &str) -> bool {
         "acassessor.org",
         "acgov.org",
         "sccassessor.org",
+        "telleronline.net",
         "marinmap.org",
         "marincounty.org",
         "smcacre.org",
@@ -317,6 +324,15 @@ fn is_allowed_host(host: &str) -> bool {
         "cityofpaloalto.org",
         "carto.com",
         "cupix.com",
+        "mgoconnect.org",
+        "lynxgis.com",
+        "azurewebsites.net",
+        "uniformlaws.org",
+        "smgov.net",
+        "burlingame.org",
+        "cityofsanmateo.org",
+        "cityofconcord.org",
+        "coralgables.com",
         "portlandgeneral.com",
         "propublica.org",
         "sanjosecleanenergy.org",
@@ -401,7 +417,11 @@ fn visit_tree(root: &Path, dir: &Path, url_rx: &Regex, bad_hosts: &mut BTreeSet<
                 if in_tests
                     && matches!(
                         host.to_ascii_lowercase().as_str(),
-                        "attacker.evil.io" | "evil.io" | "some.api" | "idx-feed.mlsgrid-example.org"
+                        "attacker.evil.io"
+                            | "attacker-evil-phish.xyz"
+                            | "evil.io"
+                            | "some.api"
+                            | "idx-feed.mlsgrid-example.org"
                     )
                 {
                     continue;
@@ -448,5 +468,60 @@ fn open_estate_uses_only_open_estate_brand_and_allowlisted_domains() {
         bad_hosts.is_empty(),
         "Found unapproved / non-OSS external host(s):\n{}",
         bad_hosts.into_iter().collect::<Vec<_>>().join("\n")
+    );
+
+    // 3. Zero downstream white-label brand names and zero generic "AI Assistant" labels
+    let downstream_brand = concat!("deed", "buddy");
+    let generic_ai_assistant = concat!("ai ", "assistant");
+    let open_estate_assistant = concat!("open estate ", "assistant");
+    let mut brand_leaks = BTreeSet::new();
+    for rel_root in ["src", "assets", "locales", "extension", "tests"] {
+        let dir = root.join(rel_root);
+        if !dir.is_dir() {
+            continue;
+        }
+        let mut stack = vec![dir];
+        while let Some(cur) = stack.pop() {
+            let Ok(entries) = fs::read_dir(&cur) else {
+                continue;
+            };
+            for ent in entries.flatten() {
+                let p = ent.path();
+                if p.is_dir() {
+                    if p.file_name().and_then(|s| s.to_str()) == Some("vendor") {
+                        continue;
+                    }
+                    stack.push(p);
+                    continue;
+                }
+                let ext = p.extension().and_then(|s| s.to_str()).unwrap_or("");
+                if !matches!(
+                    ext,
+                    "rs" | "js" | "mjs" | "html" | "json" | "ftl" | "css" | "md" | "toml"
+                ) {
+                    continue;
+                }
+                let Ok(txt) = fs::read_to_string(&p) else {
+                    continue;
+                };
+                let low = txt.to_ascii_lowercase();
+                if low.contains(downstream_brand) {
+                    brand_leaks.insert(format!("downstream brand in {}", p.display()));
+                }
+                if matches!(ext, "rs" | "js" | "html" | "json" | "ftl") && (low.contains(generic_ai_assistant) || low.contains(open_estate_assistant)) {
+                    if !p.ends_with("tests/buyer_copilot_workflow_test.rs")
+                        && !p.ends_with("tests/browser_copilot_e2e_test.rs")
+                        && !p.ends_with("tests/brand_independence_test.rs")
+                    {
+                        brand_leaks.insert(format!("banned assistant label in {}", p.display()));
+                    }
+                }
+            }
+        }
+    }
+    assert!(
+        brand_leaks.is_empty(),
+        "Found brand/label leak(s):\n{}",
+        brand_leaks.into_iter().collect::<Vec<_>>().join("\n")
     );
 }

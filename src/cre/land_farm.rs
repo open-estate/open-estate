@@ -2793,7 +2793,7 @@ pub fn evaluate_land_and_farm_offline(
         ),
         SourceItem::new(
             "USDA Farm Service Agency (FSA) — Direct & Guaranteed Farm Ownership Loans",
-            "https://www.fsa.usda.gov/programs-and-services/farm-loan-programs/farm-ownership-loans/index",
+            "https://www.fsa.usda.gov/resources/loans/farm-ownership-loans",
         ),
     ];
     if soil_is_live || is_farmland {

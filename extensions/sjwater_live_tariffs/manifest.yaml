@@ -48,3 +48,4 @@ sharing:
 source_attribution:
   name: "San Jose Water CPUC Schedule 1 & CA SWRCB Drinking Water Boundaries"
   url: "https://www.sjwater.com/2026-rates/"
+  reference_url_template: "https://www.sjwater.com/2026-rates/"

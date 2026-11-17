@@ -511,7 +511,8 @@ fn build_synth_fengshui_data(
         "scores": {
             "overall": fs_overall,
             "form": if has_adu { 74 } else { 86 },
-            "liqi": if has_adu { 68 } else { 78 }
+            "liqi": if has_adu { 68 } else { 78 },
+            "grade": if has_adu { "B" } else { "A" }
         },
         "disclaimer": "Cultural site reading computed on synthetic geometry.",
         "house": {
@@ -542,17 +543,28 @@ fn build_synth_fengshui_data(
         "orientation": {
             "facingTrue": facing_true_deg,
             "facingMag": facing_mag,
+            "facingMagnetic": facing_mag,
             "sittingTrue": sitting_true,
             "sittingMag": sitting_mag,
             "facingCompass": (["N", "NE", "E", "SE", "S", "SW", "W", "NW"][(((facing_true_deg.rem_euclid(360.0) + 22.5) / 45.0).floor() as usize) % 8]),
             "sittingCompass": (["N", "NE", "E", "SE", "S", "SW", "W", "NW"][(((sitting_true.rem_euclid(360.0) + 22.5) / 45.0).floor() as usize) % 8]),
             "mountain": {
                 "zh": f_mtn.zh,
-                "py": f_mtn.py
+                "py": f_mtn.py,
+                "palace": f_mtn.palace,
+                "neighbor": f_mtn.neighbor.zh,
+                "voidLine": f_mtn.void_line,
+                "boundaryDist": f_mtn.boundary_dist
             },
+            "declination": decl,
             "declinationDeg": decl,
+            "uncertaintyDeg": 2.5,
             "confidence": "high",
             "method": "synthetic-footprint-street",
+            "street": {
+                "name": "Synthfrontage Rd",
+                "distM": 18
+            },
             "facingMountain": {
                 "i": f_mtn.i,
                 "index": f_mtn.i,
@@ -575,19 +587,28 @@ fn build_synth_fengshui_data(
             }
         },
         "period": {
+            "construction": period,
+            "basis": format!("建成于 {year_built} 年"),
+            "current": cur_period,
+            "range": open_estate::modules::xuankong::period_range(period),
+            "currentRange": open_estate::modules::xuankong::period_range(cur_period),
             "constructionYear": year_built,
             "natalPeriod": period,
             "currentPeriod": cur_period
         },
         "charts": {
+            "primary": natal_json,
+            "alternate": Value::Null,
             "natal": natal_json,
             "currentPeriod": cur_json
         },
-        "annual": {
-            "year": 2026,
-            "centerStar": ann_center,
-            "palaces": ann_map
-        },
+        "annual": [
+            {
+                "year": 2026,
+                "center": ann_center,
+                "stars": ann_map
+            }
+        ],
         "baZhai": bz,
         "kuaTable": personal_kua_table(),
         "terrain": {
@@ -598,18 +619,44 @@ fn build_synth_fengshui_data(
             "tiger": 47.9,
             "note": "Gentle backing rise with open front ming-tang."
         },
-        "form": {
-            "roadArrow": false,
-            "roadCurve": "neutral",
-            "lotRegularity": 0.96,
-            "missingCorners": [],
-            "shaSources": [],
-            "positives": ["Regular rectangular parcel", "Open front setback"],
-            "cautions": []
+        "quickScreens": {
+            "tJunction": { "hit": false, "count": 0, "hits": [] },
+            "culDeSac": { "hit": false },
+            "freewayOrPowerLine": {
+                "hit": false,
+                "freewayWithin500ft": false,
+                "powerLineWithin150m": false,
+                "substationWithin250m": false
+            }
         },
-        "liqi": {
-            "summaryZh": "坐山立向端正，玄空九运理气平稳。"
-        }
+        "form": [
+            {
+                "key": "lot-regular",
+                "zh": "宅基方正，四隅无缺角",
+                "en": "Regular rectangular parcel",
+                "impact": 6,
+                "detail": "Regular rectangular parcel"
+            },
+            {
+                "key": "ming-tang",
+                "zh": "门前明堂开阔",
+                "en": "Open front setback",
+                "impact": 5,
+                "detail": "Open front setback"
+            }
+        ],
+        "liqi": [
+            {
+                "key": "period-balance",
+                "zh": "坐山立向端正，玄空九运理气平稳",
+                "en": "Balanced flying star chart",
+                "impact": 5,
+                "detail": "Balanced natal and current period flying stars"
+            }
+        ],
+        "remedies": [],
+        "verdictZh": "坐山立向端正，明堂开阔。",
+        "disclaimerZh": "堪舆风水属中华传统文化民俗参考，由地图坐标与公开地理高程自动推算，仅供文化兴趣参考；实际立向请以现场罗盘实测为准。"
     })
 }
 

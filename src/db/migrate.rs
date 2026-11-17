@@ -1,21 +1,28 @@
-// Live streaming database migration engine (`SQLite WAL <-> OCI MySQL HeatWave`).
-// Streams all 10 tables in 200-row batches idempotently via `ON CONFLICT` / `AS new_row ON DUPLICATE KEY UPDATE`.
+// Live streaming database migration engine (`SQLite WAL <-> OCI MySQL 8.4 / HeatWave Rapid`)
+// for the clean-slate 44-table `openestate.db.v1` Protobuf schema.
+//
+// Streams all 44 tables in deterministic PK-ordered batches idempotently via
+// `ON CONFLICT` (SQLite) / `AS new_row ON DUPLICATE KEY UPDATE` (MySQL 8.4/9.0).
+// Automatically unloads HeatWave Rapid tables before bulk ingest, runs `ANALYZE TABLE`,
+// and reloads `SECONDARY_ENGINE = RAPID` upon completion.
 
 use crate::db::{
-    assert_safe_ident, mysql_opt_f64, mysql_opt_i64, mysql_opt_str, sqlite_opt_f64, sqlite_opt_i64,
-    sqlite_opt_str, DbBackend, DbStore, SqlParam, CACHED_REPORTS_UPGRADE_COLS,
+    assert_safe_ident, compress_bytes_zstd_dict, decompress_bytes_zstd_any, mysql_opt_bytes,
+    mysql_opt_f64, mysql_opt_i64, mysql_opt_str, sqlite_opt_bytes, sqlite_opt_f64, sqlite_opt_i64,
+    sqlite_opt_str, DbBackend, DbStore, SqlParam, REPORT_ZSTD_DICT_ID,
 };
 use crate::shared::now_unix_ms;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use sqlx::{MySqlPool, SqliteConnection};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
+use std::num::NonZeroU32;
 
 pub const MIGRATION_BATCH_SIZE: i64 = 200;
 
 #[derive(Debug, Clone, Copy)]
 enum ColKind {
     Str,
+    Bytes,
     I64,
     F64,
 }
@@ -27,73 +34,119 @@ struct TableSpec {
 }
 
 const MIGRATION_TABLES: &[TableSpec] = &[
+    // ==================== A. PROPERTY & LISTING DOMAIN (10 TABLES) ====================
     TableSpec {
         name: "listings",
-        pk: "id",
+        pk: "listing_sk",
         cols: &[
-            ("id", ColKind::Str),
-            ("address", ColKind::Str),
-            ("street", ColKind::Str),
-            ("city", ColKind::Str),
-            ("state", ColKind::Str),
+            ("listing_sk", ColKind::I64),
+            ("external_id", ColKind::Str),
+            ("report_slug", ColKind::Str),
             ("zip", ColKind::Str),
+            ("state_code", ColKind::Str),
+            ("county_fips", ColKind::Str),
+            ("city", ColKind::Str),
+            ("street", ColKind::Str),
+            ("address", ColKind::Str),
             ("lat", ColKind::F64),
             ("lon", ColKind::F64),
-            ("status", ColKind::Str),
+            ("status", ColKind::I64),
+            ("property_category", ColKind::I64),
             ("price", ColKind::I64),
             ("list_price", ColKind::I64),
             ("sold_price", ColKind::I64),
             ("estimated_value", ColKind::I64),
             ("price_per_sqft", ColKind::I64),
+            ("hoa_monthly", ColKind::I64),
+            ("all_in_monthly", ColKind::I64),
             ("beds", ColKind::F64),
             ("baths", ColKind::F64),
             ("sqft", ColKind::I64),
             ("lot_sqft", ColKind::I64),
             ("year_built", ColKind::I64),
             ("stories", ColKind::F64),
-            ("property_type", ColKind::Str),
-            ("hoa_monthly", ColKind::I64),
             ("days_on_market", ColKind::I64),
-            ("listed_date", ColKind::Str),
-            ("sold_date", ColKind::Str),
+            ("listed_epoch_day", ColKind::I64),
+            ("sold_epoch_day", ColKind::I64),
             ("school_score", ColKind::F64),
-            ("school_grade", ColKind::Str),
-            ("school_elem_name", ColKind::Str),
-            ("school_elem_rating", ColKind::F64),
-            ("school_mid_name", ColKind::Str),
-            ("school_mid_rating", ColKind::F64),
-            ("school_high_name", ColKind::Str),
-            ("school_high_rating", ColKind::F64),
-            ("school_district", ColKind::Str),
+            ("school_grade", ColKind::I64),
             ("walk_score", ColKind::F64),
-            ("flood_zone", ColKind::Str),
-            ("wildfire_zone", ColKind::Str),
+            ("safety_score", ColKind::F64),
             ("overall_score", ColKind::F64),
-            ("verdict", ColKind::Str),
-            ("mls_number", ColKind::Str),
-            ("source", ColKind::Str),
-            ("url", ColKind::Str),
-            ("photo_url", ColKind::Str),
-            ("report_slug", ColKind::Str),
-            ("features_text", ColKind::Str),
-            ("raw_json", ColKind::Str),
-            ("electric_carrier", ColKind::Str),
-            ("electric_utility_type", ColKind::Str),
             ("electric_rate_kwh", ColKind::F64),
+            ("max_download_mbps", ColKind::I64),
+            ("tag_bits", ColKind::I64),
+            ("known_bits", ColKind::I64),
+            ("first_seen_ts", ColKind::I64),
+            ("last_seen_ts", ColKind::I64),
+            ("status_changed_ts", ColKind::I64),
+            ("price_changed_ts", ColKind::I64),
+        ],
+    },
+    TableSpec {
+        name: "listing_schools",
+        pk: "listing_sk",
+        cols: &[
+            ("listing_sk", ColKind::I64),
+            ("school_score", ColKind::F64),
+            ("school_grade", ColKind::I64),
+            ("elem_name", ColKind::Str),
+            ("elem_rating", ColKind::F64),
+            ("mid_name", ColKind::Str),
+            ("mid_rating", ColKind::F64),
+            ("high_name", ColKind::Str),
+            ("high_rating", ColKind::F64),
+            ("district_name", ColKind::Str),
+        ],
+    },
+    TableSpec {
+        name: "listing_utilities",
+        pk: "listing_sk",
+        cols: &[
+            ("listing_sk", ColKind::I64),
+            ("electric_utility_kind", ColKind::I64),
+            ("electric_carrier", ColKind::Str),
+            ("electric_rate_kwh", ColKind::F64),
+            ("gas_fuel_kind", ColKind::I64),
             ("gas_carrier", ColKind::Str),
             ("gas_rate_therm", ColKind::F64),
+            ("water_source_kind", ColKind::I64),
             ("water_carrier", ColKind::Str),
-            ("water_source_type", ColKind::Str),
-            ("sewer_type", ColKind::Str),
+            ("sewer_kind", ColKind::I64),
             ("est_monthly_utilities", ColKind::I64),
-            ("internet_tier", ColKind::Str),
+            ("broadband_tier", ColKind::I64),
             ("fiber_available", ColKind::I64),
             ("high_speed_internet", ColKind::I64),
-            ("internet_carriers", ColKind::Str),
-            ("fiber_carriers", ColKind::Str),
             ("max_download_mbps", ColKind::I64),
             ("max_upload_mbps", ColKind::I64),
-            ("all_in_monthly", ColKind::I64),
+            ("fiber_carriers", ColKind::Str),
+            ("internet_carriers", ColKind::Str),
+        ],
+    },
+    TableSpec {
+        name: "listing_hazards",
+        pk: "listing_sk",
+        cols: &[
+            ("listing_sk", ColKind::I64),
+            ("flood_tier", ColKind::I64),
+            ("flood_zone", ColKind::Str),
+            ("wildfire_tier", ColKind::I64),
+            ("wildfire_label", ColKind::Str),
+            ("seismic_pga", ColKind::F64),
+            ("noise_max_db", ColKind::F64),
+            ("quiet_street", ColKind::I64),
+            ("safety_score", ColKind::F64),
+        ],
+    },
+    TableSpec {
+        name: "listing_features",
+        pk: "listing_sk",
+        cols: &[
+            ("listing_sk", ColKind::I64),
+            ("style_code", ColKind::I64),
+            ("architectural_style", ColKind::Str),
+            ("property_type_label", ColKind::Str),
+            ("garage_spaces", ColKind::F64),
             ("property_tax_rate", ColKind::F64),
             ("has_special_tax", ColKind::I64),
             ("has_solar", ColKind::I64),
@@ -102,93 +155,174 @@ const MIGRATION_TABLES: &[TableSpec] = &[
             ("has_adu", ColKind::I64),
             ("adu_feasible", ColKind::I64),
             ("has_pool", ColKind::I64),
-            ("garage_spaces", ColKind::F64),
-            ("architectural_style", ColKind::Str),
-            ("first_seen_at", ColKind::Str),
-            ("last_seen_at", ColKind::Str),
-            ("status_changed_at", ColKind::Str),
-            ("price_changed_at", ColKind::Str),
+            ("has_hardwood_floors", ColKind::I64),
+            ("has_updated_kitchen", ColKind::I64),
+            ("has_remodeled", ColKind::I64),
+            ("verdict", ColKind::Str),
+        ],
+    },
+    TableSpec {
+        name: "listing_engagement",
+        pk: "listing_sk",
+        cols: &[
+            ("listing_sk", ColKind::I64),
+            ("mls_number", ColKind::Str),
+            ("source_platform", ColKind::I64),
+            ("source_label", ColKind::Str),
+            ("listing_url", ColKind::Str),
+            ("photo_url", ColKind::Str),
+        ],
+    },
+    TableSpec {
+        name: "listing_portal_signals",
+        pk: "listing_sk, platform",
+        cols: &[
+            ("listing_sk", ColKind::I64),
+            ("platform", ColKind::I64),
+            ("likes_count", ColKind::I64),
+            ("views_count", ColKind::I64),
+            ("is_hot_home", ColKind::I64),
+            ("hot_tag", ColKind::Str),
+            ("portal_url", ColKind::Str),
+            ("updated_ts", ColKind::I64),
+        ],
+    },
+    TableSpec {
+        name: "listing_descriptions",
+        pk: "listing_sk",
+        cols: &[
+            ("listing_sk", ColKind::I64),
+            ("features_text", ColKind::Str),
+            ("mls_remarks", ColKind::Str),
+        ],
+    },
+    TableSpec {
+        name: "listing_tags",
+        pk: "listing_sk, tag_code",
+        cols: &[
+            ("listing_sk", ColKind::I64),
+            ("tag_id", ColKind::I64),
+            ("tag_code", ColKind::Str),
         ],
     },
     TableSpec {
         name: "listing_events",
-        pk: "id",
+        pk: "event_sk",
         cols: &[
-            ("id", ColKind::Str),
-            ("listing_id", ColKind::Str),
+            ("event_sk", ColKind::I64),
+            ("public_id", ColKind::Str),
+            ("listing_sk", ColKind::I64),
+            ("external_id", ColKind::Str),
             ("zip", ColKind::Str),
-            ("event_type", ColKind::Str),
-            ("old_status", ColKind::Str),
-            ("new_status", ColKind::Str),
+            ("event_kind", ColKind::I64),
+            ("old_status", ColKind::I64),
+            ("new_status", ColKind::I64),
             ("old_price", ColKind::I64),
             ("new_price", ColKind::I64),
-            ("created_at", ColKind::Str),
+            ("created_ts", ColKind::I64),
         ],
     },
+
+    // ==================== B. SCORING FACTORS & SCHOOLS DOMAIN (5 TABLES) ====================
     TableSpec {
-        name: "watched_zips",
-        pk: "zip",
+        name: "listing_factors",
+        pk: "listing_sk",
         cols: &[
+            ("listing_sk", ColKind::I64),
+            ("external_id", ColKind::Str),
+            ("schema_version", ColKind::I64),
+            ("source_tier", ColKind::I64),
+            ("as_of_year", ColKind::I64),
+            ("completeness_pct", ColKind::F64),
+            ("estimated_mask", ColKind::I64),
+            ("monthly_total", ColKind::F64),
+            ("monthly_pi", ColKind::F64),
+            ("assumed_down_pct", ColKind::F64),
+            ("cost_price", ColKind::F64),
+            ("estimated_value", ColKind::F64),
+            ("list_price", ColKind::F64),
+            ("hoa_monthly", ColKind::F64),
+            ("cash_to_close", ColKind::F64),
+            ("monthly_conv", ColKind::F64),
+            ("monthly_fha", ColKind::F64),
+            ("monthly_va", ColKind::F64),
+            ("monthly_cash", ColKind::F64),
+            ("school_elem_score", ColKind::F64),
+            ("school_elem_metric", ColKind::I64),
+            ("school_mid_score", ColKind::F64),
+            ("school_mid_metric", ColKind::I64),
+            ("school_high_score", ColKind::F64),
+            ("school_high_metric", ColKind::I64),
+            ("school_composite_score", ColKind::F64),
+            ("crime_score", ColKind::F64),
+            ("convenience_score", ColKind::F64),
+            ("walk_score", ColKind::F64),
+            ("hazards_score", ColKind::F64),
+            ("environment_score", ColKind::F64),
+            ("investment_score", ColKind::F64),
+            ("fengshui_score", ColKind::F64),
+            ("property_kind", ColKind::I64),
+            ("beds", ColKind::F64),
+            ("baths", ColKind::F64),
+            ("sqft", ColKind::F64),
+            ("lot_sqft", ColKind::F64),
+            ("stories", ColKind::F64),
+            ("year_built", ColKind::I64),
+            ("effective_year", ColKind::I64),
+            ("has_adu", ColKind::I64),
+            ("adu_sqft", ColKind::F64),
+            ("adu_beds", ColKind::F64),
+            ("adu_baths", ColKind::F64),
+            ("strong_adu_potential", ColKind::I64),
+            ("main_level_beds", ColKind::F64),
+            ("main_level_baths", ColKind::F64),
+            ("parking_spaces", ColKind::F64),
+            ("gate_sfha", ColKind::I64),
+            ("flood_zone", ColKind::Str),
+            ("gate_very_high_fire", ColKind::I64),
+            ("wildfire_tier", ColKind::I64),
+            ("freeway_distance_m", ColKind::F64),
+            ("gate_freeway_500ft", ColKind::I64),
+            ("gate_t_junction", ColKind::I64),
+            ("house_number", ColKind::Str),
+            ("style_basis", ColKind::I64),
+            ("primary_style", ColKind::I64),
+            ("style_families_mask", ColKind::I64),
+            ("features_known", ColKind::I64),
+            ("features_mask", ColKind::I64),
             ("zip", ColKind::Str),
-            ("city", ColKind::Str),
-            ("state", ColKind::Str),
             ("lat", ColKind::F64),
             ("lon", ColKind::F64),
-            ("active", ColKind::I64),
-            ("subscriber_count", ColKind::I64),
-            ("sync_interval_min", ColKind::I64),
-            ("last_synced_at", ColKind::Str),
-            ("last_sync_status", ColKind::Str),
-            ("last_new_count", ColKind::I64),
-            ("last_sold_count", ColKind::I64),
-            ("total_active_listings", ColKind::I64),
-            ("total_sold_listings", ColKind::I64),
-            ("sources_used", ColKind::Str),
-            ("last_error", ColKind::Str),
-            ("created_at", ColKind::Str),
+            ("scanned_ts", ColKind::I64),
+            ("updated_ts", ColKind::I64),
         ],
     },
     TableSpec {
-        name: "subscriptions",
-        pk: "id",
+        name: "listing_factor_provenance",
+        pk: "listing_sk",
         cols: &[
-            ("id", ColKind::Str),
-            ("email", ColKind::Str),
-            ("name", ColKind::Str),
-            ("zips_json", ColKind::Str),
-            ("cities_json", ColKind::Str),
-            ("requirements_text", ColKind::Str),
-            ("parsed_filters_json", ColKind::Str),
-            ("notify_on_new", ColKind::I64),
-            ("notify_on_sold", ColKind::I64),
-            ("active", ColKind::I64),
-            ("unsubscribe_token", ColKind::Str),
-            ("last_notified_at", ColKind::Str),
-            ("match_count", ColKind::I64),
-            ("filter_schema_version", ColKind::I64),
-            ("plan_tier", ColKind::Str),
-            ("filters_refreshed_at", ColKind::Str),
-            ("frequency", ColKind::Str),
-            ("digest_pending_json", ColKind::Str),
-            ("created_at", ColKind::Str),
-            ("updated_at", ColKind::Str),
+            ("listing_sk", ColKind::I64),
+            ("provenance_proto", ColKind::Bytes),
+            ("updated_ts", ColKind::I64),
         ],
     },
     TableSpec {
-        name: "subscription_notifications",
-        pk: "id",
+        name: "school_metrics",
+        pk: "metric_sk",
         cols: &[
-            ("id", ColKind::Str),
-            ("subscription_id", ColKind::Str),
-            ("listing_id", ColKind::Str),
-            ("event_key", ColKind::Str),
-            ("email_to", ColKind::Str),
-            ("subject", ColKind::Str),
-            ("match_score", ColKind::I64),
-            ("match_reason", ColKind::Str),
-            ("delivery_status", ColKind::Str),
-            ("delivery_error", ColKind::Str),
-            ("sent_at", ColKind::Str),
+            ("metric_sk", ColKind::I64),
+            ("metric_key", ColKind::Str),
+            ("state_code", ColKind::Str),
+            ("nces_id", ColKind::Str),
+            ("cds_code", ColKind::Str),
+            ("level", ColKind::I64),
+            ("academic_year", ColKind::I64),
+            ("ela_pct", ColKind::F64),
+            ("math_pct", ColKind::F64),
+            ("combined_pct", ColKind::F64),
+            ("percentile", ColKind::F64),
+            ("source_citation", ColKind::Str),
+            ("updated_ts", ColKind::I64),
         ],
     },
     TableSpec {
@@ -198,60 +332,103 @@ const MIGRATION_TABLES: &[TableSpec] = &[
             ("zip", ColKind::Str),
             ("lat", ColKind::F64),
             ("lon", ColKind::F64),
-            ("schools_json", ColKind::Str),
-            ("updated_at", ColKind::Str),
+            ("school_count", ColKind::I64),
+            ("updated_ts", ColKind::I64),
         ],
     },
     TableSpec {
-        name: "cached_reports",
-        pk: "slug",
+        name: "zip_school_cache_entries",
+        pk: "zip, entry_idx",
         cols: &[
+            ("zip", ColKind::Str),
+            ("entry_idx", ColKind::I64),
+            ("nces_id", ColKind::Str),
+            ("school_name", ColKind::Str),
+            ("district_name", ColKind::Str),
+            ("level", ColKind::I64),
+            ("rating", ColKind::F64),
+            ("state_percentile", ColKind::F64),
+            ("metric_source", ColKind::Str),
+            ("lat", ColKind::F64),
+            ("lon", ColKind::F64),
+        ],
+    },
+
+    // ==================== C. CACHED REPORTS & SECTION FRAMES DOMAIN (5 TABLES) ====================
+    TableSpec {
+        name: "cached_reports",
+        pk: "report_id",
+        cols: &[
+            ("report_id", ColKind::I64),
             ("slug", ColKind::Str),
+            ("listing_sk", ColKind::I64),
             ("display_address", ColKind::Str),
             ("zip", ColKind::Str),
-            ("report_json", ColKind::Str),
-            ("rendered_html", ColKind::Str),
+            ("state_code", ColKind::Str),
+            ("city", ColKind::Str),
+            ("lat", ColKind::F64),
+            ("lon", ColKind::F64),
+            ("property_category", ColKind::I64),
+            ("property_type_label", ColKind::Str),
+            ("overall_score", ColKind::F64),
+            ("estimated_value", ColKind::I64),
+            ("list_price", ColKind::I64),
+            ("all_in_monthly", ColKind::I64),
+            ("rent_estimate", ColKind::I64),
+            ("verdict", ColKind::Str),
+            ("ai_headline", ColKind::Str),
+            ("ai_ready", ColKind::I64),
             ("osrm_degraded", ColKind::I64),
-            ("updated_at", ColKind::Str),
+            ("section_mask", ColKind::I64),
+            ("total_raw_bytes", ColKind::I64),
+            ("total_compressed_bytes", ColKind::I64),
+            ("generated_ts", ColKind::I64),
+            ("updated_ts", ColKind::I64),
+        ],
+    },
+    TableSpec {
+        name: "cached_report_sections",
+        pk: "report_id, section_kind",
+        cols: &[
+            ("report_id", ColKind::I64),
+            ("section_kind", ColKind::I64),
+            ("dict_id", ColKind::I64),
+            ("raw_bytes", ColKind::I64),
+            ("payload_proto_zstd", ColKind::Bytes),
+            ("updated_ts", ColKind::I64),
+        ],
+    },
+    TableSpec {
+        name: "zip_market_snapshots",
+        pk: "snapshot_id",
+        cols: &[
+            ("snapshot_id", ColKind::I64),
+            ("snapshot_hash", ColKind::Bytes),
+            ("zip", ColKind::Str),
+            ("dict_id", ColKind::I64),
+            ("payload_proto_zstd", ColKind::Bytes),
+            ("updated_ts", ColKind::I64),
         ],
     },
     TableSpec {
         name: "report_build_queue",
-        pk: "slug",
+        pk: "job_sk",
         cols: &[
+            ("job_sk", ColKind::I64),
             ("slug", ColKind::Str),
-            ("address", ColKind::Str),
             ("job_id", ColKind::Str),
-            ("status", ColKind::Str),
-            ("step", ColKind::Str),
-            ("ai_requested", ColKind::I64),
+            ("address", ColKind::Str),
+            ("status", ColKind::I64),
+            ("run_ai", ColKind::I64),
             ("attempts", ColKind::I64),
+            ("worker_id", ColKind::Str),
+            ("progress_msg", ColKind::Str),
             ("last_error", ColKind::Str),
-            ("created_at", ColKind::Str),
-            ("updated_at", ColKind::Str),
-        ],
-    },
-    TableSpec {
-        name: "llm_cache",
-        pk: "cache_key",
-        cols: &[
-            ("cache_key", ColKind::Str),
-            ("value_json", ColKind::Str),
-            ("expires_at", ColKind::I64),
-            ("updated_at", ColKind::Str),
-        ],
-    },
-    TableSpec {
-        name: "client_doc_reviews",
-        pk: "doc_key",
-        cols: &[
-            ("doc_key", ColKind::Str),
-            ("slug", ColKind::Str),
-            ("client_id", ColKind::Str),
-            ("doc_type", ColKind::Str),
-            ("review_json", ColKind::Str),
-            ("expires_at", ColKind::I64),
-            ("updated_at", ColKind::Str),
+            ("created_ts", ColKind::I64),
+            ("started_ts", ColKind::I64),
+            ("heartbeat_ts", ColKind::I64),
+            ("finished_ts", ColKind::I64),
+            ("updated_ts", ColKind::I64),
         ],
     },
     TableSpec {
@@ -259,93 +436,285 @@ const MIGRATION_TABLES: &[TableSpec] = &[
         pk: "slug",
         cols: &[
             ("slug", ColKind::Str),
-            ("last_refreshed_at", ColKind::Str),
-            ("last_refreshed_unix", ColKind::I64),
+            ("last_refreshed_ts", ColKind::I64),
             ("refresh_count", ColKind::I64),
-            ("metadata_json", ColKind::Str),
         ],
     },
+
+    // ==================== D. SUBSCRIPTIONS, ALERTS & SYNC DOMAIN (8 TABLES) ====================
+    TableSpec {
+        name: "watched_zips",
+        pk: "zip",
+        cols: &[
+            ("zip", ColKind::Str),
+            ("city", ColKind::Str),
+            ("state_code", ColKind::Str),
+            ("lat", ColKind::F64),
+            ("lon", ColKind::F64),
+            ("active", ColKind::I64),
+            ("subscriber_count", ColKind::I64),
+            ("sync_interval_min", ColKind::I64),
+            ("last_synced_ts", ColKind::I64),
+            ("last_sync_status", ColKind::I64),
+            ("last_new_count", ColKind::I64),
+            ("last_sold_count", ColKind::I64),
+            ("total_active_listings", ColKind::I64),
+            ("total_sold_listings", ColKind::I64),
+            ("sources_used", ColKind::Str),
+            ("last_error", ColKind::Str),
+            ("lease_owner", ColKind::Str),
+            ("lease_until_ts", ColKind::I64),
+            ("consecutive_rate_limits", ColKind::I64),
+            ("last_backoff_secs", ColKind::I64),
+            ("next_sync_after_ts", ColKind::I64),
+            ("created_ts", ColKind::I64),
+        ],
+    },
+    TableSpec {
+        name: "subscriptions",
+        pk: "subscription_sk",
+        cols: &[
+            ("subscription_sk", ColKind::I64),
+            ("public_id", ColKind::Str),
+            ("email", ColKind::Str),
+            ("subscriber_name", ColKind::Str),
+            ("requirements_text", ColKind::Str),
+            ("intent_summary", ColKind::Str),
+            ("fair_housing_notice", ColKind::Str),
+            ("sort_by", ColKind::Str),
+            ("lang_code", ColKind::I64),
+            ("active", ColKind::I64),
+            ("frequency", ColKind::I64),
+            ("notify_on_new", ColKind::I64),
+            ("notify_on_sold", ColKind::I64),
+            ("status_mask", ColKind::I64),
+            ("property_cat_mask", ColKind::I64),
+            ("min_price", ColKind::I64),
+            ("max_price", ColKind::I64),
+            ("max_all_in_monthly", ColKind::I64),
+            ("max_monthly_utilities", ColKind::I64),
+            ("max_hoa_monthly", ColKind::I64),
+            ("min_beds", ColKind::F64),
+            ("max_beds", ColKind::F64),
+            ("min_baths", ColKind::F64),
+            ("min_sqft", ColKind::I64),
+            ("max_sqft", ColKind::I64),
+            ("min_lot_sqft", ColKind::I64),
+            ("min_year_built", ColKind::I64),
+            ("max_year_built", ColKind::I64),
+            ("stories", ColKind::I64),
+            ("min_garage_spaces", ColKind::F64),
+            ("min_school_score", ColKind::F64),
+            ("min_school_grade", ColKind::I64),
+            ("min_safety_score", ColKind::F64),
+            ("max_noise_db", ColKind::F64),
+            ("max_seismic_pga", ColKind::F64),
+            ("max_electric_rate_kwh", ColKind::F64),
+            ("min_download_mbps", ColKind::I64),
+            ("required_tag_bits", ColKind::I64),
+            ("excluded_tag_bits", ColKind::I64),
+            ("style_mask", ColKind::I64),
+            ("has_explicit_profile", ColKind::I64),
+            ("profile_proto", ColKind::Bytes),
+            ("match_count", ColKind::I64),
+            ("plan_tier", ColKind::Str),
+            ("unsubscribe_token", ColKind::Str),
+            ("filter_schema_version", ColKind::I64),
+            ("last_notified_ts", ColKind::I64),
+            ("filters_refreshed_ts", ColKind::I64),
+            ("created_ts", ColKind::I64),
+            ("updated_ts", ColKind::I64),
+        ],
+    },
+    TableSpec {
+        name: "subscription_zips",
+        pk: "subscription_sk, zip",
+        cols: &[
+            ("subscription_sk", ColKind::I64),
+            ("zip", ColKind::Str),
+        ],
+    },
+    TableSpec {
+        name: "subscription_cities",
+        pk: "subscription_sk, state_code, city_norm",
+        cols: &[
+            ("subscription_sk", ColKind::I64),
+            ("state_code", ColKind::Str),
+            ("city_norm", ColKind::Str),
+        ],
+    },
+    TableSpec {
+        name: "subscription_keywords",
+        pk: "subscription_sk, term_kind, term_value",
+        cols: &[
+            ("subscription_sk", ColKind::I64),
+            ("term_kind", ColKind::I64),
+            ("term_value", ColKind::Str),
+        ],
+    },
+    TableSpec {
+        name: "subscription_digest_queue",
+        pk: "subscription_sk, listing_sk",
+        cols: &[
+            ("subscription_sk", ColKind::I64),
+            ("listing_sk", ColKind::I64),
+            ("listing_external_id", ColKind::Str),
+            ("event_kind", ColKind::I64),
+            ("old_price", ColKind::I64),
+            ("event_key", ColKind::Str),
+            ("match_score", ColKind::I64),
+            ("match_tier", ColKind::Str),
+            ("why_it_matches", ColKind::Str),
+            ("tradeoffs", ColKind::Str),
+            ("listing_snapshot_zstd", ColKind::Bytes),
+            ("queued_ts", ColKind::I64),
+        ],
+    },
+    TableSpec {
+        name: "subscription_notifications",
+        pk: "notification_sk",
+        cols: &[
+            ("notification_sk", ColKind::I64),
+            ("public_id", ColKind::Str),
+            ("subscription_sk", ColKind::I64),
+            ("subscription_public_id", ColKind::Str),
+            ("listing_sk", ColKind::I64),
+            ("listing_external_id", ColKind::Str),
+            ("email_to", ColKind::Str),
+            ("subject", ColKind::Str),
+            ("event_kind", ColKind::I64),
+            ("event_key", ColKind::Str),
+            ("match_score", ColKind::I64),
+            ("match_reason", ColKind::Str),
+            ("delivery_status", ColKind::I64),
+            ("delivery_error", ColKind::Str),
+            ("sent_ts", ColKind::I64),
+        ],
+    },
+    TableSpec {
+        name: "alert_manage_tokens",
+        pk: "token_hash",
+        cols: &[
+            ("token_hash", ColKind::Bytes),
+            ("email", ColKind::Str),
+            ("expires_ts", ColKind::I64),
+            ("created_ts", ColKind::I64),
+        ],
+    },
+
+    // ==================== E. ENGAGEMENT, MATCH PROFILES & FEEDBACK DOMAIN (6 TABLES) ====================
     TableSpec {
         name: "property_likes",
         pk: "slug, client_id",
         cols: &[
             ("slug", ColKind::Str),
             ("client_id", ColKind::Str),
-            ("created_at", ColKind::Str),
-            ("metadata_json", ColKind::Str),
+            ("created_ts", ColKind::I64),
         ],
     },
     TableSpec {
         name: "property_platform_signals",
-        pk: "slug",
+        pk: "slug, platform",
         cols: &[
             ("slug", ColKind::Str),
-            ("signals_json", ColKind::Str),
-            ("updated_at", ColKind::Str),
-        ],
-    },
-    TableSpec {
-        name: "school_metrics",
-        pk: "id",
-        cols: &[
-            ("id", ColKind::Str),
-            ("state", ColKind::Str),
-            ("nces_id", ColKind::Str),
-            ("cds_code", ColKind::Str),
-            ("level", ColKind::Str),
-            ("year", ColKind::I64),
-            ("ela_pct", ColKind::F64),
-            ("math_pct", ColKind::F64),
-            ("combined_pct", ColKind::F64),
-            ("percentile", ColKind::F64),
-            ("source", ColKind::Str),
-            ("updated_at", ColKind::Str),
-        ],
-    },
-    TableSpec {
-        name: "listing_factors",
-        pk: "listing_id",
-        cols: &[
-            ("listing_id", ColKind::Str),
-            ("schema_version", ColKind::I64),
-            ("source_tier", ColKind::Str),
-            ("factors_json", ColKind::Str),
-            ("completeness_pct", ColKind::F64),
-            ("style_family", ColKind::Str),
-            ("flood_zone", ColKind::Str),
-            ("wildfire_zone", ColKind::Str),
-            ("walk_score", ColKind::F64),
-            ("school_score", ColKind::F64),
-            ("crime_score", ColKind::F64),
-            ("zip", ColKind::Str),
-            ("lat", ColKind::F64),
-            ("lon", ColKind::F64),
-            ("scanned_at", ColKind::Str),
-            ("updated_at", ColKind::Str),
+            ("platform", ColKind::I64),
+            ("likes_count", ColKind::I64),
+            ("views_count", ColKind::I64),
+            ("is_hot_home", ColKind::I64),
+            ("hot_tag", ColKind::Str),
+            ("portal_url", ColKind::Str),
+            ("extra_proto", ColKind::Bytes),
+            ("updated_ts", ColKind::I64),
         ],
     },
     TableSpec {
         name: "user_profiles",
-        pk: "user_id",
+        pk: "user_sk",
         cols: &[
+            ("user_sk", ColKind::I64),
             ("user_id", ColKind::Str),
-            ("profile_json", ColKind::Str),
             ("version", ColKind::I64),
-            ("updated_at", ColKind::Str),
-            ("created_at", ColKind::Str),
+            ("preset_code", ColKind::Str),
+            ("w_commute", ColKind::F64),
+            ("w_cost", ColKind::F64),
+            ("w_schools", ColKind::F64),
+            ("w_convenience", ColKind::F64),
+            ("w_homefit", ColKind::F64),
+            ("w_style", ColKind::F64),
+            ("w_hazards", ColKind::F64),
+            ("w_crime", ColKind::F64),
+            ("w_environment", ColKind::F64),
+            ("w_investment", ColKind::F64),
+            ("w_fengshui", ColKind::F64),
+            ("budget_monthly", ColKind::F64),
+            ("budget_max_price", ColKind::F64),
+            ("loan_type", ColKind::I64),
+            ("down_payment_pct", ColKind::F64),
+            ("cash_available", ColKind::F64),
+            ("comfort_ratio", ColKind::F64),
+            ("school_levels_mask", ColKind::I64),
+            ("min_beds", ColKind::F64),
+            ("min_baths", ColKind::F64),
+            ("min_sqft", ColKind::F64),
+            ("min_lot_sqft", ColKind::F64),
+            ("single_story_pref", ColKind::I64),
+            ("multigenerational", ColKind::I64),
+            ("hoa_max_monthly", ColKind::F64),
+            ("property_types_mask", ColKind::I64),
+            ("style_prefs_mask", ColKind::I64),
+            ("style_avoid_mask", ColKind::I64),
+            ("style_fine_mask", ColKind::I64),
+            ("feature_wishes_mask", ColKind::I64),
+            ("must_have_screens_mask", ColKind::I64),
+            ("deal_breakers_mask", ColKind::I64),
+            ("avoid_digits_mask", ColKind::I64),
+            ("prefer_digits_mask", ColKind::I64),
+            ("critical_dims_mask", ColKind::I64),
+            ("traffic_buffer", ColKind::F64),
+            ("raw_profile_proto", ColKind::Bytes),
+            ("created_ts", ColKind::I64),
+            ("updated_ts", ColKind::I64),
+        ],
+    },
+    TableSpec {
+        name: "user_profile_places",
+        pk: "user_sk, place_idx",
+        cols: &[
+            ("user_sk", ColKind::I64),
+            ("place_idx", ColKind::I64),
+            ("label", ColKind::Str),
+            ("lat", ColKind::F64),
+            ("lon", ColKind::F64),
+            ("travel_mode", ColKind::I64),
+            ("trips_per_week", ColKind::F64),
+            ("max_minutes", ColKind::F64),
         ],
     },
     TableSpec {
         name: "match_feedback",
-        pk: "id",
+        pk: "feedback_sk",
         cols: &[
-            ("id", ColKind::Str),
+            ("feedback_sk", ColKind::I64),
+            ("public_id", ColKind::Str),
             ("user_id", ColKind::Str),
-            ("listing_id", ColKind::Str),
-            ("action", ColKind::Str),
-            ("dimension_snapshot_json", ColKind::Str),
+            ("listing_sk", ColKind::I64),
+            ("listing_external_id", ColKind::Str),
+            ("action", ColKind::I64),
+            ("estimated_dims_mask", ColKind::I64),
+            ("u_commute", ColKind::F64),
+            ("u_cost", ColKind::F64),
+            ("u_schools", ColKind::F64),
+            ("u_convenience", ColKind::F64),
+            ("u_homefit", ColKind::F64),
+            ("u_style", ColKind::F64),
+            ("u_hazards", ColKind::F64),
+            ("u_crime", ColKind::F64),
+            ("u_environment", ColKind::F64),
+            ("u_investment", ColKind::F64),
+            ("u_fengshui", ColKind::F64),
+            ("snapshot_proto", ColKind::Bytes),
             ("reason", ColKind::Str),
-            ("created_at", ColKind::Str),
+            ("created_ts", ColKind::I64),
         ],
     },
     TableSpec {
@@ -356,18 +725,21 @@ const MIGRATION_TABLES: &[TableSpec] = &[
             ("slug", ColKind::Str),
             ("raw_slug", ColKind::Str),
             ("display_address", ColKind::Str),
-            ("updated_at", ColKind::Str),
+            ("updated_ts", ColKind::I64),
         ],
     },
+
+    // ==================== F. MARKETPLACE, ADMIN, EXTENSIONS & BINARY CACHES (10 TABLES) ====================
     TableSpec {
         name: "agent_match_requests",
-        pk: "id",
+        pk: "request_sk",
         cols: &[
-            ("id", ColKind::Str),
+            ("request_sk", ColKind::I64),
+            ("public_id", ColKind::Str),
             ("slug", ColKind::Str),
-            ("display_address", ColKind::Str),
+            ("address", ColKind::Str),
             ("city", ColKind::Str),
-            ("state", ColKind::Str),
+            ("state_code", ColKind::Str),
             ("zip", ColKind::Str),
             ("need_type", ColKind::Str),
             ("doc_needed", ColKind::Str),
@@ -375,36 +747,54 @@ const MIGRATION_TABLES: &[TableSpec] = &[
             ("buyer_email", ColKind::Str),
             ("buyer_phone", ColKind::Str),
             ("preferred_partner_id", ColKind::Str),
-            ("notes", ColKind::Str),
             ("client_id", ColKind::Str),
             ("smtp_status", ColKind::Str),
-            ("created_at", ColKind::Str),
+            ("notes", ColKind::Str),
+            ("status", ColKind::I64),
+            ("created_ts", ColKind::I64),
+            ("updated_ts", ColKind::I64),
         ],
     },
     TableSpec {
         name: "recommended_agents",
-        pk: "id",
+        pk: "agent_sk",
         cols: &[
-            ("id", ColKind::Str),
-            ("role", ColKind::Str),
+            ("agent_sk", ColKind::I64),
+            ("partner_id", ColKind::Str),
+            ("role", ColKind::I64),
+            ("role_label", ColKind::Str),
             ("full_name", ColKind::Str),
             ("firm_name", ColKind::Str),
             ("license_number", ColKind::Str),
-            ("states_json", ColKind::Str),
-            ("zips_json", ColKind::Str),
-            ("cities_json", ColKind::Str),
-            ("min_price", ColKind::I64),
-            ("max_price", ColKind::I64),
-            ("specialties_json", ColKind::Str),
-            ("languages_json", ColKind::Str),
             ("phone", ColKind::Str),
             ("email", ColKind::Str),
             ("website_url", ColKind::Str),
+            ("min_price", ColKind::I64),
+            ("max_price", ColKind::I64),
             ("notes", ColKind::Str),
             ("is_sponsored", ColKind::I64),
+            ("priority", ColKind::I64),
             ("active", ColKind::I64),
-            ("created_at", ColKind::Str),
-            ("updated_at", ColKind::Str),
+            ("created_ts", ColKind::I64),
+            ("updated_ts", ColKind::I64),
+        ],
+    },
+    TableSpec {
+        name: "recommended_agent_areas",
+        pk: "agent_sk, area_kind, area_value",
+        cols: &[
+            ("agent_sk", ColKind::I64),
+            ("area_kind", ColKind::I64),
+            ("area_value", ColKind::Str),
+        ],
+    },
+    TableSpec {
+        name: "recommended_agent_tags",
+        pk: "agent_sk, tag_kind, tag_value",
+        cols: &[
+            ("agent_sk", ColKind::I64),
+            ("tag_kind", ColKind::I64),
+            ("tag_value", ColKind::Str),
         ],
     },
     TableSpec {
@@ -412,13 +802,14 @@ const MIGRATION_TABLES: &[TableSpec] = &[
         pk: "module_id",
         cols: &[
             ("module_id", ColKind::Str),
-            ("category", ColKind::Str),
             ("display_name", ColKind::Str),
-            ("description_text", ColKind::Str),
+            ("category", ColKind::Str),
             ("enabled", ColKind::I64),
             ("priority", ColKind::I64),
-            ("config_json", ColKind::Str),
-            ("updated_at", ColKind::Str),
+            ("description_text", ColKind::Str),
+            ("config_proto", ColKind::Bytes),
+            ("updated_by", ColKind::Str),
+            ("updated_ts", ColKind::I64),
         ],
     },
     TableSpec {
@@ -428,75 +819,92 @@ const MIGRATION_TABLES: &[TableSpec] = &[
             ("extension_id", ColKind::Str),
             ("name", ColKind::Str),
             ("version", ColKind::Str),
-            ("domain", ColKind::Str),
-            ("driver_kind", ColKind::Str),
+            ("domain", ColKind::I64),
+            ("driver", ColKind::I64),
+            ("priority", ColKind::I64),
             ("enabled", ColKind::I64),
             ("builtin", ColKind::I64),
-            ("priority", ColKind::I64),
-            ("manifest_yaml", ColKind::Str),
-            ("openapi_yaml", ColKind::Str),
-            ("config_json", ColKind::Str),
-            ("proto_message_type", ColKind::Str),
-            ("health_status", ColKind::Str),
-            ("last_checked_at", ColKind::Str),
-            ("installed_at", ColKind::Str),
-            ("updated_at", ColKind::Str),
+            ("auth_env_var", ColKind::Str),
+            ("manifest_proto", ColKind::Bytes),
+            ("spec_zstd", ColKind::Bytes),
+            ("last_test_status", ColKind::I64),
+            ("last_test_latency_ms", ColKind::I64),
+            ("last_tested_ts", ColKind::I64),
+            ("installed_ts", ColKind::I64),
+            ("updated_ts", ColKind::I64),
         ],
     },
     TableSpec {
         name: "app_users",
-        pk: "user_id",
+        pk: "user_sk",
         cols: &[
-            ("user_id", ColKind::Str),
+            ("user_sk", ColKind::I64),
+            ("public_id", ColKind::Str),
             ("email", ColKind::Str),
             ("display_name", ColKind::Str),
-            ("role", ColKind::Str),
-            ("status", ColKind::Str),
+            ("role", ColKind::I64),
+            ("status", ColKind::I64),
             ("notes", ColKind::Str),
-            ("preferences_json", ColKind::Str),
-            ("created_at", ColKind::Str),
-            ("last_seen_at", ColKind::Str),
-            ("updated_at", ColKind::Str),
+            ("prefs_proto", ColKind::Bytes),
+            ("last_active_ts", ColKind::I64),
+            ("created_ts", ColKind::I64),
+            ("updated_ts", ColKind::I64),
         ],
     },
     TableSpec {
         name: "admin_audit_log",
-        pk: "id",
+        pk: "audit_sk",
         cols: &[
-            ("id", ColKind::Str),
+            ("audit_sk", ColKind::I64),
+            ("public_id", ColKind::Str),
             ("actor", ColKind::Str),
             ("action", ColKind::Str),
             ("target_type", ColKind::Str),
             ("target_id", ColKind::Str),
-            ("details_json", ColKind::Str),
-            ("created_at", ColKind::Str),
+            ("details_proto", ColKind::Bytes),
+            ("created_ts", ColKind::I64),
         ],
     },
     TableSpec {
-        name: "alert_manage_tokens",
-        pk: "token",
+        name: "llm_cache",
+        pk: "cache_key_hash",
         cols: &[
-            ("token", ColKind::Str),
-            ("email", ColKind::Str),
-            ("expires_at", ColKind::Str),
-            ("created_at", ColKind::Str),
+            ("cache_key_hash", ColKind::Bytes),
+            ("task_kind", ColKind::Str),
+            ("model_id", ColKind::Str),
+            ("payload_proto_zstd", ColKind::Bytes),
+            ("expires_ts", ColKind::I64),
+            ("updated_ts", ColKind::I64),
         ],
     },
     TableSpec {
-        name: "admin_settings",
-        pk: "setting_key",
+        name: "client_doc_reviews",
+        pk: "doc_key_hash",
         cols: &[
-            ("setting_key", ColKind::Str),
-            ("setting_value", ColKind::Str),
-            ("category", ColKind::Str),
-            ("description", ColKind::Str),
-            ("updated_by", ColKind::Str),
-            ("updated_at", ColKind::Str),
+            ("doc_key_hash", ColKind::Bytes),
+            ("slug", ColKind::Str),
+            ("client_id", ColKind::Str),
+            ("doc_kind", ColKind::I64),
+            ("review_proto_zstd", ColKind::Bytes),
+            ("expires_ts", ColKind::I64),
+            ("updated_ts", ColKind::I64),
         ],
     },
 ];
 
-// [feat/report-ux-likes]
+const AUX_MIGRATION_TABLES: &[TableSpec] = &[TableSpec {
+    name: "admin_settings",
+    pk: "setting_key",
+    cols: &[
+        ("setting_key", ColKind::Str),
+        ("setting_value", ColKind::Str),
+        ("category", ColKind::Str),
+        ("description", ColKind::Str),
+        ("updated_by", ColKind::Str),
+        ("updated_at", ColKind::Str),
+    ],
+}];
+
 fn spec_pks(spec: &TableSpec) -> Vec<&'static str> {
     spec.pk
         .split(',')
@@ -521,7 +929,6 @@ async fn fetch_batch_from_src(
     limit: i64,
 ) -> Result<Vec<Vec<(&'static str, SqlParam)>>> {
     let tbl = assert_safe_ident(spec.name);
-    // [feat/report-ux-likes]
     let order_by = spec_pks(spec)
         .into_iter()
         .map(|c| format!("{c} ASC"))
@@ -550,6 +957,7 @@ async fn fetch_batch_from_src(
                         .map(|&(col, kind)| {
                             let val = match kind {
                                 ColKind::Str => SqlParam::from(sqlite_opt_str(r, col)),
+                                ColKind::Bytes => SqlParam::from(sqlite_opt_bytes(r, col)),
                                 ColKind::I64 => SqlParam::from(sqlite_opt_i64(r, col)),
                                 ColKind::F64 => SqlParam::from(sqlite_opt_f64(r, col)),
                             };
@@ -573,6 +981,7 @@ async fn fetch_batch_from_src(
                         .map(|&(col, kind)| {
                             let val = match kind {
                                 ColKind::Str => SqlParam::from(mysql_opt_str(r, col)),
+                                ColKind::Bytes => SqlParam::from(mysql_opt_bytes(r, col)),
                                 ColKind::I64 => SqlParam::from(mysql_opt_i64(r, col)),
                                 ColKind::F64 => SqlParam::from(mysql_opt_f64(r, col)),
                             };
@@ -583,6 +992,44 @@ async fn fetch_batch_from_src(
                 .collect())
         }
     }
+}
+
+fn normalize_zstd_blob_col(
+    row_cols: &[(&'static str, SqlParam)],
+    blob_col: &'static str,
+) -> Result<(Vec<(&'static str, SqlParam)>, Option<i64>)> {
+    let expected_dict_id = *REPORT_ZSTD_DICT_ID;
+    let mut out = Vec::with_capacity(row_cols.len());
+    let mut new_compressed_len: Option<i64> = None;
+
+    for (col, val) in row_cols {
+        if *col == blob_col {
+            if let SqlParam::Bytes(b) = val {
+                if !b.is_empty() {
+                    let frame_dict_id =
+                        zstd::zstd_safe::get_dict_id_from_frame(b).map(NonZeroU32::get);
+                    if frame_dict_id == Some(expected_dict_id) {
+                        out.push((*col, val.clone()));
+                        continue;
+                    }
+                    let decoded = decompress_bytes_zstd_any(b)?;
+                    let recompressed = compress_bytes_zstd_dict(&decoded)?;
+                    new_compressed_len = Some(recompressed.len() as i64);
+                    out.push((*col, SqlParam::Bytes(recompressed)));
+                    continue;
+                }
+            }
+        }
+        out.push((*col, val.clone()));
+    }
+    if new_compressed_len.is_some() {
+        for (col, val) in &mut out {
+            if *col == "dict_id" {
+                *val = SqlParam::I64(expected_dict_id as i64);
+            }
+        }
+    }
+    Ok((out, new_compressed_len))
 }
 
 pub async fn migrate_database(src: &DbStore, dst: &DbStore) -> Result<MigrationSummary> {
@@ -606,24 +1053,66 @@ pub async fn migrate_database_with_batch(
 ) -> Result<MigrationSummary> {
     let eff_batch = (batch_size.clamp(1, 5_000)) as i64;
     let t0 = now_unix_ms();
-    src.ensure_schema().await?;
-    dst.ensure_schema().await?;
+    src.ensure_schema_without_rapid().await?;
+    dst.ensure_schema_without_rapid().await?;
+
+    // Unload Rapid analytical tables on destination before bulk streaming to avoid transactional
+    // change-propagation overhead during batch upserts; reload after `ANALYZE TABLE` at the end.
+    dst.unload_rapid_tables_if_loaded().await?;
 
     let mut tables = BTreeMap::new();
     let mut total_rows = 0_usize;
+    let mut updated_report_compressed_totals: BTreeMap<i64, i64> = BTreeMap::new();
 
     for spec in MIGRATION_TABLES {
         let mut offset = 0_i64;
         let mut table_count = 0_usize;
+        let pks = spec_pks(spec);
         loop {
             let batch = fetch_batch_from_src(src, spec, offset, eff_batch).await?;
             if batch.is_empty() {
                 break;
             }
             let batch_len = batch.len();
-            let pks = spec_pks(spec); // [feat/report-ux-likes]
             for row_cols in &batch {
-                dst.upsert_row(spec.name, row_cols, &pks).await?;
+                match spec.name {
+                    "cached_report_sections" => {
+                        let (norm_cols, recompressed_len) =
+                            normalize_zstd_blob_col(row_cols, "payload_proto_zstd")?;
+                        if recompressed_len.is_some() {
+                            if let Some((_, SqlParam::I64(rid))) =
+                                norm_cols.iter().find(|(c, _)| *c == "report_id")
+                            {
+                                let clen = norm_cols
+                                    .iter()
+                                    .find_map(|(c, v)| {
+                                        if *c == "payload_proto_zstd" {
+                                            if let SqlParam::Bytes(b) = v {
+                                                return Some(b.len() as i64);
+                                            }
+                                        }
+                                        None
+                                    })
+                                    .unwrap_or(0);
+                                *updated_report_compressed_totals.entry(*rid).or_insert(0) += clen;
+                            }
+                        }
+                        dst.upsert_row_raw(spec.name, &norm_cols, &pks).await?;
+                    }
+                    "zip_market_snapshots" | "llm_cache" => {
+                        let (norm_cols, _) =
+                            normalize_zstd_blob_col(row_cols, "payload_proto_zstd")?;
+                        dst.upsert_row_raw(spec.name, &norm_cols, &pks).await?;
+                    }
+                    "client_doc_reviews" => {
+                        let (norm_cols, _) =
+                            normalize_zstd_blob_col(row_cols, "review_proto_zstd")?;
+                        dst.upsert_row_raw(spec.name, &norm_cols, &pks).await?;
+                    }
+                    _ => {
+                        dst.upsert_row_raw(spec.name, row_cols, &pks).await?;
+                    }
+                }
             }
             table_count += batch_len;
             offset += batch_len as i64;
@@ -635,8 +1124,35 @@ pub async fn migrate_database_with_batch(
         total_rows += table_count;
     }
 
+    for spec in AUX_MIGRATION_TABLES {
+        let mut offset = 0_i64;
+        let pks = spec_pks(spec);
+        loop {
+            let batch = fetch_batch_from_src(src, spec, offset, eff_batch).await?;
+            if batch.is_empty() {
+                break;
+            }
+            let batch_len = batch.len();
+            for row_cols in &batch {
+                dst.upsert_row_raw(spec.name, row_cols, &pks).await?;
+            }
+            offset += batch_len as i64;
+            if (batch_len as i64) < eff_batch {
+                break;
+            }
+        }
+    }
+
+    for (report_id, _delta) in updated_report_compressed_totals {
+        dst.recompute_report_compressed_bytes(report_id).await?;
+    }
+
+    // Refresh optimizer table statistics and load HeatWave Rapid analytical tables if enabled.
+    dst.analyze_and_reload_rapid_after_bulk().await?;
+
     dst.l1_reports.invalidate_all();
     dst.l1_llm.invalidate_all();
+    dst.l1_market_snapshots.invalidate_all();
 
     Ok(MigrationSummary {
         source_provider: src.provider.clone(),
@@ -645,79 +1161,4 @@ pub async fn migrate_database_with_batch(
         total_rows,
         elapsed_ms: now_unix_ms().saturating_sub(t0),
     })
-}
-
-/// Idempotent `ALTER TABLE` schema upgrade for pre-existing SQLite `cached_reports` tables
-/// (runs before `sqlite_ddl()` so indexes on `osrm_degraded` succeed on legacy databases).
-pub async fn ensure_cached_reports_upgrades_sqlite(conn: &mut SqliteConnection) -> Result<()> {
-    let existing_cols = sqlx::query("PRAGMA table_info(cached_reports)")
-        .fetch_all(&mut *conn)
-        .await?;
-    if existing_cols.is_empty() {
-        return Ok(());
-    }
-    let have: HashSet<String> = existing_cols
-        .iter()
-        .filter_map(|r| sqlite_opt_str(r, "name"))
-        .map(|n| n.to_ascii_lowercase())
-        .collect();
-    let mut added_osrm_degraded = false;
-    for &(col, sq_ty, _) in CACHED_REPORTS_UPGRADE_COLS {
-        if !have.contains(&col.to_ascii_lowercase()) {
-            let stmt = format!("ALTER TABLE cached_reports ADD COLUMN {col} {sq_ty}");
-            sqlx::query(&stmt).execute(&mut *conn).await?;
-            if col == "osrm_degraded" {
-                added_osrm_degraded = true;
-            }
-        }
-    }
-    if added_osrm_degraded {
-        sqlx::query(
-            r#"UPDATE cached_reports SET osrm_degraded = 1 WHERE report_json LIKE '%"router_down"%'"#,
-        )
-        .execute(&mut *conn)
-        .await?;
-    }
-    Ok(())
-}
-
-/// Idempotent `ALTER TABLE` schema upgrade + index check for pre-existing MySQL `cached_reports` tables.
-pub async fn ensure_cached_reports_upgrades_mysql(pool: &MySqlPool) -> Result<()> {
-    let existing_cols = sqlx::query(
-        "SELECT COLUMN_NAME AS col_name FROM INFORMATION_SCHEMA.COLUMNS
-         WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'cached_reports'",
-    )
-    .fetch_all(pool)
-    .await?;
-    if existing_cols.is_empty() {
-        return Ok(());
-    }
-    let have: HashSet<String> = existing_cols
-        .iter()
-        .filter_map(|r| mysql_opt_str(r, "col_name"))
-        .map(|n| n.to_ascii_lowercase())
-        .collect();
-    let mut added_osrm_degraded = false;
-    for &(col, _, my_ty) in CACHED_REPORTS_UPGRADE_COLS {
-        if !have.contains(&col.to_ascii_lowercase()) {
-            let stmt = format!("ALTER TABLE cached_reports ADD COLUMN {col} {my_ty}");
-            let _ = sqlx::query(&stmt).execute(pool).await;
-            if col == "osrm_degraded" {
-                added_osrm_degraded = true;
-            }
-        }
-    }
-    if added_osrm_degraded {
-        let _ = sqlx::query(
-            "CREATE INDEX idx_cached_reports_osrm_degraded ON cached_reports (osrm_degraded, updated_at)",
-        )
-        .execute(pool)
-        .await;
-        let _ = sqlx::query(
-            r#"UPDATE cached_reports SET osrm_degraded = 1 WHERE report_json LIKE '%"router_down"%'"#,
-        )
-        .execute(pool)
-        .await;
-    }
-    Ok(())
 }

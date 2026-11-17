@@ -982,6 +982,12 @@ async fn fetch_calenviroscreen(http: &HttpClient, lat: f64, lon: f64) -> Result<
         "overallPercentile": pct_val(a.get("CIscoreP")),
         "pollutionBurdenPercentile": pct_val(a.get("PollutionP")),
         "indicators": indicators,
+        "referenceUrl": "https://oehha.ca.gov/calenviroscreen/report/calenviroscreen-40",
+        "sourceUrl": "https://oehha.ca.gov/calenviroscreen/report/calenviroscreen-40",
+        "links": {
+            "report": "https://oehha.ca.gov/calenviroscreen/report/calenviroscreen-40",
+            "map": "https://experience.arcgis.com/experience/11d2f52282a54ceebcac7428e6184203/",
+        },
         "note": "Statewide percentiles among ~8,000 California census tracts (higher = more burdened). The overall score also includes population health/socioeconomic factors, which are not itemized here.",
     })))
 }
@@ -1100,6 +1106,11 @@ async fn fetch_ejscreen(http: &HttpClient, lat: f64, lon: f64) -> Result<Option<
         "version": "EPA EJScreen 2.3 (2024 data) — third-party public mirror",
         "blockGroup": clean_str(a.get("ID")),
         "nationalPercentiles": pcts,
+        "referenceUrl": "https://pedp-ejscreen.azurewebsites.net/",
+        "sourceUrl": "https://pedp-ejscreen.azurewebsites.net/",
+        "links": {
+            "overview": "https://pedp-ejscreen.azurewebsites.net/",
+        },
         "note": "US percentiles by census block group (higher = more burdened). Environmental indicators only.",
     })))
 }
@@ -1206,11 +1217,29 @@ pub fn compute_air_stats(raw: &Value, airnow: Option<Vec<Value>>) -> Result<Valu
         .map(|(date, p25, p10, aqi)| json!({ "date": date, "pm25": p25, "pm10": p10, "aqi": aqi }))
         .collect();
 
+    let grid_lat = val_f64(raw.get("latitude")).map(|v| round_n(v, 3));
+    let grid_lon = val_f64(raw.get("longitude")).map(|v| round_n(v, 3));
+    let air_ref_url = match (grid_lat, grid_lon) {
+        (Some(gla), Some(glo)) => format!(
+            "https://open-meteo.com/en/docs/air-quality-api#latitude={gla:.4}&longitude={glo:.4}&hourly=pm10,pm2_5,ozone,nitrogen_dioxide,us_aqi&past_days=30"
+        ),
+        _ => "https://open-meteo.com/en/docs/air-quality-api".to_string(),
+    };
+    let airnow_map_url = match (grid_lat, grid_lon) {
+        (Some(gla), Some(glo)) => format!("https://fire.airnow.gov/#12/{gla:.4}/{glo:.4}"),
+        _ => "https://www.airnow.gov/".to_string(),
+    };
     let mut out = json!({
         "source": "Open-Meteo Air Quality API (CAMS global model)",
+        "referenceUrl": air_ref_url,
+        "sourceUrl": air_ref_url,
+        "links": {
+            "openMeteo": air_ref_url,
+            "airNowMap": airnow_map_url,
+        },
         "modelGridPoint": {
-            "lat": val_f64(raw.get("latitude")).map(|v| round_n(v, 3)),
-            "lon": val_f64(raw.get("longitude")).map(|v| round_n(v, 3)),
+            "lat": grid_lat,
+            "lon": grid_lon,
         },
         "period": {
             "start": daily_rows.first().map(|r| r.0.clone()).or_else(|| day_order.first().cloned()),
@@ -1426,7 +1455,10 @@ async fn fetch_air_quality(http: &HttpClient, env: &EnvConfig, lat: f64, lon: f6
     let (om_res, an_res) = tokio::join!(http.get_json_opts(&om_url, 10_000, 1, 3600 * 6, None), airnow_fut);
     let airnow_obs = match an_res {
         Some(Ok(v)) => {
-            sources.push(SourceItem::new("US EPA AirNow — current observations", AIRNOW_URL));
+            sources.push(SourceItem::new(
+                "US EPA AirNow — current observations",
+                format!("https://fire.airnow.gov/#12/{:.4}/{:.4}", round_n(lat, 4), round_n(lon, 4)),
+            ));
             Some(v)
         }
         Some(Err(e)) => {
@@ -1439,7 +1471,11 @@ async fn fetch_air_quality(http: &HttpClient, env: &EnvConfig, lat: f64, lon: f6
         Ok(val) => {
             sources.push(SourceItem::new(
                 "Weather & Air Quality data by Open-Meteo.com (CC BY 4.0 Non-Commercial, Copernicus CAMS)",
-                OPEN_METEO_AQ_URL,
+                format!(
+                    "https://open-meteo.com/en/docs/air-quality-api#latitude={:.4}&longitude={:.4}&hourly=pm10,pm2_5,ozone,nitrogen_dioxide,us_aqi&past_days=30",
+                    round_n(lat, 4),
+                    round_n(lon, 4)
+                ),
             ));
             (Some(val), sources, warnings)
         }
@@ -1861,13 +1897,20 @@ async fn fetch_drinking_water(
         }
     };
 
+    let echo_dfr_url = format!("https://echo.epa.gov/detailed-facility-report?fid={enc_id}&sys=SDWIS");
+    if let Some(pobj) = prim.as_object_mut() {
+        pobj.insert("referenceUrl".into(), json!(echo_dfr_url));
+        pobj.insert("sourceUrl".into(), json!(echo_dfr_url));
+    }
     let mut out = json!({
         "checked": true,
         "systems": systems.into_iter().take(5).collect::<Vec<_>>(),
         "primary": prim,
         "violations10y": violations10y,
+        "referenceUrl": echo_dfr_url,
+        "sourceUrl": echo_dfr_url,
         "links": {
-            "echo": format!("https://echo.epa.gov/detailed-facility-report?fid={enc_id}&sys=SDWIS"),
+            "echo": echo_dfr_url,
         },
     });
     if is_ca {
@@ -2341,9 +2384,10 @@ async fn fetch_noise_inner(
 
     if let Ok((c_all, m_all, mpp, tile_x, tile_y, blob_hash)) = r_all {
         let source_url = format!("{NOISE_BASE_URL}/{svc_all}/MapServer");
+        let bts_ref_url = "https://maps.dot.gov/BTS/NationalTransportationNoiseMap/";
         sources.push(SourceItem::new(
             "US DOT BTS — National Transportation Noise Map 2022",
-            source_url.clone(),
+            bts_ref_url,
         ));
         let (all_at, est_db) = class_to_json(c_all);
         let (all_mx, _) = class_to_json(m_all);
@@ -2369,6 +2413,12 @@ async fn fetch_noise_inner(
             "railDb": rail_db,
             "atProperty": { "all": all_at, "road": road_at, "aviation": av_at, "rail": rail_at },
             "maxWithinRadius": { "all": all_mx, "road": road_mx, "aviation": av_mx, "rail": rail_mx },
+            "referenceUrl": bts_ref_url,
+            "sourceUrl": bts_ref_url,
+            "links": {
+                "btsNoiseMap": bts_ref_url,
+                "osmMap": format!("https://www.openstreetmap.org/#map=16/{lat:.5}/{lon:.5}"),
+            },
             "note": "Modeled 24-h average transportation noise (LAeq,24h) from US DOT BTS 30 m grid; '<45 dB' means below mapped threshold.",
         });
         if let (Some(db), Some(gh6)) = (db, encode_geohash(lat, lon, 6)) {
@@ -2452,8 +2502,11 @@ async fn fetch_noise_inner(
                 }
             }
             let mut val = model_osm_noise_db(fwy_m, art_m, rail_m, air_m);
+            let osm_noise_url = format!("https://www.openstreetmap.org/#map=16/{lat:.5}/{lon:.5}");
             if let Some(obj) = val.as_object_mut() {
                 obj.insert("checked".into(), json!(true));
+                obj.insert("referenceUrl".into(), json!(osm_noise_url));
+                obj.insert("sourceUrl".into(), json!(osm_noise_url));
             }
             (val, sources, warnings)
         }
@@ -2711,7 +2764,7 @@ fn build_map_layers(items: &[SiteRecord], boundaries: &[NplBoundary]) -> (Vec<Va
             .map(|it| {
                 let f = json!({
                     "type": "Feature",
-                    "geometry": { "type": "Point", "coordinates": [it.lon, it.lat] },
+                    "geometry": { "type": "Point", "coordinates": [round_n(it.lon, 6), round_n(it.lat, 6)] },
                     "properties": {
                         "name": it.name,
                         "program": it.program,
@@ -2918,7 +2971,10 @@ pub async fn run_environment_with_db(
     let ces_checked = matches!(&ces_res, Some(Ok(_)));
     let ces_val = match ces_res {
         Some(Ok(Some(v))) => {
-            sources.push(SourceItem::new("OEHHA — CalEnviroScreen 4.0 results", CES_URL));
+            sources.push(SourceItem::new(
+                "OEHHA — CalEnviroScreen 4.0 results",
+                "https://oehha.ca.gov/calenviroscreen/report/calenviroscreen-40",
+            ));
             Some(v)
         }
         Some(Ok(None)) => {
@@ -2934,7 +2990,10 @@ pub async fn run_environment_with_db(
     let ej_checked = ej_res.is_ok();
     let ej_val = match ej_res {
         Ok(Some(v)) => {
-            sources.push(SourceItem::new("EPA EJScreen 2.3 (2024) block-group indicators", EJSCREEN_URL));
+            sources.push(SourceItem::new(
+                "EPA EJScreen 2.3 (2024) block-group indicators",
+                "https://pedp-ejscreen.azurewebsites.net/",
+            ));
             Some(v)
         }
         Ok(None) => None,
@@ -3070,6 +3129,13 @@ pub async fn run_environment_with_db(
             "nearestByProgram": nearest_by_prog,
             "insideNplBoundary": boundaries.iter().any(|b| b.inside),
             "nplBoundaries": boundaries.iter().map(|b| b.to_public_json()).collect::<Vec<_>>(),
+            "referenceUrl": "https://www.epa.gov/cleanups/cleanups-my-community",
+            "sourceUrl": "https://www.epa.gov/cleanups/cleanups-my-community",
+            "links": {
+                "epaCleanups": "https://www.epa.gov/cleanups/cleanups-my-community",
+                "geotracker": if is_ca { json!("https://geotracker.waterboards.ca.gov/") } else { Value::Null },
+                "envirostor": if is_ca { json!("https://www.envirostor.dtsc.ca.gov/public/") } else { Value::Null },
+            },
         },
         "screening": {
             "calEnviroScreen": ces_val,
@@ -3095,7 +3161,6 @@ pub async fn run_environment_with_db(
         "mapLayers": map_layers,
         "layers": {
             "sites": sites_fc,
-            "mapLayers": map_layers,
         },
     });
 

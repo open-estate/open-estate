@@ -12,9 +12,6 @@ use crate::shared::{now_iso, now_unix_secs};
 use anyhow::{anyhow, bail, Result};
 use prost::Message;
 use serde_json::{json, Value};
-use sqlx::mysql::MySqlRow;
-use sqlx::sqlite::SqliteRow;
-use sqlx::Row;
 use uuid::Uuid;
 
 pub const SCHEDULER_TABLE_NAMES: &[&str] = &["scheduled_jobs", "scheduled_job_runs"];
@@ -162,23 +159,7 @@ pub async fn ensure_scheduler_schema(db: &DbStore) -> Result<()> {
     }
 }
 
-trait BlobRowExt: DbRowExt {
-    fn opt_bytes(&self, col: &str) -> Option<Vec<u8>>;
-}
-
-impl BlobRowExt for SqliteRow {
-    fn opt_bytes(&self, col: &str) -> Option<Vec<u8>> {
-        self.try_get::<Option<Vec<u8>>, _>(col).ok().flatten()
-    }
-}
-
-impl BlobRowExt for MySqlRow {
-    fn opt_bytes(&self, col: &str) -> Option<Vec<u8>> {
-        self.try_get::<Option<Vec<u8>>, _>(col).ok().flatten()
-    }
-}
-
-fn decode_job_row(r: &dyn BlobRowExt) -> ScheduledJob {
+fn decode_job_row(r: &dyn DbRowExt) -> ScheduledJob {
     let raw_sched_kind = r
         .opt_str("schedule_kind")
         .unwrap_or_else(|| "interval".to_string());
@@ -226,7 +207,7 @@ fn decode_job_row(r: &dyn BlobRowExt) -> ScheduledJob {
     }
 }
 
-fn decode_run_row(r: &dyn BlobRowExt) -> ScheduledJobRun {
+fn decode_run_row(r: &dyn DbRowExt) -> ScheduledJobRun {
     ScheduledJobRun {
         run_id: r.opt_str("run_id").unwrap_or_default(),
         job_id: r.opt_str("job_id").unwrap_or_default(),

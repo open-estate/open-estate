@@ -345,36 +345,20 @@ pub async fn enqueue_periodic_lazy_sweep_from_cached_reports(
     let slugs = db.list_cached_report_slugs(limit).await?;
     let mut targets = Vec::with_capacity(slugs.len());
     for slug in slugs {
-        let Some(rec) = db.get_cached_report(&slug).await? else {
+        let Some(hdr) = db.get_report_header(&slug).await? else {
             continue;
         };
-        let address = rec
-            .report
-            .get("address")
-            .and_then(Value::as_str)
-            .unwrap_or(&rec.display_address)
-            .to_string();
-        let lat = rec
-            .report
-            .get("geo")
-            .and_then(|g| g.get("lat"))
-            .and_then(Value::as_f64);
-        let lon = rec
-            .report
-            .get("geo")
-            .and_then(|g| g.get("lon"))
-            .and_then(Value::as_f64);
-        let zip = rec
-            .report
-            .get("zip")
-            .and_then(Value::as_str)
-            .map(ToOwned::to_owned);
-        let mut target = LazyScanTarget::new(&rec.slug, address);
-        if let (Some(la), Some(lo)) = (lat, lon) {
+        let address = if hdr.display_address.trim().is_empty() {
+            hdr.slug.clone()
+        } else {
+            hdr.display_address
+        };
+        let mut target = LazyScanTarget::new(&hdr.slug, address);
+        if let (Some(la), Some(lo)) = (hdr.lat, hdr.lon) {
             target = target.with_coords(la, lo);
         }
-        if let Some(z) = zip {
-            target = target.with_zip(z);
+        if !hdr.zip.trim().is_empty() {
+            target = target.with_zip(hdr.zip);
         }
         targets.push(target);
     }

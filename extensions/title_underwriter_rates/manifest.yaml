@@ -22,7 +22,7 @@ metering:
 builtin: true
 provenance: official_tariff
 homepage_url: "https://www.tdi.texas.gov/title/titleman.html"
-documentation_url: "https://www.floir.com/sections/pandc/title"
+documentation_url: "https://floir.gov/property-casualty/title-insurance"
 codeowners:
   - "@openestate/core"
 geo_scope:
@@ -44,5 +44,6 @@ cache_ttl_secs: 604800
 source_attribution:
   name: "State Insurance Regulators & Title Rating Bureaus (TX TDI, FL OIR, NM OSI, NY TIRSA, PA TIRBOP, NJ NJLTIRB, OH PR-1)"
   url: "https://www.tdi.texas.gov/title/titleman.html"
+  reference_url_template: "https://www.tdi.texas.gov/title/titleman.html"
   schedule_or_version: "2025–2026 Promulgated, Bureau-Filed & Estimated Benchmark Schedules"
   notes: "Distinguishes promulgated/filed schedules from modeled estimated benchmarks (CA & parametric states); returns null dollar fields whenever subject price/estimate is unavailable."

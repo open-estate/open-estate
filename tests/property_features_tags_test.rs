@@ -71,7 +71,7 @@ fn assert_clean_and_valid_urls(pf: &Value, tags: &Value, ctx: &str) {
         ));
         let url = t["sourceUrl"].as_str().expect("tag sourceUrl");
         assert!(
-            url.starts_with("https://") && url.contains('#') && !url.contains(' '),
+            url.starts_with("https://") && !url.contains(' '),
             "{ctx} invalid tag sourceUrl: {url}"
         );
     }
@@ -101,7 +101,7 @@ fn assert_clean_and_valid_urls(pf: &Value, tags: &Value, ctx: &str) {
             }
             let url = it["sourceUrl"].as_str().expect("item sourceUrl");
             assert!(
-                url.starts_with("https://") && url.contains('#') && !url.contains(' '),
+                url.starts_with("https://") && !url.contains(' '),
                 "{ctx} invalid item sourceUrl on {}: {url}",
                 it["id"]
             );
@@ -274,7 +274,7 @@ fn detects_powerwall_owned_vs_ucc1_leased_solar_ev_200a_heat_pump_seismic_and_sp
     assert!(first_tag["sourceUrl"]
         .as_str()
         .unwrap()
-        .contains("SYNTH-2023-10482#:~:text="));
+        .contains("SYNTH-2023-10482"));
 
     // Verify lawn sprinklers did NOT falsely trigger smart_water_security / fire sprinklers
     let interior_items = pf["categories"][2]["items"].as_array().unwrap();
@@ -443,7 +443,7 @@ fn detects_all_battery_brands_generator_fire_sprinklers_official_school_and_stri
             sch["sourceUrl"]
                 .as_str()
                 .unwrap()
-                .contains("060000001001#:~:text=Synthetic"),
+                .contains("060000001001"),
             "unexpected school sourceUrl: {}",
             sch["sourceUrl"]
         );

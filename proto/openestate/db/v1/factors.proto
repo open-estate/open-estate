@@ -1,0 +1,115 @@
+syntax = "proto3";
+
+package openestate.db.v1;
+
+import "openestate/db/v1/enums.proto";
+
+message HomeFactorsRowProto {
+  int64 listing_sk = 1;
+  string external_id = 2;
+  int32 schema_version = 3;
+  FactorSourceTier source_tier = 4;
+  int32 as_of_year = 5;
+  double completeness_pct = 6;
+  int32 estimated_mask = 7;
+
+  optional double monthly_total = 8;
+  optional double monthly_pi = 9;
+  optional double assumed_down_pct = 10;
+  optional double cost_price = 11;
+  optional double estimated_value = 12;
+  optional double list_price = 13;
+  optional double hoa_monthly = 14;
+  optional double cash_to_close = 15;
+  optional double monthly_conv = 16;
+  optional double monthly_fha = 17;
+  optional double monthly_va = 18;
+  optional double monthly_cash = 19;
+
+  optional double school_elem_score = 20;
+  optional int32 school_elem_metric = 21;
+  optional double school_mid_score = 22;
+  optional int32 school_mid_metric = 23;
+  optional double school_high_score = 24;
+  optional int32 school_high_metric = 25;
+  optional double school_composite_score = 26;
+
+  optional double crime_score = 27;
+  optional double convenience_score = 28;
+  optional double walk_score = 29;
+  optional double hazards_score = 30;
+  optional double environment_score = 31;
+  optional double investment_score = 32;
+  optional double fengshui_score = 33;
+
+  optional int32 property_kind = 34;
+  optional double beds = 35;
+  optional double baths = 36;
+  optional double sqft = 37;
+  optional double lot_sqft = 38;
+  optional double stories = 39;
+  optional int32 year_built = 40;
+  optional int32 effective_year = 41;
+  optional bool has_adu = 42;
+  optional double adu_sqft = 43;
+  optional double adu_beds = 44;
+  optional double adu_baths = 45;
+  optional bool strong_adu_potential = 46;
+  optional double main_level_beds = 47;
+  optional double main_level_baths = 48;
+  optional double parking_spaces = 49;
+
+  optional bool gate_sfha = 50;
+  optional string flood_zone = 51;
+  optional bool gate_very_high_fire = 52;
+  optional int32 wildfire_tier = 53;
+  optional double freeway_distance_m = 54;
+  optional bool gate_freeway_500ft = 55;
+  optional bool gate_t_junction = 56;
+  optional string house_number = 57;
+
+  StyleEvidenceBasis style_basis = 58;
+  ArchitecturalStyleCode primary_style = 59;
+  int32 style_families_mask = 60;
+  bool features_known = 61;
+  int32 features_mask = 62;
+
+  optional string zip = 63;
+  optional double lat = 64;
+  optional double lon = 65;
+  int64 scanned_ts = 66;
+  int64 updated_ts = 67;
+}
+
+message FactorCitationProto {
+  string field_key = 1;
+  string source = 2;
+  int32 grade = 3;
+  optional int32 year = 4;
+  bool estimated = 5;
+}
+
+message StyleClueProto {
+  StyleEvidenceBasis source = 1;
+  string raw = 2;
+  repeated int32 families = 3;
+}
+
+message StyleProbabilityProto {
+  int32 family = 1;
+  double probability = 2;
+}
+
+message FactorProvenanceProto {
+  string id = 1;
+  uint32 factors_version = 2;
+  repeated FactorCitationProto citations = 3;
+  optional string elem_name = 4;
+  optional string mid_name = 5;
+  optional string high_name = 6;
+  repeated StyleClueProto style_clues = 7;
+  repeated StyleProbabilityProto style_probabilities = 8;
+  optional string adu_feasibility = 9;
+  optional string wildfire_zone = 10;
+  optional string style_family = 11;
+}

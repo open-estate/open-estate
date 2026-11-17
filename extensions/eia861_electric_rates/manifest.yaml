@@ -46,3 +46,4 @@ sharing:
 source_attribution:
   name: "US EIA Form 861 Residential Electric Rate Layer"
   url: "https://services8.arcgis.com/peDZJliSvYims39Q/arcgis/rest/services/Electricity_Rates_H3_Res5/FeatureServer/7"
+  reference_url_template: "https://www.eia.gov/electricity/data/eia861/"

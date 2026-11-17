@@ -668,3 +668,62 @@ fn satellite_resolution_hierarchy_regional_ortho_and_zero_secret_leak() {
 
     let _ = build_deterministic_property_media(&seattle_report);
 }
+
+#[test]
+fn upgrade_legacy_relief_cards_replaces_retired_usgs_imagery_topo() {
+    let mut legacy = json!({
+        "meta": { "displayAddress": "925 Synthparcelgamma NW, Washington, DC 20001" },
+        "geo": { "lat": 38.9001, "lon": -77.0246 },
+        "propertyMedia": {
+            "hasSalePhotos": false,
+            "mediaStatus": "exterior_archive_only",
+            "provenanceNote": "Test legacy media",
+            "items": [
+                {
+                    "id": "usgs-3dep-hillshade",
+                    "url": "https://basemap.nationalmap.gov/arcgis/rest/services/USGSImageryTopo/MapServer/export?bbox=-77.03,38.89,-77.01,38.91&size=800,560",
+                    "thumbUrl": "https://basemap.nationalmap.gov/arcgis/rest/services/USGSImageryTopo/MapServer/export?bbox=-77.03,38.89,-77.01,38.91&size=480,336",
+                    "category": "parcel",
+                    "roomTag": "USGS Regional Topo",
+                    "caption": "Old relief card",
+                    "capturedAt": "USGS",
+                    "sourceName": "USGS National Map",
+                    "sourceUrl": "https://www.usgs.gov/3d-elevation-program",
+                    "isHistoricalSale": false
+                },
+                {
+                    "id": "usgs-street-topo",
+                    "url": "https://basemap.nationalmap.gov/arcgis/rest/services/USGSImageryTopo/MapServer/export?bbox=-77.026,38.898,-77.022,38.901&size=960,640",
+                    "thumbUrl": "https://basemap.nationalmap.gov/arcgis/rest/services/USGSImageryTopo/MapServer/export?bbox=-77.026,38.898,-77.022,38.901&size=480,320",
+                    "category": "street",
+                    "roomTag": "Street & Topo",
+                    "caption": "Old street card",
+                    "capturedAt": "USGS",
+                    "sourceName": "USGS National Map",
+                    "sourceUrl": "https://apps.nationalmap.gov/viewer/",
+                    "isHistoricalSale": false
+                }
+            ],
+            "externalGalleryLinks": [
+                { "label": "Street View", "url": "https://maps.google.com/?q=38.9001,-77.0246", "badge": "Street" }
+            ]
+        }
+    });
+
+    let empty_env = EnvConfig::from_map(HashMap::new());
+    ensure_property_media_on_report_with_env(&mut legacy, &empty_env);
+    let dumped = serde_json::to_string(&legacy["propertyMedia"]).unwrap();
+    assert!(
+        !dumped.contains("USGSImageryTopo"),
+        "retired USGSImageryTopo must be upgraded automatically: {dumped}"
+    );
+    let items = legacy["propertyMedia"]["items"].as_array().unwrap();
+    for id in ["usgs-3dep-hillshade", "usgs-street-topo"] {
+        let card = items
+            .iter()
+            .find(|i| i["id"] == id)
+            .unwrap_or_else(|| panic!("missing upgraded card {id}"));
+        assert!(card["url"].as_str().unwrap().contains("/USGSTopo/MapServer/export"));
+        assert!(card["thumbUrl"].as_str().unwrap().contains("/USGSTopo/MapServer/export"));
+    }
+}

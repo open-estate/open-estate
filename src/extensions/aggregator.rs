@@ -1701,10 +1701,25 @@ pub fn to_report_json_patch(bundle: &AggregatedPropertyBundleProto) -> Value {
             patch.insert("shoppingFacets".to_string(), v);
         }
     }
-    patch.insert(
-        "attributions".to_string(),
-        serde_json::to_value(&bundle.attributions).unwrap_or_else(|_| json!([])),
-    );
+    let mut attr_vals = serde_json::to_value(&bundle.attributions).unwrap_or_else(|_| json!([]));
+    if let Some(arr) = attr_vals.as_array_mut() {
+        for item in arr {
+            if let Some(obj) = item.as_object_mut() {
+                if let Some(u) = obj
+                    .get("sourceUrl")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+                    .filter(|s| !s.trim().is_empty())
+                {
+                    obj.entry("referenceUrl".to_string())
+                        .or_insert_with(|| Value::String(u.clone()));
+                    obj.entry("url".to_string())
+                        .or_insert_with(|| Value::String(u));
+                }
+            }
+        }
+    }
+    patch.insert("attributions".to_string(), attr_vals);
     patch.insert(
         "resolutionTraces".to_string(),
         serde_json::to_value(&bundle.resolution_traces).unwrap_or_else(|_| json!([])),

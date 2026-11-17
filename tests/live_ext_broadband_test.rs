@@ -51,10 +51,13 @@ async fn live_public_fcc_broadband_bdc_campbell_honest_live_probe() {
     // it must never emit fabricated fiber carriers.
     if !fetch.ok {
         assert_eq!(fetch.envelope_count, 0);
+        let err_msg = fetch.error.as_deref().unwrap_or("");
         assert!(
-            fetch.error.as_deref().unwrap_or("").contains("405")
-                || fetch.error.as_deref().unwrap_or("").contains("401")
-                || fetch.error.as_deref().unwrap_or("").contains("HTTP"),
+            err_msg.contains("405")
+                || err_msg.contains("401")
+                || err_msg.contains("HTTP")
+                || err_msg.contains("AUTH_MISSING")
+                || err_msg.contains("FCC_BDC_API_TOKEN"),
             "unexpected error shape from fcc_broadband_bdc: {:?}",
             fetch.error
         );

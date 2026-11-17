@@ -346,55 +346,60 @@ async fn ops_endpoints_return_live_telemetry_and_responsive_html() {
         .put_llm_cache("active_syn_key", &json!({"ok": true}), 3600)
         .await
         .expect("put active llm cache");
+    state
+        .db
+        .put_llm_cache("expired_syn_key", &json!({"ok": true}), -600)
+        .await
+        .expect("put expired llm cache");
+
+    state
+        .db
+        .upsert_subscription_normalized(&open_estate::db::SubscriptionRow {
+            id: "sub_ops_1".to_string(),
+            email: "private-buyer@open-estate.local".to_string(),
+            name: Some("Private Buyer".to_string()),
+            zips_json: "[\"94303\"]".to_string(),
+            cities_json: None,
+            requirements_text: "3bd SFH in Palo Alto 94303".to_string(),
+            parsed_filters_json: "{}".to_string(),
+            notify_on_new: 1,
+            notify_on_sold: 0,
+            active: 1,
+            unsubscribe_token: "unsub_secret_token_never_expose".to_string(),
+            last_notified_at: None,
+            match_count: 0,
+            filter_schema_version: 3,
+            plan_tier: None,
+            filters_refreshed_at: None,
+            frequency: "instant".to_string(),
+            digest_pending_json: None,
+            created_at: now_iso(),
+            updated_at: now_iso(),
+        })
+        .await
+        .expect("upsert v3 subscription");
+
     if let DbBackend::Sqlite(ref pool) = state.db.backend {
         sqlx::query(
-            "INSERT INTO llm_cache (cache_key, value_json, expires_at, updated_at) VALUES (?, ?, ?, ?)",
-        )
-        .bind("expired_syn_key")
-        .bind("{\"ok\":true}")
-        .bind(now_unix_secs() - 600)
-        .bind(now_iso())
-        .execute(pool)
-        .await
-        .expect("insert expired llm cache");
-
-        sqlx::query(
-            "INSERT INTO watched_zips (zip, city, state, active, subscriber_count, created_at) VALUES (?, ?, ?, 1, 2, ?)",
+            "INSERT OR REPLACE INTO watched_zips (zip, city, state_code, active, subscriber_count, created_ts) VALUES (?, ?, ?, 1, 2, ?)",
         )
         .bind("94303")
         .bind("Palo Alto")
         .bind("CA")
-        .bind(now_iso())
+        .bind(now_unix_secs())
         .execute(pool)
         .await
         .expect("insert watched zip");
 
         sqlx::query(
-            "INSERT INTO subscriptions (id, email, name, zips_json, requirements_text, parsed_filters_json, active, unsubscribe_token, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?)",
-        )
-        .bind("sub_ops_1")
-        .bind("private-buyer@open-estate.local")
-        .bind("Private Buyer")
-        .bind("[\"94303\"]")
-        .bind("3bd SFH in Palo Alto 94303")
-        .bind("{}")
-        .bind("unsub_secret_token_never_expose")
-        .bind(now_iso())
-        .bind(now_iso())
-        .execute(pool)
-        .await
-        .expect("insert subscription");
-
-        sqlx::query(
-            "INSERT INTO user_search_history (actor_key, slug, raw_slug, display_address, updated_at)
+            "INSERT INTO user_search_history (actor_key, slug, raw_slug, display_address, updated_ts)
              VALUES (?, ?, ?, ?, ?)",
         )
         .bind("actor_room_1")
         .bind(SECONDARY_SLUG)
         .bind(SECONDARY_SLUG)
         .bind(common::SYNTH_SECONDARY_ADDRESS)
-        .bind(now_iso())
+        .bind(now_unix_secs())
         .execute(pool)
         .await
         .expect("insert user_search_history");

@@ -11,10 +11,11 @@ use crate::web::i18n::{
     LANG_COOKIE_NAME,
 };
 use crate::web::render::{
-    localize_i18n_json_for_brand, safe_inline_js, safe_inline_json, safe_open_estate_core_js,
-    I18NEXT_JS, I18N_EN_JSON, I18N_ES_JSON, I18N_ZH_JSON,
+    localize_i18n_json_for_brand, safe_buyer_copilot_js, safe_inline_js, safe_inline_json,
+    safe_open_estate_core_js, safe_pdf_studio_js, I18NEXT_JS, I18N_EN_JSON, I18N_ES_JSON,
+    I18N_ZH_JSON,
 };
-use minijinja::{context, Environment};
+use minijinja::{context, AutoEscape, Environment};
 use once_cell::sync::Lazy;
 
 const HOME_TEMPLATE: &str = r###"<!doctype html><html lang="{{ html_lang }}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -336,6 +337,8 @@ button.go:hover{background:#0d655e}
   .shop-sidebar{position:static;max-height:none;display:none}
   .shop-sidebar.open{display:block}
 }
+@media (prefers-color-scheme: dark){html:not([data-theme="light"]) body{background:#0b1120;color:#f1f5f9}html:not([data-theme="light"]) #homeForm,html:not([data-theme="light"]) .ac,html:not([data-theme="light"]) .card,html:not([data-theme="light"]) .area-home-card,html:not([data-theme="light"]) .bq-card,html:not([data-theme="light"]) .anat-card,html:not([data-theme="light"]) .area-zip-form,html:not([data-theme="light"]) .clrhist,html:not([data-theme="light"]) .navlink:not(.on),html:not([data-theme="light"]) .langsw{background:#111827;border-color:#334155;color:#f1f5f9}html:not([data-theme="light"]) .btnsec,html:not([data-theme="light"]) .area-geo-btn{background:#111827;border-color:#334155;color:#5eead4}html:not([data-theme="light"]) .btnsec:hover,html:not([data-theme="light"]) .area-geo-btn:hover:not(:disabled){background:#1e293b;border-color:#14b8a6;color:#99f6e4}html:not([data-theme="light"]) .langsw button:not(.on),html:not([data-theme="light"]) .sub,html:not([data-theme="light"]) .area-onsale-lbl{color:#cbd5e1}html:not([data-theme="light"]) #homeInput,html:not([data-theme="light"]) .area-zip-input,html:not([data-theme="light"]) .bq-head,html:not([data-theme="light"]) .area-hc-price,html:not([data-theme="light"]) .area-hc-street{color:#f1f5f9}html:not([data-theme="light"]) .tabs,html:not([data-theme="light"]) .bq-item{background:#1e293b;border-color:#334155;color:#cbd5e1}html:not([data-theme="light"]) .tabbtn{color:#cbd5e1}html:not([data-theme="light"]) .tabbtn.act{background:#0f766e;color:#fff}}
+html[data-theme="dark"] body{background:#0b1120;color:#f1f5f9}html[data-theme="dark"] #homeForm,html[data-theme="dark"] .ac,html[data-theme="dark"] .card,html[data-theme="dark"] .area-home-card,html[data-theme="dark"] .bq-card,html[data-theme="dark"] .anat-card,html[data-theme="dark"] .area-zip-form,html[data-theme="dark"] .clrhist,html[data-theme="dark"] .navlink:not(.on),html[data-theme="dark"] .langsw{background:#111827;border-color:#334155;color:#f1f5f9}html[data-theme="dark"] .btnsec,html[data-theme="dark"] .area-geo-btn{background:#111827;border-color:#334155;color:#5eead4}html[data-theme="dark"] .btnsec:hover,html[data-theme="dark"] .area-geo-btn:hover:not(:disabled){background:#1e293b;border-color:#14b8a6;color:#99f6e4}html[data-theme="dark"] .langsw button:not(.on),html[data-theme="dark"] .sub,html[data-theme="dark"] .area-onsale-lbl{color:#cbd5e1}html[data-theme="dark"] #homeInput,html[data-theme="dark"] .area-zip-input,html[data-theme="dark"] .bq-head,html[data-theme="dark"] .area-hc-price,html[data-theme="dark"] .area-hc-street{color:#f1f5f9}html[data-theme="dark"] .tabs,html[data-theme="dark"] .bq-item{background:#1e293b;border-color:#334155;color:#cbd5e1}html[data-theme="dark"] .tabbtn{color:#cbd5e1}html[data-theme="dark"] .tabbtn.act{background:#0f766e;color:#fff}
 </style></head><body><div class="wrap">
 <div class="topbar">
   <div class="logo">{{ logo_mark | safe }}<span>{{ brand_wordmark | safe }}</span></div>
@@ -354,7 +357,8 @@ button.go:hover{background:#0d655e}
   <button type="button" class="tabbtn act" data-tab-target="report" id="tabBtnReport" data-i18n="home.tabReport">{{ t_tab_report }}</button>
   <button type="button" class="tabbtn" data-tab-target="shop" id="tabBtnShop">{{ t_tab_shop }}</button>
   <button type="button" class="tabbtn" data-tab-target="match" id="tabBtnMatch" data-i18n="home.tabMatch">{{ t_tab_match }}</button>
-  <button type="button" class="tabbtn" data-tab-target="alerts" id="tabBtnAlerts" data-i18n="home.tabAlerts">{{ t_tab_alerts }}</button>
+  <button type="button" class="tabbtn" data-tab-target="alerts" id="tabBtnAlerts" data-i18n="home.tabAlerts"{% if not smtp_active %} hidden{% endif %}>{{ t_tab_alerts }}</button>
+  <button type="button" class="tabbtn" data-tab-target="assistant" id="tabBtnAssistant">{{ t_tab_assistant }}</button>
 </div>
 <div id="tab-report" class="tabpanel act">
   <div class="sbox"><form id="homeForm" action="/report" method="get" novalidate><span class="sico">🔍</span><input id="homeInput" name="address" placeholder="{{ t_search_placeholder }}" data-i18n-placeholder="home.searchPlaceholder" autocomplete="off" required><button type="button" class="clr" id="homeClr">×</button><button type="submit" class="go" id="homeGoBtn" data-i18n="home.generateBtn">{{ t_generate_btn }}</button></form><div class="home-pop"><div class="addr-err" id="homeAddrErr" role="alert"></div><div class="ac" id="homeAc" role="listbox"></div></div></div>
@@ -862,7 +866,7 @@ button.go:hover{background:#0d655e}
         </select>
       </div>
       <div style="display:flex;gap:8px">
-        <button type="button" id="nlToAlertBtn" class="btnsec" data-i18n="home.matchAlertBtn">{{ t_match_alert_btn }}</button>
+        <button type="button" id="nlToAlertBtn" class="btnsec" data-i18n="home.matchAlertBtn"{% if not smtp_active %} hidden{% endif %}>{{ t_match_alert_btn }}</button>
         <button type="button" id="nlSearchBtn" class="btnpri" data-i18n="home.matchSearchBtn">{{ t_match_search_btn }}</button>
       </div>
     </div>
@@ -871,6 +875,17 @@ button.go:hover{background:#0d655e}
 </div>
 
 <div id="tab-alerts" class="tabpanel">
+  {% if not smtp_active %}
+  <div id="alertsSmtpDisabledBanner" class="panelcard" style="margin-bottom:14px;background:#fffbeb;border-color:#fde68a;color:#92400e">
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap">
+      <div>
+        <div id="alertsSmtpDisabledTitle" style="font-weight:800;font-size:14.5px;margin-bottom:3px">{{ alerts_smtp_disabled_title }}</div>
+        <div id="alertsSmtpDisabledBody" style="font-size:13px;line-height:1.45">{{ alerts_smtp_disabled_body }}</div>
+      </div>
+      <button type="button" class="btnsec" id="alertsGoAssistantBtn" style="white-space:nowrap">{{ alerts_go_assistant_btn }}</button>
+    </div>
+  </div>
+  {% endif %}
   <div class="panelcard">
     <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap;margin-bottom:6px">
       <h2 style="font-size:18px;margin:0" data-i18n="home.alertsTitle">{{ t_alerts_title }}</h2>
@@ -922,6 +937,10 @@ button.go:hover{background:#0d655e}
     <div id="wzList" class="wzgrid"></div>
   </div>
 </div>
+
+<div id="tab-assistant" class="tabpanel">
+  <div id="buyerCopilotHomeMount"></div>
+</div>
 <footer style="margin-top:28px;padding-top:14px;border-top:1px solid #e5e7eb;display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;font-size:12px;color:#6b7280">
   <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
     <span><b>{{ brand_name }}</b> · {{ brand_domain }}</span>
@@ -945,7 +964,7 @@ window.__OPEN_ESTATE_I18N_RESOURCES__ = {
   es: { translation: {{ i18n_es_json | safe }} }
 };
 </script>
-<script>{{ home_client_js | safe }}</script><script>{{ core_ui_js | safe }}</script></body></html>"###;
+<script>{{ home_client_js | safe }}</script><script>{{ core_ui_js | safe }}</script><script>{{ pdf_studio_js | safe }}</script><script>{{ buyer_copilot_js | safe }}</script></body></html>"###;
 
 const HOME_CLIENT_JS: &str = r###"
 (function(){
@@ -953,7 +972,7 @@ const HOME_CLIENT_JS: &str = r###"
   const i18nRes = window.__OPEN_ESTATE_I18N_RESOURCES__ || { en: { translation: {} }, 'zh-CN': { translation: {} }, es: { translation: {} } };
   const BRAND_INFO = window.__OPEN_ESTATE_BRAND__ || {};
   const BRAND_NAME = (BRAND_INFO.name && String(BRAND_INFO.name).trim()) || __HOME_BRAND_NAME_JSON__;
-  const _DEF_BRAND_RE = new RegExp('Open\\s+' + 'Estate', 'g');
+  const _DEF_BRAND_RE = new RegExp('\\bOpen\\s+' + 'Estate\\b', 'g');
   const displayListingSource = (src) => {
     const s = String(src || '');
     return s ? s.replace(_DEF_BRAND_RE, BRAND_NAME) : s;
@@ -1113,6 +1132,38 @@ const HOME_CLIENT_JS: &str = r###"
     document.querySelectorAll('#langSwitch button[data-lang]').forEach((b) => {
       b.classList.toggle('on', b.getAttribute('data-lang') === CUR_LANG);
     });
+    const assistTabBtn = document.getElementById('tabBtnAssistant');
+    const assistBrandLabel = BRAND_NAME + ' AI';
+    if (assistTabBtn) {
+      assistTabBtn.textContent = assistBrandLabel;
+    }
+    const smtpBannerTitle = document.getElementById('alertsSmtpDisabledTitle');
+    if (smtpBannerTitle) {
+      smtpBannerTitle.textContent = CUR_LANG === 'zh-CN'
+        ? '自动邮件通知与后台邮箱监控默认已停用'
+        : CUR_LANG === 'es'
+          ? 'El envío SMTP y el monitoreo automático por correo están desactivados'
+          : 'Outbound SMTP & background email monitoring are disabled by default';
+    }
+    const smtpBannerBody = document.getElementById('alertsSmtpDisabledBody');
+    if (smtpBannerBody) {
+      smtpBannerBody.textContent = CUR_LANG === 'zh-CN'
+        ? ('请使用“' + assistBrandLabel + '”通过 mailto: 一键起草索取披露/验房邮件，并在收到后使用一次性私密文件解析（原文件立即销毁）。')
+        : CUR_LANG === 'es'
+          ? ('Use ' + assistBrandLabel + ' para redactar solicitudes vía mailto: en su propio correo y realizar el análisis privado único (los archivos originales se descartan al instante).')
+          : ('Use ' + assistBrandLabel + ' to draft prefilled mailto: disclosure/inspection requests directly from your mail app and run one-time private document analysis (original files discarded immediately).');
+    }
+    const smtpGoBtn = document.getElementById('alertsGoAssistantBtn');
+    if (smtpGoBtn) {
+      smtpGoBtn.textContent = CUR_LANG === 'zh-CN'
+        ? ('打开 ' + assistBrandLabel + ' →')
+        : CUR_LANG === 'es'
+          ? ('Abrir ' + assistBrandLabel + ' →')
+          : ('Open ' + assistBrandLabel + ' →');
+    }
+    if (window.__homeBuyerCopilot && typeof window.__homeBuyerCopilot.rerender === 'function') {
+      window.__homeBuyerCopilot.rerender();
+    }
     if (activeErrKind && addrErrEl && addrErrEl.classList.contains('on')) {
       addrErrEl.textContent = addrErrMessage(activeErrKind);
     }
@@ -2517,11 +2568,13 @@ const HOME_CLIENT_JS: &str = r###"
       const u = new URL(location.href);
       if (name === 'report') {
         u.searchParams.delete('tab');
-        if (u.pathname === '/match' || u.pathname === '/shop') u.pathname = '/';
+        if (u.pathname === '/match' || u.pathname === '/shop' || u.pathname === '/assistant') u.pathname = '/';
       } else if (name === 'shop' && u.pathname === '/shop') {
         u.searchParams.delete('tab');
+      } else if (name === 'assistant' && u.pathname === '/assistant') {
+        u.searchParams.delete('tab');
       } else {
-        if ((u.pathname === '/match' && name !== 'match') || (u.pathname === '/shop' && name !== 'shop')) {
+        if ((u.pathname === '/match' && name !== 'match') || (u.pathname === '/shop' && name !== 'shop') || (u.pathname === '/assistant' && name !== 'assistant')) {
           u.pathname = '/';
         }
         u.searchParams.set('tab', name);
@@ -2530,10 +2583,12 @@ const HOME_CLIENT_JS: &str = r###"
     } catch {}
   };
   tabBtns.forEach((b) => b.addEventListener('click', () => switchTab(b.dataset.tabTarget)));
+  document.getElementById('alertsGoAssistantBtn')?.addEventListener('click', () => switchTab('assistant'));
   const urlParams = new URLSearchParams(location.search);
   const initTab = urlParams.get('tab');
   const openShopByRoute = location.pathname === '/shop';
   const openMatchByRoute = location.pathname === '/match' || location.hash === '#quiz';
+  const openAssistantByRoute = location.pathname === '/assistant';
   const initQueryAddr = (urlParams.get('q') || '').trim();
   const initZip = (urlParams.get('zip') || urlParams.get('zips') || '').replace(/\D/g, '').slice(0, 5);
   if (openShopByRoute || initTab === 'shop') {
@@ -2545,14 +2600,23 @@ const HOME_CLIENT_JS: &str = r###"
     if (urlSort && shopSortSelect && [...shopSortSelect.options].some((o) => o.value === urlSort)) {
       shopSortSelect.value = urlSort;
     }
-  } else if (initQueryAddr && inp) {
+  } else if (initQueryAddr && inp && !openAssistantByRoute && initTab !== 'assistant') {
     inp.value = initQueryAddr;
     clr.classList.add('on');
     setTimeout(() => { inp.focus(); fetchSuggestNow(initQueryAddr); }, 40);
   }
-  if (initTab && ['report', 'shop', 'match', 'alerts'].includes(initTab)) switchTab(initTab);
+  const syncInp = document.getElementById('syncZipInput');
+  if (syncInp && initZip.length === 5) {
+    syncInp.value = initZip;
+  }
+  if (initTab && ['report', 'shop', 'match', 'alerts', 'assistant'].includes(initTab)) switchTab(initTab);
   else if (openShopByRoute) switchTab('shop');
   else if (openMatchByRoute) switchTab('match');
+  else if (openAssistantByRoute) switchTab('assistant');
+  if (urlParams.get('import') === '1') {
+    const det = document.getElementById('csvImportBox');
+    if (det) { det.open = true; setTimeout(() => det.scrollIntoView({ behavior: 'smooth', block: 'center' }), 80); }
+  }
   if (location.hash === '#quiz') {
     setTimeout(() => document.getElementById('matchQuizStudio')?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 60);
   }
@@ -5471,13 +5535,22 @@ const UNSUB_TEMPLATE: &str = r#"<!doctype html><html lang="{{ html_lang }}"><hea
 <p style="margin:0 0 8px;color:#4b5563">{{ t_body }}</p>
 <div class="actions"><a href="/" style="color:#4b5563;font-weight:600;text-decoration:none">{{ t_return_link }}</a><a class="mbtn" href="{{ manage_url }}">{{ t_manage_link }}</a></div></div></body></html>"#;
 
-static JINJA_ENV: Lazy<Environment<'static>> = Lazy::new(|| {
+static UI_JINJA_ENV: Lazy<Environment<'static>> = Lazy::new(|| {
     let mut env = Environment::new();
-    env.add_template("home", HOME_TEMPLATE).unwrap();
-    env.add_template("job", JOB_TEMPLATE).unwrap();
-    env.add_template("unsub", UNSUB_TEMPLATE).unwrap();
+    env.set_auto_escape_callback(|name| {
+        if name.ends_with(".html") {
+            AutoEscape::Html
+        } else {
+            minijinja::default_auto_escape_callback(name)
+        }
+    });
+    env.add_template("home.html", HOME_TEMPLATE).unwrap();
+    env.add_template("job.html", JOB_TEMPLATE).unwrap();
+    env.add_template("unsub.html", UNSUB_TEMPLATE).unwrap();
     env
 });
+
+static SAFE_HOME_CLIENT_JS: Lazy<String> = Lazy::new(|| safe_inline_js(HOME_CLIENT_JS));
 
 pub fn render_home_html(
     ai_active: bool,
@@ -5521,7 +5594,7 @@ pub fn render_home_html_with_options(
     _ai_active: bool,
     _db_dialect: &str,
     _db_driver: &str,
-    _smtp_active: bool,
+    smtp_active: bool,
     _active_mls_names: &[String],
     lang: &str,
     brand_name: &str,
@@ -5538,7 +5611,7 @@ pub fn render_home_html_with_options(
         .unwrap_or_else(|_| r#"{"name":"Open Estate","domain":"open-estate.local"}"#.into()),
     );
     let lang = resolve_lang_str(lang);
-    let tmpl = JINJA_ENV.get_template("home").unwrap();
+    let tmpl = UI_JINJA_ENV.get_template("home.html").unwrap();
     let init_lang = bcp47_code(&lang);
     let zh = is_zh(&lang);
     let es = is_es(&lang);
@@ -5563,7 +5636,7 @@ pub fn render_home_html_with_options(
     let brand_name_json = safe_inline_json(
         &serde_json::to_string(eff_brand).unwrap_or_else(|_| "\"Open Estate\"".into()),
     );
-    let rendered_home_js = HOME_CLIENT_JS.replace("__HOME_BRAND_NAME_JSON__", &brand_name_json);
+    let rendered_home_js = SAFE_HOME_CLIENT_JS.replace("__HOME_BRAND_NAME_JSON__", &brand_name_json);
     tmpl.render(context! {
         favicon_tags => FAVICON_HEAD_TAGS.as_str(),
         logo_mark => logo_mark_img(36),
@@ -5586,6 +5659,27 @@ pub fn render_home_html_with_options(
         t_tab_shop => pick("Shop Homes", "条件选房", "Comprar Casas"),
         t_tab_match => t(&lang, "tab-match"),
         t_tab_alerts => t(&lang, "tab-alerts"),
+        t_tab_assistant => format!("{eff_brand} AI"),
+        smtp_active => smtp_active,
+        alerts_smtp_disabled_title => pick(
+            "Outbound SMTP & background email monitoring are disabled by default",
+            "自动邮件通知与后台邮箱监控默认已停用",
+            "El envío SMTP y el monitoreo automático por correo están desactivados",
+        ),
+        alerts_smtp_disabled_body => if zh {
+            format!("请使用“{eff_brand} AI”通过 mailto: 一键起草索取披露/验房邮件，并在收到后使用一次性私密文件解析（原文件立即销毁）。")
+        } else if es {
+            format!("Use {eff_brand} AI para redactar solicitudes vía mailto: en su propio correo y realizar el análisis privado único (los archivos originales se descartan al instante).")
+        } else {
+            format!("Use {eff_brand} AI to draft prefilled mailto: disclosure/inspection requests directly from your mail app and run one-time private document analysis (original files discarded immediately).")
+        },
+        alerts_go_assistant_btn => if zh {
+            format!("打开 {eff_brand} AI →")
+        } else if es {
+            format!("Abrir {eff_brand} AI →")
+        } else {
+            format!("Open {eff_brand} AI →")
+        },
         t_search_placeholder => t(&lang, "search-placeholder"),
         t_generate_btn => t(&lang, "generate-report-btn"),
         area_onsale_label => pick("See onsale property in your area:", "查看您所在区域的在售房源：", "Ver propiedades en venta en su zona:"),
@@ -5698,13 +5792,23 @@ pub fn render_home_html_with_options(
         t_alerts_csv_summary => t(&lang, "alerts-csv-summary"),
         t_alerts_csv_btn => t(&lang, "alerts-csv-btn"),
         i18next_js => safe_inline_js(I18NEXT_JS),
-        init_lang_json => serde_json::to_string(init_lang).unwrap_or_else(|_| "\"en\"".into()),
-        lang_cookie_json => serde_json::to_string(LANG_COOKIE_NAME).unwrap_or_else(|_| "\"open_estate_lang\"".into()),
+        init_lang_json => safe_inline_json(&serde_json::to_string(init_lang).unwrap_or_else(|_| "\"en\"".into())),
+        lang_cookie_json => safe_inline_json(&serde_json::to_string(LANG_COOKIE_NAME).unwrap_or_else(|_| "\"open_estate_lang\"".into())),
         i18n_en_json => safe_inline_json(&localize_i18n_json_for_brand(I18N_EN_JSON, eff_brand, eff_domain)),
         i18n_zh_json => safe_inline_json(&localize_i18n_json_for_brand(I18N_ZH_JSON, eff_brand, eff_domain)),
         i18n_es_json => safe_inline_json(&localize_i18n_json_for_brand(I18N_ES_JSON, eff_brand, eff_domain)),
         home_client_js => rendered_home_js,
         core_ui_js => safe_open_estate_core_js(),
+        pdf_studio_js => if eff_brand != "Open Estate" {
+            safe_pdf_studio_js().replace("Open Estate", eff_brand)
+        } else {
+            safe_pdf_studio_js().to_string()
+        },
+        buyer_copilot_js => if eff_brand != "Open Estate" {
+            safe_buyer_copilot_js().replace("Open Estate", eff_brand)
+        } else {
+            safe_buyer_copilot_js().to_string()
+        },
     })
     .unwrap_or_default()
 }
@@ -5741,7 +5845,7 @@ pub fn render_job_html_with_brand(
 ) -> String {
     let eff_brand = if brand_name.trim().is_empty() { "Open Estate" } else { brand_name.trim() };
     let lang = resolve_lang_str(lang);
-    let tmpl = JINJA_ENV.get_template("job").unwrap();
+    let tmpl = UI_JINJA_ENV.get_template("job.html").unwrap();
     tmpl.render(context! {
         favicon_tags => FAVICON_HEAD_TAGS.as_str(),
         html_lang => short_code(&lang),
@@ -5753,10 +5857,10 @@ pub fn render_job_html_with_brand(
         t_job_net_warn => t_brand(&lang, "job-net-warn", eff_brand),
         t_job_bg_note => t_brand(&lang, "job-bg-note", eff_brand),
         t_job_back_link => t(&lang, "job-back-link"),
-        job_id_json => serde_json::to_string(job_id).unwrap_or_else(|_| "\"\"".into()),
-        slug_json => serde_json::to_string(slug).unwrap_or_else(|_| "\"\"".into()),
-        raw_slug_json => serde_json::to_string(raw_slug).unwrap_or_else(|_| "\"\"".into()),
-        addr_json => serde_json::to_string(address).unwrap_or_else(|_| "\"\"".into()),
+        job_id_json => safe_inline_json(&serde_json::to_string(job_id).unwrap_or_else(|_| "\"\"".into())),
+        slug_json => safe_inline_json(&serde_json::to_string(slug).unwrap_or_else(|_| "\"\"".into())),
+        raw_slug_json => safe_inline_json(&serde_json::to_string(raw_slug).unwrap_or_else(|_| "\"\"".into())),
+        addr_json => safe_inline_json(&serde_json::to_string(address).unwrap_or_else(|_| "\"\"".into())),
     })
     .unwrap_or_default()
 }
@@ -5789,7 +5893,7 @@ pub fn render_unsub_html_with_token_and_brand(
 ) -> String {
     let eff_brand = if brand_name.trim().is_empty() { "Open Estate" } else { brand_name.trim() };
     let lang = resolve_lang_str(lang);
-    let tmpl = JINJA_ENV.get_template("unsub").unwrap();
+    let tmpl = UI_JINJA_ENV.get_template("unsub.html").unwrap();
     let zips_joined = zips.join(", ");
     let heading = if found {
         t(&lang, "unsub-found-heading")
@@ -5818,7 +5922,7 @@ pub fn render_unsub_html_with_token_and_brand(
         t_body => body,
         t_return_link => t_brand(&lang, "unsub-return-link", eff_brand),
         t_manage_link => t(&lang, "unsub-manage-link"),
-        manage_url => manage_url,
+        manage_url => crate::search::alerts::safe_html_url_val(&manage_url),
     })
     .unwrap_or_default()
 }

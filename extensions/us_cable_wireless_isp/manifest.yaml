@@ -18,7 +18,7 @@ metering:
   dimensions:
     - invocations
     - wall_time_ms
-provenance: unverified
+provenance: regional_footprint
 homepage_url: "https://broadbandmap.fcc.gov/"
 documentation_url: "https://broadbandmap.fcc.gov/"
 codeowners:
@@ -33,6 +33,7 @@ cache_ttl_secs: 604800
 source_attribution:
   name: "Published Cable DOCSIS, 5G Fixed Wireless & LEO Satellite Footprints"
   url: "https://broadbandmap.fcc.gov/"
+  reference_url_template: "https://broadbandmap.fcc.gov/location-summary/fixed?latlon={{lat}}%2C{{lon}}"
 footprint_catalog:
   broadband_rules:
     - id: xfinity_norcal
@@ -165,21 +166,6 @@ footprint_catalog:
       max_upload_mbps: 35
       symmetrical: false
       typical_monthly_usd: "$65–$110/mo"
-      availability_status: "regional_footprint_unverified"
-      check_url: "https://www.xfinity.com/learn/internet-service"
-
-    - id: regional_cable_fallback
-      exclude_rural: true
-      only_when_category_empty: true
-      geo_scope:
-        states: []
-      carrier_name: "Xfinity / Spectrum / Cox Cable"
-      technology: "Cable (DOCSIS 3.1/4.0)"
-      tier_category: "cable"
-      max_download_mbps: 1000
-      max_upload_mbps: 35
-      symmetrical: false
-      typical_monthly_usd: "$65–$105/mo"
       availability_status: "regional_footprint_unverified"
       check_url: "https://www.xfinity.com/learn/internet-service"
 

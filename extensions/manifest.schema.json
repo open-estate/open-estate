@@ -1093,6 +1093,13 @@
             "null"
           ]
         },
+        "referenceUrlTemplate": {
+          "type": "string",
+          "x-alias-for": "reference_url_template"
+        },
+        "reference_url_template": {
+          "type": "string"
+        },
         "scheduleOrVersion": {
           "type": [
             "string",

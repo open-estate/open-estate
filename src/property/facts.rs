@@ -6,12 +6,13 @@ pub use crate::property::mls::connector_status;
 use crate::property::mls::{classify_asset_class, fetch_mls_and_records, merge_tax_histories};
 use crate::property::public_records::{
     format_fact_value_anchor_hint, format_thousands_i64, resolve_official_record_links,
-    with_data_point_anchor, OfficialRecordLinks,
+    OfficialRecordLinks,
 };
 use crate::registry::portals::push_unique_official_portal;
 use crate::shared::{
-    bbox_around, haversine_m, point_in_ring, ring_area_centroid, round_n, EnvConfig, HttpClient,
-    ModuleOutput, SourceItem, SQM_TO_SQFT,
+    bbox_around, haversine_m, point_in_ring, ring_area_centroid, round_n,
+    with_verified_data_anchor as with_data_point_anchor, EnvConfig, HttpClient, ModuleOutput,
+    SourceItem, SQM_TO_SQFT,
 };
 use anyhow::Result;
 use chrono::NaiveDate;
@@ -1144,7 +1145,7 @@ pub fn build_disclosures_summary(merged: &Value, geo: &Value, hazards: Option<&V
             "tone": "info",
             "detail": "Change of ownership resets the Prop 13 assessed value to purchase price and triggers 1–2 supplemental tax bills.",
             "sourceName": "CA State Board of Equalization (BOE) Supplemental Assessment",
-            "sourceUrl": "https://www.boe.ca.gov/proptaxes/suppapp.htm",
+            "sourceUrl": "https://www.boe.ca.gov/proptaxes/supplemental-assessment/",
         }));
     } else {
         statutory_checklist.push(json!({
@@ -3517,6 +3518,15 @@ async fn build_facts_and_mls_inner(
         && !ext.nearby_listings.is_empty()
     {
         merged.insert("nearbyListings".into(), Value::Array(ext.nearby_listings));
+    }
+    if merged
+        .get("nearbyPending")
+        .and_then(|v| v.as_array())
+        .map(|a| a.is_empty())
+        .unwrap_or(true)
+        && !ext.nearby_pending.is_empty()
+    {
+        merged.insert("nearbyPending".into(), Value::Array(ext.nearby_pending));
     }
     if merged
         .get("nearbyRentals")

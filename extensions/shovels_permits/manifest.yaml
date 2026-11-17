@@ -50,5 +50,6 @@ sharing:
     - "parent_address"
 source_attribution:
   name: "Shovels v2 Building Permit & Contractor Registry API"
-  url: "https://api.shovels.ai/v2/addresses/search"
+  url: "https://www.shovels.ai/"
+  reference_url_template: "https://www.shovels.ai/"
   notes: "Skipped cleanly when SHOVELS_API_KEY is unset; never fabricates placeholder permits."

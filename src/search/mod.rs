@@ -9,9 +9,9 @@ pub mod sync;
 
 pub use alerts::{
     admin_delete_subscription_by_id, admin_retranslate_subscription_by_id,
-    admin_update_subscription_by_id, authorize_subscription_access, build_match_alert_email,
-    build_match_alert_email_for_lang, build_match_alert_email_with_brand,
-    create_and_send_manage_link, create_subscription,
+    admin_update_subscription_by_id, authorize_subscription_access, build_manage_link_email_with_brand,
+    build_match_alert_email, build_match_alert_email_for_lang, build_match_alert_email_with_brand,
+    build_welcome_confirm_email_with_brand, create_and_send_manage_link, create_subscription,
     create_subscription_with_profile_and_provider, delete_subscription_authorized,
     evaluate_alerts_for_listings, flush_due_subscription_digests, get_watched_zips_status,
     ingest_listings, list_subscription_notifications, list_subscriptions,

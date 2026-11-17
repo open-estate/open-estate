@@ -64,6 +64,22 @@ pub fn scene_input_from_report(report: &Value) -> Option<SceneInput> {
 
     // The diagram is already in this frame when the origin is the house centroid.
     let diagram_ok = from(house).is_some();
+    let lot = diagram
+        .filter(|_| diagram_ok)
+        .and_then(|d| local_ring(d.get("lot")))
+        .or_else(|| latlon_ring(house.and_then(|h| h.get("lotPolygon")), &frame))
+        .or_else(|| latlon_ring(facts.and_then(|f| f.get("parcelPolygon")), &frame))
+        .or_else(|| {
+            latlon_ring(
+                facts.and_then(|f| f.pointer("/buildingRegister/parcelPolygon")),
+                &frame,
+            )
+        });
+    let off_lot = lot.is_some()
+        && house
+            .and_then(|h| h.get("onLot"))
+            .and_then(Value::as_bool)
+            == Some(false);
     let subject_ring = diagram
         .filter(|_| diagram_ok)
         .and_then(|d| local_ring(d.get("subject")))
@@ -71,7 +87,7 @@ pub fn scene_input_from_report(report: &Value) -> Option<SceneInput> {
     if let Some(ring) = subject_ring {
         buildings.push(BuildingIn {
             ring,
-            role: Role::Subject,
+            role: if off_lot { Role::Neighbor } else { Role::Subject },
             label: None,
             mapped_height_m: num(house.and_then(|h| h.get("heightM"))),
             levels: num(house.and_then(|h| h.get("levels"))).or(stories),
@@ -98,41 +114,31 @@ pub fn scene_input_from_report(report: &Value) -> Option<SceneInput> {
             }
         };
 
-    if let Some(arr) = house
-        .and_then(|h| h.get("additionalStructures"))
-        .and_then(Value::as_array)
-    {
-        for st in arr {
-            if let Some(ring) = latlon_ring(st.get("footprint"), &frame) {
-                let label = st.get("label").and_then(Value::as_str).map(str::to_string);
-                push_unique(&mut buildings, ring, Role::Accessory, label);
-            }
-        }
-    }
-    if diagram_ok {
-        if let Some(arr) = diagram
-            .and_then(|d| d.get("additional"))
+    if !off_lot {
+        if let Some(arr) = house
+            .and_then(|h| h.get("additionalStructures"))
             .and_then(Value::as_array)
         {
-            for r in arr {
-                if let Some(ring) = local_ring(Some(r)) {
-                    push_unique(&mut buildings, ring, Role::Accessory, None);
+            for st in arr {
+                if let Some(ring) = latlon_ring(st.get("footprint"), &frame) {
+                    let label = st.get("label").and_then(Value::as_str).map(str::to_string);
+                    push_unique(&mut buildings, ring, Role::Accessory, label);
+                }
+            }
+        }
+        if diagram_ok {
+            if let Some(arr) = diagram
+                .and_then(|d| d.get("additional"))
+                .and_then(Value::as_array)
+            {
+                for r in arr {
+                    if let Some(ring) = local_ring(Some(r)) {
+                        push_unique(&mut buildings, ring, Role::Accessory, None);
+                    }
                 }
             }
         }
     }
-
-    let lot = diagram
-        .filter(|_| diagram_ok)
-        .and_then(|d| local_ring(d.get("lot")))
-        .or_else(|| latlon_ring(house.and_then(|h| h.get("lotPolygon")), &frame))
-        .or_else(|| latlon_ring(facts.and_then(|f| f.get("parcelPolygon")), &frame))
-        .or_else(|| {
-            latlon_ring(
-                facts.and_then(|f| f.pointer("/buildingRegister/parcelPolygon")),
-                &frame,
-            )
-        });
 
     if diagram_ok {
         if let Some(arr) = diagram

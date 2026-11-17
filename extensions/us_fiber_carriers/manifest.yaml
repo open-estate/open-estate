@@ -18,7 +18,7 @@ metering:
   dimensions:
     - invocations
     - wall_time_ms
-provenance: unverified
+provenance: regional_footprint
 homepage_url: "https://broadbandmap.fcc.gov/"
 documentation_url: "https://broadbandmap.fcc.gov/"
 codeowners:
@@ -33,6 +33,7 @@ cache_ttl_secs: 604800
 source_attribution:
   name: "Published FTTH Fiber Carrier Metro Service Footprints"
   url: "https://broadbandmap.fcc.gov/"
+  reference_url_template: "https://broadbandmap.fcc.gov/location-summary/fixed?latlon={{lat}}%2C{{lon}}"
 footprint_catalog:
   broadband_rules:
     - id: sonic_10g_bay_area

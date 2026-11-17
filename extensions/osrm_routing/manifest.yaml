@@ -46,6 +46,7 @@ sharing:
 source_attribution:
   name: "OpenStreetMap road network (OSRM)"
   url: "https://project-osrm.org/"
+  reference_url_template: "https://project-osrm.org/"
 openapi:
   spec_file: "openapi.yaml"
   operation_id: "getOsrmDrivingTable"

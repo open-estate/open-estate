@@ -48,6 +48,7 @@ sharing:
 source_attribution:
   name: "USGS Earthquake Hazards Program — ASCE 7-22 Design Maps"
   url: "https://earthquake.usgs.gov/ws/designmaps/asce7-22.html"
+  reference_url_template: "https://earthquake.usgs.gov/ws/designmaps/asce7-22.html"
 openapi:
   spec_file: "openapi.yaml"
   operation_id: "getAsce722DesignShaking"

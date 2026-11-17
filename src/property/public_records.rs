@@ -8,7 +8,7 @@ pub use crate::shared::{
 };
 use crate::shared::{
     bbox_around, dominant_axis_rect, haversine_m, haversine_mi, point_in_ring, ring_area_centroid,
-    ring_area_m2, round_n, FOOT_M, HttpClient, SourceItem, SQM_TO_SQFT,
+    ring_area_m2, round_n, with_verified_data_anchor, FOOT_M, HttpClient, SourceItem, SQM_TO_SQFT,
 };
 use chrono::Datelike;
 use once_cell::sync::Lazy;
@@ -20,6 +20,8 @@ use url::Url;
 
 const CAMPBELL_PARCELS: &str =
     "https://gis.campbellca.gov/arcgis/rest/services/BaseFeatureLayers/Parcels/MapServer/0";
+const CAMPBELL_PARCEL_VIEWER: &str =
+    "https://gis.campbellca.gov/portal/apps/experiencebuilder/experience/?id=a9b10db4e5f04070ae15c3f745443cbf";
 const SCC_PUBLIC_PARCELS: &str =
     "https://services2.arcgis.com/tcv2cMrq63AgvbHF/arcgis/rest/services/Parcels_Public_View/FeatureServer/0";
 const SCC_REGIONAL_PARCELS: &str =
@@ -66,6 +68,7 @@ const DC_OWNER_POLYGONS: &str =
     "https://maps2.dcgis.dc.gov/dcgis/rest/services/DCGIS_DATA/Property_and_Land_WebMercator/MapServer/40";
 const MARICOPA_PARCELS: &str =
     "https://gis.mcassessor.maricopa.gov/arcgis/rest/services/Parcels/MapServer/0";
+const MARICOPA_PARCEL_VIEWER: &str = "https://mcassessor.maricopa.gov/";
 const TRAVIS_PARCELS: &str =
     "https://taxmaps.traviscountytx.gov/arcgis/rest/services/Parcels/MapServer/0";
 const TX_STATEWIDE_PARCELS: &str =
@@ -103,6 +106,15 @@ static RE_DIRS: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"(?i)\b(?:N|S|E|W|NE|NW|SE|SW|North|South|East|West)\b\.?").unwrap());
 static RE_SUFFIX: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r"(?i)\b(?:St|Street|Ave|Av|Avenue|Rd|Road|Dr|Drive|Ln|Lane|Ct|Court|Blvd|Boulevard|Way|Wy|Pl|Place|Cir|Circle|Ter|Terrace|Pkwy|Parkway|Hwy|Highway)\b\.?$").unwrap()
+});
+static RE_UNIT_TRAIL: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"(?i)(?:\s*,?\s*\b(?:apt|apartment|unit|ste|suite|fl|floor|rm|room|bldg|spc|space)\b\.?\s*[a-z0-9-]+|\s+#\s*[a-z0-9-]*.*)$").unwrap()
+});
+static RE_SUFFIX_TRAIL_UNIT: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"(?i)^(\S+(?:\s+\S+)*?)\s+\b(?:St|Street|Ave|Av|Avenue|Rd|Road|Dr|Drive|Ln|Lane|Ct|Court|Blvd|Boulevard|Way|Wy|Pl|Place|Cir|Circle|Ter|Terrace|Pkwy|Parkway|Hwy|Highway)\b\.?\s+([A-Za-z0-9]{1,4})$").unwrap()
+});
+static RE_EXPLICIT_UNIT: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"(?i)(?:\b(?:apt|apartment|unit|ste|suite|fl|floor|rm|room|bldg|spc|space)\b\.?\s*([a-z0-9-]+)|#\s*([a-z0-9-]+))").unwrap()
 });
 static RE_HASH_UNIT: Lazy<Regex> = Lazy::new(|| Regex::new(r"\s+#.*$").unwrap());
 static RE_SKIP_PREFIX: Lazy<Regex> = Lazy::new(|| {
@@ -152,10 +164,15 @@ pub fn parse_street(address: &str) -> (String, String) {
         return (String::new(), String::new());
     };
     let num = caps[1].to_string();
-    let s1 = RE_DIRS.replace_all(&caps[2], " ");
-    let s2 = RE_SUFFIX.replace_all(&s1, "");
-    let s3 = RE_HASH_UNIT.replace_all(&s2, "");
-    let core = s3.split_whitespace().collect::<Vec<_>>().join(" ");
+    let without_unit = RE_HASH_UNIT.replace_all(&caps[2], "");
+    let without_unit = RE_UNIT_TRAIL.replace_all(&without_unit, "");
+    let without_trail = match RE_SUFFIX_TRAIL_UNIT.captures(without_unit.trim()) {
+        Some(c) => c[1].to_string(),
+        None => without_unit.into_owned(),
+    };
+    let s1 = RE_DIRS.replace_all(&without_trail, " ");
+    let s2 = RE_SUFFIX.replace_all(s1.trim(), "");
+    let core = s2.split_whitespace().collect::<Vec<_>>().join(" ");
     (num, core)
 }
 
@@ -448,7 +465,7 @@ impl PolygonHit {
     }
 }
 
-/// House number and street keyword of the subject address, for matching against a parcel's situs address.
+/// House number, street keyword and optional sub-address unit of the subject address, for matching against a parcel's situs address.
 struct AddrKey {
     /// Leading digits of the house number (`204` for `204B`), empty when the address has none.
     number: String,
@@ -456,6 +473,10 @@ struct AddrKey {
     hyphenated: String,
     /// Last significant word of the street name, upper-case (`SYNTHLOT`, `55`); may be empty.
     street_kw: String,
+    /// Explicit sub-address unit (`P`, `4B`, `200`), upper-case; empty when the subject has none.
+    unit: String,
+    /// Post-directional on the subject street (`S` in `100 Synth Main St S`), so it is not misread as a situs unit.
+    post_dir: String,
 }
 
 /// What a parcel's situs address says about the subject address.
@@ -471,6 +492,69 @@ enum AddrEvidence {
     Conflict,
     /// The parcel carries no usable address.
     Unknown,
+}
+
+fn extract_unit_and_post_dir(raw: &str, allow_cardinal_unit: bool, ignore_post_dir: &str) -> (String, String) {
+    let normalize_u = |u: &str| u.trim().trim_matches('-').to_ascii_uppercase();
+    if let Some(caps) = RE_EXPLICIT_UNIT.captures(raw) {
+        if let Some(m) = caps.get(1).or_else(|| caps.get(2)) {
+            let u = normalize_u(m.as_str());
+            if !u.is_empty() {
+                let mut post_dir = String::new();
+                let line1 = raw.split(',').next().unwrap_or("").trim();
+                let stripped = RE_EXPLICIT_UNIT.replace_all(line1, "");
+                if let Some(sc) = RE_STREET_LINE.captures(stripped.trim()) {
+                    if let Some(tc) = RE_SUFFIX_TRAIL_UNIT.captures(sc[2].trim()) {
+                        let tr = tc[2].to_ascii_uppercase();
+                        if matches!(tr.as_str(), "N" | "S" | "E" | "W" | "NE" | "NW" | "SE" | "SW") {
+                            post_dir = tr;
+                        }
+                    }
+                }
+                return (u, post_dir);
+            }
+        }
+    }
+    let line1 = raw.split(',').next().unwrap_or("").trim();
+    if let Some(sc) = RE_STREET_LINE.captures(line1) {
+        let num_tok = sc[1].trim();
+        let alpha_tail: String = num_tok
+            .chars()
+            .skip_while(|c| c.is_ascii_digit() || *c == '-')
+            .collect();
+        if !alpha_tail.is_empty() && alpha_tail.chars().all(|c| c.is_ascii_alphabetic()) {
+            return (alpha_tail.to_ascii_uppercase(), String::new());
+        }
+        if let Some(tc) = RE_SUFFIX_TRAIL_UNIT.captures(sc[2].trim()) {
+            let tr = tc[2].to_ascii_uppercase();
+            let is_intercardinal = matches!(
+                tr.as_str(),
+                "NE" | "NW" | "SE" | "SW" | "NORTH" | "SOUTH" | "EAST" | "WEST"
+            );
+            let is_cardinal = matches!(tr.as_str(), "N" | "S" | "E" | "W");
+            if is_intercardinal {
+                return (String::new(), tr);
+            }
+            if is_cardinal {
+                if !allow_cardinal_unit || (!ignore_post_dir.is_empty() && tr == ignore_post_dir) {
+                    return (String::new(), tr);
+                }
+                return (tr, String::new());
+            }
+            return (tr, String::new());
+        }
+    }
+    (String::new(), String::new())
+}
+
+/// Extracts an explicit upper-cased sub-address unit token when present.
+pub fn extract_unit_token(raw: &str) -> Option<String> {
+    let (unit, _) = extract_unit_and_post_dir(raw, false, "");
+    if unit.is_empty() {
+        None
+    } else {
+        Some(unit)
+    }
 }
 
 impl AddrKey {
@@ -491,10 +575,13 @@ impl AddrKey {
         let (num, core) = parse_street(address_or_number);
         if !num.is_empty() {
             let kw = street_keyword_of(&core);
+            let (unit, post_dir) = extract_unit_and_post_dir(address_or_number, false, "");
             return AddrKey {
                 number: digits(&num),
                 hyphenated: hyphenated(&num),
                 street_kw: if kw.chars().any(|c| c.is_ascii_alphanumeric()) { kw } else { String::new() },
+                unit,
+                post_dir,
             };
         }
         let bare = address_or_number.trim();
@@ -503,6 +590,8 @@ impl AddrKey {
             number: if is_bare { digits(bare) } else { String::new() },
             hyphenated: if is_bare { hyphenated(bare) } else { String::new() },
             street_kw: String::new(),
+            unit: String::new(),
+            post_dir: String::new(),
         }
     }
 
@@ -512,6 +601,22 @@ impl AddrKey {
             &self.number
         } else {
             &self.hyphenated
+        }
+    }
+
+    /// Score adjustment when the subject address specifies a sub-address unit (`Unit P`, `#4B`)
+    /// and multiple townhome/condo parcels share the same street number (`236 W RINCON AV A`..`S`).
+    fn unit_score(&self, situs: &str) -> f64 {
+        if self.unit.is_empty() {
+            return 0.0;
+        }
+        let (parcel_unit, _) = extract_unit_and_post_dir(situs, true, &self.post_dir);
+        if parcel_unit.is_empty() {
+            0.0
+        } else if parcel_unit == self.unit {
+            1200.0
+        } else {
+            -900.0
         }
     }
 
@@ -569,6 +674,29 @@ impl AddrKey {
     }
 }
 
+fn attach_feature_unit(base: String, a: &Value) -> String {
+    if base.is_empty() || RE_EXPLICIT_UNIT.is_match(&base) {
+        return base;
+    }
+    for uk in [
+        "SITUS_UNIT",
+        "SitusUnit",
+        "UNIT_NO",
+        "UNIT_NBR",
+        "UnitNumber",
+        "APT_NO",
+        "SitusApt",
+    ] {
+        if let Some(u) = val_str(a, uk) {
+            let clean = u.trim();
+            if !clean.is_empty() {
+                return format!("{base} UNIT {clean}");
+            }
+        }
+    }
+    base
+}
+
 fn feature_addr_text(a: &Value) -> String {
     for k in [
         "Situs_Address_Full",
@@ -591,14 +719,14 @@ fn feature_addr_text(a: &Value) -> String {
         "PROP_ADDR",
     ] {
         if let Some(s) = val_str(a, k) {
-            return s;
+            return attach_feature_unit(s, a);
         }
     }
     if let Some(s) = val_str(a, "SITUS_ADDRESS") {
         if let Some(st) = val_str(a, "SITUS_STREET").filter(|st| !s.contains(st.as_str())) {
-            return format!("{s} {st}").trim().to_string();
+            return attach_feature_unit(format!("{s} {st}").trim().to_string(), a);
         }
-        return s;
+        return attach_feature_unit(s, a);
     }
     for (num_k, st_k) in [
         ("SitusHouseNo", "SitusStreet"),
@@ -613,7 +741,7 @@ fn feature_addr_text(a: &Value) -> String {
     ] {
         if let Some(n) = val_str(a, num_k) {
             let st = val_str(a, st_k).unwrap_or_default();
-            return format!("{n} {st}").trim().to_string();
+            return attach_feature_unit(format!("{n} {st}").trim().to_string(), a);
         }
     }
     String::new()
@@ -622,9 +750,10 @@ fn feature_addr_text(a: &Value) -> String {
 /// Picks the subject parcel among `features` queried around `(lat, lon)`.
 ///
 /// `address` is the subject's street address (or just its house number). A parcel whose own situs address
-/// has the same house number *and* street always wins; a matching number on a different street earns
-/// nothing, because parallel streets share house numbers. Otherwise the parcel containing the point wins,
-/// then the nearest one within 52 m.
+/// has the same house number *and* street always wins; when the subject also names a sub-address unit
+/// (`Unit P`, `#4B`), the matching unit parcel outranks sibling units in the same complex. A matching number
+/// on a different street earns nothing, because parallel streets share house numbers. Otherwise the parcel
+/// containing the point wins, then the nearest one within 52 m.
 fn pick_best_polygon_feature(
     features: &[Value],
     lat: f64,
@@ -654,10 +783,15 @@ fn pick_best_polygon_feature(
         } else {
             (false, 0.0, 999.0)
         };
-        let evidence = key.evidence(&feature_addr_text(&a));
+        let situs = feature_addr_text(&a);
+        let evidence = key.evidence(&situs);
+        let u_bonus = match evidence {
+            AddrEvidence::Full | AddrEvidence::NumberOnly => key.unit_score(&situs),
+            _ => 0.0,
+        };
         let score = match evidence {
-            AddrEvidence::Full => 2000.0,
-            AddrEvidence::NumberOnly => 600.0,
+            AddrEvidence::Full => 2000.0 + u_bonus,
+            AddrEvidence::NumberOnly => 600.0 + u_bonus * 0.5,
             AddrEvidence::Neighbor | AddrEvidence::Conflict | AddrEvidence::Unknown => 0.0,
         } + (if inside { 400.0 } else { 0.0 })
             - dist_m;
@@ -1484,7 +1618,7 @@ async fn fetch_campbell_gis(
         &mut facts,
         feat,
         "City of Campbell Enterprise GIS & Santa Clara County Assessor Secured Roll",
-        CAMPBELL_PARCELS,
+        CAMPBELL_PARCEL_VIEWER,
     );
     if let Some(ref ca) = campbell_addr {
         facts.insert("addressPointLat".into(), json!(ca.lat));
@@ -1654,7 +1788,7 @@ async fn fetch_campbell_gis(
             "permitCoverage".into(),
             json!({
                 "portalName": "City of Campbell Building & Planning GIS (MGO)",
-                "portalUrl": "https://www.campbellca.gov/161/Building",
+                "portalUrl": "https://www.mgoconnect.org/cp?JID=187",
                 "queriedLayers": queried_layers,
                 "subjectPermitCount": subj_cnt,
                 "parentLotPermitCount": parent_cnt,
@@ -1704,7 +1838,7 @@ async fn fetch_campbell_gis(
             "City of Campbell GIS & Santa Clara County Assessor Roll (APN {})",
             apn.as_deref().unwrap_or("parcel")
         ),
-        CAMPBELL_PARCELS,
+        CAMPBELL_PARCEL_VIEWER,
     )];
     sources.extend(mgo_sources);
     if let Some(ct) = ca_tax {
@@ -3844,7 +3978,7 @@ async fn fetch_maricopa_county_assessor(
         &mut facts,
         a,
         "Maricopa County Office of the Assessor Parcel GIS",
-        MARICOPA_PARCELS,
+        MARICOPA_PARCEL_VIEWER,
     );
     if let Some(z) = val_str(a, "CITY_ZONING") {
         facts.insert("zoning".into(), json!(z));
@@ -4760,7 +4894,7 @@ async fn fetch_texas_parcels(
         ),
         sources: vec![SourceItem::new(
             "Texas TNRIS StratMap County Appraisal Land Parcels",
-            "https://data.tnris.org/",
+            "https://data.geographic.texas.gov/",
         )],
         warnings: Vec::new(),
     })
@@ -5459,31 +5593,32 @@ pub fn build_arcgis_parcel_html_query_url(
     let base_no_hash = base.split('#').next().unwrap_or(&base).trim_end_matches('/');
     let low = base_no_hash.to_ascii_lowercase();
 
-    // Socrata Open Data single-parcel endpoints
+    // Interactive parcel viewers for jurisdictions whose ArcGIS Services Directory disables `f=html` (HTTP 403)
+    if low.contains("campbellca.gov") {
+        return Some(CAMPBELL_PARCEL_VIEWER.to_string());
+    }
+    if low.contains("mcassessor.maricopa.gov") {
+        return Some(format!(
+            "https://mcassessor.maricopa.gov/mcs/?q={}",
+            urlencoding::encode(&safe_raw)
+        ));
+    }
+
+    // Socrata Open Data single-parcel endpoints (JSON endpoints — no `#:~:text=` fragment)
     if (low.contains("data.sf.gov/resource/wv5m-vpq2")
         || low.contains("data.sfgov.org/resource/wv5m-vpq2"))
         && !digits.is_empty()
     {
         let w_raw = format!("parcel_number='{digits}'");
         let w = urlencoding::encode(&w_raw);
-        return Some(with_data_point_anchor(
-            &format!("{base_no_hash}?$where={w}&$limit=5"),
-            None,
-            Some(&digits),
-        ));
+        return Some(format!("{base_no_hash}?$where={w}&$limit=5"));
     }
     if low.contains("datacatalog.cookcountyil.gov/resource/") && !digits.is_empty() {
-        return Some(with_data_point_anchor(
-            &format!("{base_no_hash}?pin={digits}&$limit=5"),
-            None,
-            Some(&digits),
-        ));
+        return Some(format!("{base_no_hash}?pin={digits}&$limit=5"));
     }
     if low.contains("data.cityofnewyork.us/resource/64uk-42ks") && !digits.is_empty() {
-        return Some(with_data_point_anchor(
-            &format!("https://data.cityofnewyork.us/resource/64uk-42ks.json?bbl={digits}&$limit=5"),
-            None,
-            Some(&digits),
+        return Some(format!(
+            "https://data.cityofnewyork.us/resource/64uk-42ks.json?bbl={digits}&$limit=5"
         ));
     }
 
@@ -5500,26 +5635,18 @@ pub fn build_arcgis_parcel_html_query_url(
             } else {
                 format!("APN='{safe_raw}'")
             };
-            let fields = if low.contains("campbellca.gov") {
-                "APN,SITUSFULL,YEAR_BUILT,EFF_YEAR_BUILT,BEDROOM_NBR,BATHROOM_NBR,TTL_SQFT_ALL,MAIN_SQFT,USABLE_SQ_FT_LAN,LOTSIZE,ACRES,LAND,IMPR,HO_EXEMPT_VALUE,TRA,Zoning,DOC_NO,TRANSFER_DATE"
-            } else if low.contains("sanjoseca.gov") {
+            if low.contains("sanjoseca.gov") {
                 let w_sj = if !digits.is_empty() {
                     format!("APN='{digits}' OR PARCEL='{digits}'")
                 } else {
                     w
                 };
-                return Some(with_data_point_anchor(
-                    &format!(
-                        "{base_no_hash}/query?where={}&outFields=APN,PARCEL,ADDRESS,LOTAREA,ACREAGE&returnGeometry=false&f=html",
-                        urlencoding::encode(&w_sj)
-                    ),
-                    None,
-                    Some(if !digits.is_empty() { &digits } else { &safe_raw }),
+                return Some(format!(
+                    "{base_no_hash}/query?where={}&outFields=APN,PARCEL,ADDRESS,LOTAREA,ACREAGE&returnGeometry=false&f=html",
+                    urlencoding::encode(&w_sj)
                 ));
-            } else {
-                "APN,SITUSFULL,YEAR_BUILT,LOTSIZE,ACRES,LAND,IMPR,TRA"
-            };
-            (w, fields)
+            }
+            (w, "APN,SITUSFULL,YEAR_BUILT,FIRST_FLR_SQFT,SECOND_FLR_SQFT,LOTSIZE,ACRES,LAND,IMPR,TRA,ZoningDistrict,TRANS_DATE")
         }
         "06037" if !digits.is_empty() => (
             format!("AIN='{digits}' OR APN='{safe_raw}'"),
@@ -5560,16 +5687,105 @@ pub fn build_arcgis_parcel_html_query_url(
         _ => (format!("APN='{safe_raw}'"), "APN"),
     };
 
-    let q_url = format!(
+    Some(format!(
         "{base_no_hash}/query?where={}&outFields={out_fields}&returnGeometry=false&f=html",
         urlencoding::encode(&where_clause)
-    );
-    let anchor_tok = if !digits.is_empty() && low.contains("campbellca.gov") {
-        digits.as_str()
-    } else {
-        safe_raw.as_str()
-    };
-    Some(with_data_point_anchor(&q_url, None, Some(anchor_tok)))
+    ))
+}
+
+fn strip_census_place_suffix(raw: &str) -> &str {
+    let s = raw.trim();
+    // 1. Exact-case Census Geocoder LSAD suffixes (e.g. "Campbell city" -> "Campbell",
+    //    "Redwood City city" -> "Redwood City", "Oak Park village" -> "Oak Park").
+    for suf in [
+        " charter township",
+        " municipality",
+        " township",
+        " borough",
+        " village",
+        " city",
+        " town",
+        " cdp",
+        " CDP",
+    ] {
+        if let Some(stem) = s.strip_suffix(suf) {
+            let trimmed = stem.trim();
+            if !trimmed.is_empty() {
+                return trimmed;
+            }
+        }
+    }
+    // 2. Case-insensitive fallback when caller already lowercased/uppercased the string,
+    //    preserving real `... City` municipal names ("Redwood City", "Daly City", etc.).
+    let low = s.to_ascii_lowercase();
+    for suf in [
+        " charter township",
+        " municipality",
+        " township",
+        " borough",
+        " village",
+        " town",
+        " cdp",
+    ] {
+        if low.ends_with(suf) && s.len() > suf.len() {
+            let trimmed = s[..s.len() - suf.len()].trim();
+            if !trimmed.is_empty() {
+                return trimmed;
+            }
+        }
+    }
+    if low.ends_with(" city") && s.len() > 5 {
+        let stem = s[..s.len() - 5].trim();
+        let stem_lc = stem.to_ascii_lowercase();
+        let is_real_city_suffix = matches!(
+            stem_lc.as_str(),
+            "redwood"
+                | "daly"
+                | "culver"
+                | "foster"
+                | "union"
+                | "suisun"
+                | "national"
+                | "cathedral"
+                | "yuba"
+                | "king"
+                | "california"
+                | "temple"
+                | "studio"
+                | "universal"
+                | "carson"
+                | "boulder"
+                | "park"
+                | "rapid"
+                | "sioux"
+                | "iowa"
+                | "jefferson"
+                | "traverse"
+                | "bay"
+                | "atlantic"
+                | "ocean"
+                | "virginia"
+                | "panama"
+                | "plant"
+                | "haines"
+                | "dade"
+                | "kansas"
+                | "salt lake"
+                | "jersey"
+                | "oklahoma"
+                | "league"
+                | "missouri"
+                | "texas"
+                | "haltom"
+                | "horizon"
+                | "orange"
+                | "cooper"
+        );
+        if !stem.is_empty() && !is_real_city_suffix {
+            return stem;
+        }
+    }
+    s
 }
 
 fn resolve_city_permit_portal(
@@ -5578,8 +5794,8 @@ fn resolve_city_permit_portal(
     county_name: &str,
     street_line: &str,
 ) -> (String, String, Option<String>) {
-    let city_lc = city_raw
-        .trim()
+    let city_norm = strip_census_place_suffix(city_raw);
+    let city_lc = city_norm
         .to_lowercase()
         .replace('é', "e")
         .replace('.', "");
@@ -5607,23 +5823,23 @@ fn resolve_city_permit_portal(
         )),
         "campbell,ca" => Some((
             "City of Campbell Building Division (MGO)",
-            "https://www.campbellca.gov/161/Building",
-            Some("https://www.campbellca.gov/185/Zoning"),
+            "https://www.mgoconnect.org/cp?JID=187",
+            Some("https://www.campbellca.gov/166/Zoning-and-Land-Use"),
         )),
         "saratoga,ca" => Some(("City of Saratoga Building Permits", "https://www.saratoga.ca.us/164/Building", None)),
-        "los gatos,ca" => Some(("Town of Los Gatos Building Division", "https://www.losgatosca.gov/2122/Building-Division", None)),
+        "los gatos,ca" => Some(("Town of Los Gatos Building Division", "https://www.losgatosca.gov/", None)),
         "cupertino,ca" => Some(("City of Cupertino Accela Permit Center", "https://aca-prod.accela.com/CUPERTINO/", None)),
         "sunnyvale,ca" => Some(("Sunnyvale Permit Center (eOneStop)", "https://www.sunnyvale.ca.gov/homes-streets-and-property/permits-and-development", None)),
         "santa clara,ca" => Some(("City of Santa Clara Permit Center", "https://www.santaclaraca.gov/business-development/permit-center", None)),
         "mountain view,ca" => Some(("Mountain View Permits Online", "https://www.mountainview.gov/our-city/departments/community-development/building", None)),
-        "los altos,ca" => Some(("City of Los Altos eTRAKiT Permits", "https://www.losaltosca.gov/communitydevelopment/page/building-division", None)),
+        "los altos,ca" => Some(("City of Los Altos eTRAKiT Permits", "https://www.losaltosca.gov/", None)),
         "milpitas,ca" => Some(("City of Milpitas Building Safety & Permits", "https://www.milpitas.gov/249/Building-Safety-Housing", None)),
         "palo alto,ca" => Some(("Palo Alto Accela Citizen Access", "https://aca-prod.accela.com/paloalto/", None)),
         "menlo park,ca" => Some(("Menlo Park Online Permit Services", "https://menlopark.gov/Government/Departments/Community-Development/Building-Division", Some(MENLO_PARK_ZONING))),
         "east palo alto,ca" => Some(("East Palo Alto Building Services", "https://www.cityofepa.org/building", None)),
         "redwood city,ca" => Some(("Redwood City eTRAKiT Permit Services", "https://www.redwoodcity.org/departments/community-development-department/building-inspection-and-permits", None)),
-        "burlingame,ca" => Some(("City of Burlingame Building Division", "https://www.burlingame.org/departments/community_development/building_division.php", None)),
-        "san mateo,ca" => Some(("City of San Mateo Permit Center", "https://www.cityofsanmateo.org/171/Building", None)),
+        "burlingame,ca" => Some(("City of Burlingame Building Division", "https://www.burlingame.org/", None)),
+        "san mateo,ca" => Some(("City of San Mateo Permit Center", "https://www.cityofsanmateo.org/", None)),
         "daly city,ca" => Some(("Daly City Building Division", "https://www.dalycity.org/209/Building-Division", None)),
         "south san francisco,ca" => Some(("South San Francisco Construction Permits", "https://www.ssf.net/departments/economic-community-development/building-division", None)),
         "san francisco,ca" => Some((
@@ -5632,14 +5848,14 @@ fn resolve_city_permit_portal(
             Some("https://sfplanninggis.org/pim/"),
         )),
         "walnut creek,ca" => Some(("Walnut Creek Citizen Self Service Permits", "https://www.walnut-creek.org/departments/community-development-department/permits", None)),
-        "concord,ca" => Some(("City of Concord Virtual Permit Center", "https://www.cityofconcord.org/255/Building-Division", None)),
+        "concord,ca" => Some(("City of Concord Virtual Permit Center", "https://www.cityofconcord.org/", None)),
         "san ramon,ca" => Some(("City of San Ramon Permit Center", "https://www.sanramon.ca.gov/our_city/departments_and_divisions/community_development/building_and_safety_services", None)),
         "berkeley,ca" => Some(("Berkeley Permits Online (Accela)", "https://aca.cityofberkeley.info/CitizenAccess/", None)),
         "oakland,ca" => Some(("Oakland Online Permit Center (Accela)", "https://aca-prod.accela.com/OAKLAND/", None)),
         "fremont,ca" => Some(("Fremont Citizen Access Permits", "https://aca-prod.accela.com/FREMONT/", None)),
         "alameda,ca" => Some(("City of Alameda Permit Center", "https://www.alamedaca.gov/Departments/Planning-Building-and-Transportation/Permit-Center", None)),
-        "hayward,ca" => Some(("Hayward e-Permits Portal", "https://www.hayward-ca.gov/services/city-services/building-permits", None)),
-        "pleasanton,ca" => Some(("City of Pleasanton Permit Center", "https://www.cityofpleasantonca.gov/our-government/community-development/building-and-safety/", None)),
+        "hayward,ca" => Some(("Hayward e-Permits Portal", "https://www.hayward-ca.gov/", None)),
+        "pleasanton,ca" => Some(("City of Pleasanton Permit Center", "https://www.cityofpleasantonca.gov/", None)),
         "livermore,ca" => Some(("City of Livermore Permit Center", "https://www.livermoreca.gov/departments/community-development/permit-center", None)),
         "san rafael,ca" => Some(("City of San Rafael Building Division", "https://www.cityofsanrafael.org/departments/building/", None)),
         "mill valley,ca" => Some(("City of Mill Valley Building Department", "https://www.cityofmillvalley.org/200/Building-Department", None)),
@@ -5648,7 +5864,7 @@ fn resolve_city_permit_portal(
             "https://www.ladbsservices2.lacity.org/OnlineServices/",
             Some("https://zimas.lacity.org/"),
         )),
-        "santa monica,ca" => Some(("Santa Monica Citizen Access Permits", "https://aca-prod.accela.com/SMGOV/", None)),
+        "santa monica,ca" => Some(("Santa Monica Citizen Access Permits", "https://www.smgov.net/", None)),
         "pasadena,ca" => Some(("Pasadena Permit Center Online", "https://www.cityofpasadena.net/planning/permit-center/", None)),
         "long beach,ca" => Some(("Long Beach Permit Center", "https://www.longbeach.gov/lbcd/building/permit-center/", None)),
         "glendale,ca" => Some(("Glendale Permits & Inspections", "https://www.glendaleca.gov/government/departments/community-development/building-safety", None)),
@@ -5657,13 +5873,13 @@ fn resolve_city_permit_portal(
         "irvine,ca" => Some(("City of Irvine EZ Online Permitting", "https://www.cityofirvine.org/community-development/building-permits", None)),
         "anaheim,ca" => Some(("Anaheim Permits Online", "https://www.anaheim.net/650/Building-Division", None)),
         "santa ana,ca" => Some(("City of Santa Ana Permit Counter", "https://www.santa-ana.org/building-safety/", None)),
-        "huntington beach,ca" => Some(("Huntington Beach Citizen Access Permits", "https://www.huntingtonbeachca.gov/departments/community_development/building_and_safety/", None)),
+        "huntington beach,ca" => Some(("Huntington Beach Citizen Access Permits", "https://www.huntingtonbeachca.gov/", None)),
         "newport beach,ca" => Some(("Newport Beach CiViC Permits", "https://www.newportbeachca.gov/government/departments/community-development/building-division", None)),
         "sacramento,ca" => Some(("Sacramento Citizen Permit Portal", "https://aca-prod.accela.com/SACRAMENTO/", None)),
         "seattle,wa" => Some((
             "Seattle Services Portal (SDCI)",
             "https://cosaccela.seattle.gov/Portal/",
-            Some("https://web6.seattle.gov/dpd/Maps/dpdgis.aspx"),
+            Some("https://www.seattle.gov/construction-and-inspections"),
         )),
         "bellevue,wa" | "kirkland,wa" | "redmond,wa" | "mercer island,wa" | "sammamish,wa" | "issaquah,wa" | "bothell,wa" | "renton,wa" => {
             Some(("MyBuildingPermit.com (King/Snohomish Eastside)", "https://mybuildingpermit.com/", None))
@@ -5675,7 +5891,7 @@ fn resolve_city_permit_portal(
             Some("https://gisapps.chicago.gov/ZoningMapWeb/"),
         )),
         "evanston,il" => Some(("City of Evanston Citizen Portal", "https://aca-prod.accela.com/EVANSTON/", None)),
-        "oak park,il" => Some(("Village of Oak Park Permit Portal", "https://www.oak-park.us/village-services/permits-licensing", None)),
+        "oak park,il" => Some(("Village of Oak Park Permit Portal", "https://www.oak-park.us/", None)),
         "new york,ny" | "manhattan,ny" | "brooklyn,ny" | "queens,ny" | "bronx,ny" | "staten island,ny" => Some((
             "NYC DOB NOW / BIS Building Information",
             "https://a810-bisweb.nyc.gov/bisweb/bispi00.jsp",
@@ -5698,7 +5914,7 @@ fn resolve_city_permit_portal(
         )),
         "miami,fl" => Some(("City of Miami iBuild Permitting Portal", "https://www.miamigov.com/Permits-Construction", None)),
         "miami beach,fl" => Some(("Miami Beach EnerGov Citizen Self Service", "https://www.miamibeachfl.gov/city-hall/building/", None)),
-        "coral gables,fl" => Some(("Coral Gables Permitting Portal", "https://www.coralgables.com/department/development-services/building-division", None)),
+        "coral gables,fl" => Some(("Coral Gables Permitting Portal", "https://www.coralgables.com/", None)),
         "fort lauderdale,fl" => Some(("Fort Lauderdale LauderBuild", "https://aca-prod.accela.com/FTL/", None)),
         "orlando,fl" => Some(("Orlando OpenCounter & Permitting", "https://www.orlando.gov/Building-Development", None)),
         "tampa,fl" => Some(("Tampa Accela Citizen Access", "https://aca-prod.accela.com/TAMPA/", None)),
@@ -5719,7 +5935,7 @@ fn resolve_city_permit_portal(
         "denver,co" => Some(("Denver e-permits (Accela)", "https://www.denvergov.org/AccelaCitizenAccess/", None)),
         "atlanta,ga" => Some(("Atlanta Accela Permitting Portal", "https://aca-prod.accela.com/ATLANTA_GA/", None)),
         "portland,or" => Some(("Portland Maps Permits & Zoning", "https://www.portlandmaps.com/", Some("https://www.portlandmaps.com/"))),
-        "las vegas,nv" => Some(("Las Vegas Citizen Access Permits", "https://aca-prod.accela.com/LASVEGAS/", None)),
+        "las vegas,nv" => Some(("Las Vegas Citizen Access Permits", "https://www.lasvegasnevada.gov/", None)),
         "minneapolis,mn" => Some(("Minneapolis Property Info & Permits", "https://www2.minneapolismn.gov/business-services/licenses-permits-inspections/", None)),
         _ => None,
     };
@@ -5732,8 +5948,8 @@ fn resolve_city_permit_portal(
         );
     }
 
-    let label = if !city_raw.trim().is_empty() {
-        city_raw.trim()
+    let label = if !city_norm.is_empty() {
+        city_norm
     } else if !county_name.trim().is_empty() {
         county_name.trim()
     } else {
@@ -5741,7 +5957,7 @@ fn resolve_city_permit_portal(
     };
     let q_raw = format!(
         "{} {} official building permit lookup",
-        city_raw.trim(),
+        city_norm,
         state_up.trim()
     );
     let q = urlencoding::encode(&q_raw);
@@ -5767,7 +5983,7 @@ pub fn resolve_official_record_links(
 ) -> OfficialRecordLinks {
     let fips = county_fips.trim();
     let st = state.trim().to_ascii_uppercase();
-    let city_trim = city.trim();
+    let city_trim = strip_census_place_suffix(city);
     let city_lc = city_trim.to_lowercase().replace('é', "e");
     let county_lbl = if !county_name.trim().is_empty() {
         county_name.trim()
@@ -5806,7 +6022,7 @@ pub fn resolve_official_record_links(
     ) = match fips {
         "06085" => {
             let (g_name, g_url) = if city_lc.contains("campbell") {
-                ("City of Campbell Enterprise Parcels GIS", CAMPBELL_PARCELS)
+                ("City of Campbell Enterprise Parcels GIS", CAMPBELL_PARCEL_VIEWER)
             } else if city_lc.contains("san jose") {
                 ("City of San José Open Data Parcels GIS", SJ_PARCELS)
             } else {
@@ -5814,14 +6030,33 @@ pub fn resolve_official_record_links(
             };
             if zoning_portal_url.is_none() && city_lc.contains("san jose") {
                 zoning_portal_url = Some(SJ_ZONING.to_string());
+            } else if zoning_portal_url.is_none() && city_lc.contains("campbell") {
+                zoning_portal_url = Some(CAMPBELL_PARCEL_VIEWER.to_string());
             }
+            let scc_apn_dashed = if apn_digits.len() == 8 {
+                Some(format!(
+                    "{}-{}-{}",
+                    &apn_digits[..3],
+                    &apn_digits[3..5],
+                    &apn_digits[5..8]
+                ))
+            } else {
+                apn_clean.map(String::from)
+            };
+            let scc_teller_url = match scc_apn_dashed.as_deref() {
+                Some(dash) if !dash.is_empty() => format!(
+                    "https://santaclaracounty.telleronline.net/search/1/details?APN={}",
+                    urlencoding::encode(dash)
+                ),
+                _ => "https://santaclaracounty.telleronline.net/search/1".to_string(),
+            };
             (
-                "Santa Clara County Assessor Parcel Search".into(),
-                "https://www.sccassessor.org/".into(),
+                "Santa Clara County Assessor & Property Tax Parcel Lookup".into(),
+                scc_teller_url.clone(),
                 "Santa Clara County Tax Collector (DTAC)".into(),
-                "https://payments.sccgov.org/propertytax".into(),
+                scc_teller_url,
                 "Santa Clara County Clerk-Recorder Official Records".into(),
-                "https://clerkrecorder.sccgov.org/".into(),
+                "https://clerkrecorder.santaclaracounty.gov/".into(),
                 Some(g_name),
                 Some(g_url),
             )
@@ -5892,7 +6127,7 @@ pub fn resolve_official_record_links(
             "Contra Costa County Assessor Parcel Search".into(),
             "https://www.contracosta.ca.gov/191/Assessor".into(),
             "Contra Costa County Treasurer-Tax Collector".into(),
-            "https://www.contracosta.ca.gov/193/Treasurer-Tax-Collector".into(),
+            "https://www.contracosta.ca.gov/".into(),
             "Contra Costa County Clerk-Recorder".into(),
             "https://www.contracostacore.us/recorder".into(),
             Some("Contra Costa CCMAP Assessment Parcels GIS"),
@@ -5902,7 +6137,7 @@ pub fn resolve_official_record_links(
             "Marin County Parcel Information (MarinMap)".into(),
             "https://www.marincounty.gov/departments/assessor-recorder-county-clerk/property-assessment".into(),
             "Marin County Tax Collector".into(),
-            "https://www.marincounty.gov/departments/department-finance/property-tax-division".into(),
+            "https://www.marincounty.gov/departments/finance".into(),
             "Marin County Assessor-Recorder-County Clerk".into(),
             "https://www.marincounty.gov/departments/assessor-recorder-county-clerk".into(),
             Some("Marin County Parcels GIS"),
@@ -5996,16 +6231,16 @@ pub fn resolve_official_record_links(
                 "Philadelphia Department of Records / Atlas Deeds".into(),
                 phila_deeds_url,
                 Some("OpenDataPhilly OPA Properties API"),
-                Some("https://www.opendataphilly.org/datasets/opa-property-assessments/"),
+                Some("https://opendataphilly.org/datasets/"),
             )
         }
         "42003" => (
             "Allegheny County Real Estate Assessment Portal".into(),
             "https://www2.alleghenycounty.us/RealEstate/".into(),
             "Allegheny County Treasurer Real Estate Tax".into(),
-            "https://alleghenycountytreasurer.us/real-estate-tax/".into(),
+            "https://www.alleghenycountytreasurer.us/".into(),
             "Allegheny County Dept. of Real Estate (Deeds & Mortgages)".into(),
-            "https://www.alleghenycounty.us/Government/Departments-and-Offices/Department-of-Real-Estate".into(),
+            "https://www.alleghenycounty.us/".into(),
             Some("Allegheny County Parcels GIS"),
             Some(ALLEGHENY_COUNTY_PARCELS),
         ),
@@ -6033,7 +6268,7 @@ pub fn resolve_official_record_links(
                 "Maricopa County Recorder Recorded Documents".into(),
                 "https://recorder.maricopa.gov/recdocdata/".into(),
                 Some("Maricopa County Assessor Parcels GIS"),
-                Some(MARICOPA_PARCELS),
+                Some(MARICOPA_PARCEL_VIEWER),
             )
         }
         "48453" => {
@@ -6098,7 +6333,7 @@ pub fn resolve_official_record_links(
                     "City of Cambridge Property Database".into(),
                     "https://www.cambridgema.gov/PropertyDatabase".into(),
                     "City of Cambridge Real Estate Tax".into(),
-                    "https://www.cambridgema.gov/Services/realestatebill".into(),
+                    "https://www.cambridgema.gov/Departments/finance".into(),
                     "Middlesex South Registry of Deeds".into(),
                     "https://www.masslandrecords.com/MiddlesexSouth/".into(),
                 )
@@ -6107,7 +6342,7 @@ pub fn resolve_official_record_links(
                     "City of Boston Assessing Online".into(),
                     "https://www.cityofboston.gov/assessing/search/".into(),
                     "City of Boston Collector-Treasurer".into(),
-                    "https://www.boston.gov/departments/collector".into(),
+                    "https://www.boston.gov/departments/treasury".into(),
                     "Suffolk County Registry of Deeds".into(),
                     "https://www.masslandrecords.com/Suffolk/".into(),
                 )
@@ -6196,11 +6431,12 @@ pub fn resolve_official_record_links(
         .then_some(street_line)
         .or(apn_clean);
 
-    let assessor_url = with_data_point_anchor(&assessor_url, None, apn_or_street);
-    let tax_collector_url = with_data_point_anchor(&tax_collector_url, None, apn_or_street);
-    let recorder_url = with_data_point_anchor(&recorder_url, None, apn_or_street);
-    let permit_portal_url = with_data_point_anchor(&permit_portal_url, None, street_or_apn);
-    let zoning_portal_url = zoning_portal_url.map(|zu| with_data_point_anchor(&zu, None, street_or_apn));
+    let assessor_url = with_verified_data_anchor(&assessor_url, None, apn_or_street);
+    let tax_collector_url = with_verified_data_anchor(&tax_collector_url, None, apn_or_street);
+    let recorder_url = with_verified_data_anchor(&recorder_url, None, apn_or_street);
+    let permit_portal_url = with_verified_data_anchor(&permit_portal_url, None, street_or_apn);
+    let zoning_portal_url =
+        zoning_portal_url.map(|zu| with_verified_data_anchor(&zu, None, street_or_apn));
 
     OfficialRecordLinks {
         assessor_name,
@@ -6397,11 +6633,11 @@ fn stamp_public_record_provenance(
         let gis_ds_url = links
             .gis_parcel_query_url
             .as_deref()
-            .map(|gu| with_data_point_anchor(gu, None, val_hint.as_deref()))
+            .map(|gu| with_verified_data_anchor(gu, None, val_hint.as_deref()))
             .or_else(|| {
                 ep_url
                     .as_deref()
-                    .map(|eu| with_data_point_anchor(eu, None, val_hint.as_deref()))
+                    .map(|eu| with_verified_data_anchor(eu, None, val_hint.as_deref()))
             });
         let (src_name, raw_src_url, ds_url) = match key {
             "taxRate" => {
@@ -6493,7 +6729,7 @@ fn stamp_public_record_provenance(
                 (primary_name.clone(), best_url, gis_ds_url)
             }
         };
-        let src_url = with_data_point_anchor(&raw_src_url, None, val_hint.as_deref());
+        let src_url = with_verified_data_anchor(&raw_src_url, None, val_hint.as_deref());
         let mut entry = json!({
             "source": src_name,
             "url": src_url,
@@ -6512,7 +6748,7 @@ fn stamp_public_record_provenance(
         ls_obj
             .entry("sourceName")
             .or_insert_with(|| json!(links.recorder_name));
-        let anchored_rec = with_data_point_anchor(&links.recorder_url, None, ls_hint.as_deref());
+        let anchored_rec = with_verified_data_anchor(&links.recorder_url, None, ls_hint.as_deref());
         ls_obj
             .entry("sourceUrl")
             .or_insert_with(|| json!(anchored_rec));
@@ -6536,12 +6772,12 @@ fn stamp_public_record_provenance(
                 } else {
                     primary_url.as_str()
                 };
-                let anchored_tax_u = with_data_point_anchor(base_tax_u, None, yr_hint.as_deref());
+                let anchored_tax_u = with_verified_data_anchor(base_tax_u, None, yr_hint.as_deref());
                 ro.entry("sourceUrl")
                     .or_insert_with(|| json!(anchored_tax_u));
                 if let Some(ref g_url) = links.gis_parcel_query_url.as_ref().or(ep_url.as_ref()) {
                     ro.entry("datasetUrl").or_insert_with(|| {
-                        json!(with_data_point_anchor(g_url, None, yr_hint.as_deref()))
+                        json!(with_verified_data_anchor(g_url, None, yr_hint.as_deref()))
                     });
                 }
             }
@@ -6561,7 +6797,7 @@ fn stamp_public_record_provenance(
                 po.entry("sourceName")
                     .or_insert_with(|| json!(links.permit_portal_name.clone()));
                 let anchored_p =
-                    with_data_point_anchor(&links.permit_portal_url, None, p_hint.as_deref());
+                    with_verified_data_anchor(&links.permit_portal_url, None, p_hint.as_deref());
                 po.entry("sourceUrl").or_insert_with(|| json!(anchored_p));
             }
         }
@@ -6583,7 +6819,7 @@ fn stamp_public_record_provenance(
                 co.entry("sourceName")
                     .or_insert_with(|| json!(links.permit_portal_name.clone()));
                 let anchored_ce =
-                    with_data_point_anchor(&links.permit_portal_url, None, ce_hint.as_deref());
+                    with_verified_data_anchor(&links.permit_portal_url, None, ce_hint.as_deref());
                 co.entry("sourceUrl").or_insert_with(|| json!(anchored_ce));
             }
         }
@@ -7031,6 +7267,82 @@ mod parcel_outline_tests {
         assert!(!house_location_is_guess(&json!({ "refined": { "basis": "OSM building with matching address tags" } })));
         // Reports generated before `basis` existed keep the previous behaviour (containment trusted).
         assert!(!house_location_is_guess(&json!({ "refined": { "lat": 1.0, "lon": 2.0 } })));
+    }
+
+    #[test]
+    fn unit_designator_picks_the_exact_townhome_unit_parcel_inside_a_complex() {
+        // `Unit P` must not leak into `street_keyword_of` as `"UNIT"`.
+        let (num, core) = parse_street("236 West Synthrincon Ave Unit P, Campbell, CA 95008");
+        assert_eq!(num, "236");
+        assert_eq!(street_keyword_of(&core), "SYNTHRINCON");
+        let k = AddrKey::parse("236 West Synthrincon Ave Unit P, Campbell, CA 95008");
+        assert_eq!((k.number.as_str(), k.street_kw.as_str(), k.unit.as_str()), ("236", "SYNTHRINCON", "P"));
+
+        // Street-interpolated query point sits right next to Unit B at the street frontage, while Unit P
+        // and Unit S lie 55 m south in the interior courtyard row.
+        let (lat, lon) = (37.28480, -121.95397);
+        let (b_lat, b_lon) = offset(lat, lon, 0.0, -12.0);
+        let (p_lat, p_lon) = offset(lat, lon, -14.0, -55.0);
+        let (s_lat, s_lon) = offset(lat, lon, -14.0, -35.0);
+        let unit_b = rect_feature(
+            b_lat,
+            b_lon,
+            6.0,
+            12.0,
+            json!({ "APN": "30550002", "SITUSFULL": "236 W SYNTHRINCON AV B" }),
+        );
+        let unit_p = rect_feature(
+            p_lat,
+            p_lon,
+            6.0,
+            12.0,
+            json!({ "APN": "30550014", "SITUSFULL": "236 W SYNTHRINCON AV P" }),
+        );
+        let unit_s = rect_feature(
+            s_lat,
+            s_lon,
+            6.0,
+            12.0,
+            json!({ "APN": "30550017", "SITUSFULL": "236 W SYNTHRINCON AV S" }),
+        );
+        let common = rect_feature(
+            offset(lat, lon, 4.0, -40.0).0,
+            offset(lat, lon, 4.0, -40.0).1,
+            40.0,
+            55.0,
+            json!({ "APN": "30550999", "SITUSFULL": "236 W SYNTHRINCON AV" }),
+        );
+        let feats = vec![unit_b, unit_p, unit_s, common];
+
+        let hit_p = pick_best_polygon_feature(
+            &feats,
+            lat,
+            lon,
+            "236 West Synthrincon Ave Unit P, Campbell, CA 95008",
+        )
+        .expect("Unit P parcel");
+        assert_eq!(hit_p.a["APN"], "30550014");
+        assert_eq!(hit_p.matched, ParcelMatch::Address);
+
+        let hit_s = pick_best_polygon_feature(
+            &feats,
+            lat,
+            lon,
+            "236 W Synthrincon Ave #S, Campbell, CA 95008",
+        )
+        .expect("Unit S parcel");
+        assert_eq!(hit_s.a["APN"], "30550017");
+        assert_eq!(hit_s.matched, ParcelMatch::Address);
+
+        // Bare complex address without a unit continues to pick the front unit nearest the point.
+        let hit_bare = pick_best_polygon_feature(
+            &feats,
+            lat,
+            lon,
+            "236 Synthrincon Ave, Campbell, CA 95008",
+        )
+        .expect("front parcel");
+        assert_eq!(hit_bare.a["APN"], "30550002");
     }
 
     #[test]

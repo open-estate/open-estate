@@ -1028,9 +1028,12 @@
         chips.push({ text: L3(ai.sellerQuestions.length + ' seller questions →', ai.sellerQuestions.length + ' 个向卖家提问 →', ai.sellerQuestions.length + ' preguntas al vendedor →'), target: 'ai' });
       }
 
+      var shareActHtml = window.__CLOUD_SHARING_ENABLED__ === true
+        ? '<button type="button" class="rb-act pri" data-rb-act="share">' + esc(L3('Share link', '分享链接', 'Compartir')) + '</button>'
+        : '';
       actionsHtml =
         '<div class="rb-acts">' +
-          '<button type="button" class="rb-act pri" data-rb-act="share">' + esc(L3('Share link', '分享链接', 'Compartir')) + '</button>' +
+          shareActHtml +
           '<button type="button" class="rb-act" data-rb-act="walkthrough">' + esc(L3('▶ Walkthrough deck', '▶ 导览幻灯', '▶ Presentación')) + '</button>' +
           '<button type="button" class="rb-act" data-rb-act="video">' + esc(L3('Video tour', '视频导览', 'Video')) + '</button>' +
           '<button type="button" class="rb-act" data-rb-act="print">' + esc(L3('Print / PDF', '打印 PDF', 'Imprimir PDF')) + '</button>' +
@@ -1232,6 +1235,11 @@
     syncStickyHeaderVars();
     resizeChartsAndMaps();
     updateHorizontalScrollFades();
+    try {
+      if (typeof window !== 'undefined' && typeof window.dispatchEvent === 'function' && typeof CustomEvent === 'function') {
+        window.dispatchEvent(new CustomEvent('openestate:rolechange', { detail: { role: getRole() } }));
+      }
+    } catch (e3) {}
     return r;
   }
 
@@ -3190,7 +3198,7 @@
     var dLat = 0.0075, dLon = 0.0105;
     var minX = (lon - dLon).toFixed(6), minY = (lat - dLat).toFixed(6);
     var maxX = (lon + dLon).toFixed(6), maxY = (lat + dLat).toFixed(6);
-    return 'https://basemap.nationalmap.gov/arcgis/rest/services/USGSImageryTopo/MapServer/export?bbox=' +
+    return 'https://basemap.nationalmap.gov/arcgis/rest/services/USGSTopo/MapServer/export?bbox=' +
       minX + ',' + minY + ',' + maxX + ',' + maxY +
       '&bboxSR=4326&imageSR=3857&size=' + w + ',' + h + '&format=jpg&f=image';
   }
@@ -3260,8 +3268,8 @@
       },
       {
         id: 'parcel-street',
-        url: hasHighResExport ? satelliteAerialExportUrl(satMeta, lat, lon, 0.00065, 0.0009, 1600, 1080, 19) : usgsExportUrl('USGSImageryTopo', lat, lon, 0.00065, 0.0009, 1440, 960),
-        thumbUrl: hasHighResExport ? satelliteAerialExportUrl(satMeta, lat, lon, 0.00065, 0.0009, 960, 648, 18) : usgsExportUrl('USGSImageryTopo', lat, lon, 0.00065, 0.0009, 960, 640),
+        url: hasHighResExport ? satelliteAerialExportUrl(satMeta, lat, lon, 0.00065, 0.0009, 1600, 1080, 19) : usgsExportUrl('USGSTopo', lat, lon, 0.00065, 0.0009, 1440, 960),
+        thumbUrl: hasHighResExport ? satelliteAerialExportUrl(satMeta, lat, lon, 0.00065, 0.0009, 960, 648, 18) : usgsExportUrl('USGSTopo', lat, lon, 0.00065, 0.0009, 960, 640),
         category: 'street',
         roomTag: L3('Street Frontage & Setbacks', '临街面与建筑退界', 'Frente de Calle y Linderos'),
         caption: L3('Street corridor, curb frontage, and surrounding parcel layout', '街道走廊、临街朝向与相邻地块格局', 'Corredor vial, frente y distribución de lotes'),
@@ -3284,8 +3292,8 @@
       },
       {
         id: 'topo-grade',
-        url: usgsExportUrl('USGSImageryTopo', lat, lon, 0.0018, 0.0025, 1440, 960),
-        thumbUrl: usgsExportUrl('USGSImageryTopo', lat, lon, 0.0018, 0.0025, 960, 640),
+        url: usgsExportUrl('USGSTopo', lat, lon, 0.0018, 0.0025, 1440, 960),
+        thumbUrl: usgsExportUrl('USGSTopo', lat, lon, 0.0018, 0.0025, 960, 640),
         category: 'exterior',
         roomTag: L3('Topography & Lot Grading', '地形等高线与排水地势', 'Topografía y Pendiente'),
         caption: L3('USGS contour & elevation context around the lot', '宗地周边地形起伏、等高线与自然水系走向', 'Curvas de nivel USGS y elevación del lote'),
@@ -3328,6 +3336,8 @@
       var rawThumb = it.thumbUrl || it.url || fbUrl;
       if (isFileProto && String(rawUrl).indexOf('/api/') === 0) rawUrl = fbUrl;
       if (isFileProto && String(rawThumb).indexOf('/api/') === 0) rawThumb = fbUrl;
+      rawUrl = String(rawUrl).replace(/\/USGSImageryTopo\/MapServer\b/g, '/USGSTopo/MapServer');
+      rawThumb = String(rawThumb).replace(/\/USGSImageryTopo\/MapServer\b/g, '/USGSTopo/MapServer');
       var needsRegionalTopo = hasCoords && (String(rawUrl).indexOf('USGSShadedReliefOnly') !== -1 || String(rawThumb).indexOf('USGSShadedReliefOnly') !== -1);
       var itemUrl = needsRegionalTopo ? usgsRegionalTopoUrl(lat, lon, 1440, 960) : rawUrl;
       var itemThumb = needsRegionalTopo ? usgsRegionalTopoUrl(lat, lon, 960, 640) : rawThumb;
@@ -5954,8 +5964,33 @@
 
   function safeHttpUrl(u) {
     if (!u || typeof u !== 'string') return '';
+    if (typeof window !== 'undefined' && typeof window.safeHttpUrl === 'function') {
+      return window.safeHttpUrl(u) || '';
+    }
     var s = u.trim();
     return /^https?:\/\//i.test(s) ? s : '';
+  }
+
+  function refLinkAttrs(rawUrl, section, dataId, label) {
+    var direct = safeHttpUrl(rawUrl);
+    if (!direct) return '';
+    var href = direct;
+    if (typeof window !== 'undefined' && typeof window.toReferenceRedirectUrl === 'function') {
+      href = window.toReferenceRedirectUrl(direct, {
+        section: section || 'workspace',
+        dataId: dataId || '',
+        label: label || ''
+      }) || direct;
+    } else if (typeof window !== 'undefined' && window.location && /^https?:$/i.test(window.location.protocol)) {
+      var rep = getRep();
+      var slug = (rep && rep.meta && rep.meta.slug) ? String(rep.meta.slug).trim() : '';
+      var q = 'type=extension_reference&data_id=' + encodeURIComponent(dataId || 'workspace_reference') +
+        (slug ? '&slug=' + encodeURIComponent(slug) : '') +
+        '&section=' + encodeURIComponent(section || 'workspace') +
+        '&ref=' + encodeURIComponent(direct);
+      href = '/redirect?' + q;
+    }
+    return 'href="' + esc(href) + '" data-direct-url="' + esc(direct) + '"';
   }
 
   function statusPillCls(raw) {
@@ -5982,9 +6017,9 @@
     var lit = r.litigationAndDockets || {};
     var wp = uf.whoPaysCustom || {};
 
-    var rateUrl = safeHttpUrl(uf.filingUrl);
-    var recUrl = li.recorderPortal && safeHttpUrl(li.recorderPortal.url);
-    var taxUrl = li.recorderPortal && safeHttpUrl(li.recorderPortal.taxCollectorUrl);
+    var rateAttrs = refLinkAttrs(uf.filingUrl, 'title_legal', 'title_underwriter_rates', uf.regulator || 'Filing reference');
+    var recAttrs = li.recorderPortal && refLinkAttrs(li.recorderPortal.url, 'title_legal', 'county_recorder', li.recorderPortal.name || 'County Recorder');
+    var taxAttrs = li.recorderPortal && refLinkAttrs(li.recorderPortal.taxCollectorUrl, 'title_legal', 'county_tax_collector', li.recorderPortal.taxCollectorName || 'Tax Collector');
 
     var lienGuidance = role === 'seller' ? li.sellerActionGuidance : role === 'agent' ? li.agentActionGuidance : li.buyerActionGuidance;
     var fcGuidance = role === 'seller' ? fc.sellerCureNote : role === 'agent' ? fc.agentEscrowNote : fc.buyerLeverageNote;
@@ -6016,9 +6051,9 @@
     if (hits.length) {
       docketsHtml = '<ul style="margin:8px 0 0;padding-left:18px;font-size:12.4px;color:var(--ink2)">' +
         hits.map(function (d) {
-          var du = safeHttpUrl(d.url);
+          var dAttrs = refLinkAttrs(d.url, 'title_legal', 'court_litigation_dockets', d.title || 'Docket');
           var ttl = esc(cleanPublicText(d.title || 'Docket'));
-          return '<li style="margin-bottom:4px">' + (du ? '<a href="' + esc(du) + '" target="_blank" rel="noopener">' + ttl + '</a>' : ttl) +
+          return '<li style="margin-bottom:4px">' + (dAttrs ? '<a ' + dAttrs + ' target="_blank" rel="noopener noreferrer">' + ttl + '</a>' : ttl) +
             (d.court ? ' · ' + esc(cleanPublicText(d.court)) : '') + (d.dateFiled ? ' (' + esc(d.dateFiled) + ')' : '') + '</li>';
         }).join('') + '</ul>';
     } else if (lit.coverageNote) {
@@ -6058,7 +6093,7 @@
               span3('Buyer ≈ ', '买家 ≈ ', 'Comprador ≈ ') + esc(isN(wp.buyerEstimatedTitleEscrowUsd) ? fUsd(wp.buyerEstimatedTitleEscrowUsd) : '—') + ' · ' +
               span3('Seller ≈ ', '卖家 ≈ ', 'Vendedor ≈ ') + esc(isN(wp.sellerEstimatedTitleEscrowUsd) ? fUsd(wp.sellerEstimatedTitleEscrowUsd) : '—') + '</div>'
             : (wp.note || wp.customSummary ? '<div class="small" style="margin-top:6px">' + span3('Local Who-Pays Custom:', '当地惯例分摊：', 'Costumbre local:') + ' ' + esc(cleanPublicText(wp.note || wp.customSummary)) + '</div>' : '')) +
-          (uf.regulator || rateUrl ? '<div class="small" style="margin-top:6px">' + esc(cleanPublicText(uf.regulator || '')) + (rateUrl ? ' · <a href="' + esc(rateUrl) + '" target="_blank" rel="noopener">' + span3('Filing reference', '费率备案出处', 'Referencia tarifaria') + '</a>' : '') + '</div>' : '') +
+          (uf.regulator || rateAttrs ? '<div class="small" style="margin-top:6px">' + esc(cleanPublicText(uf.regulator || '')) + (rateAttrs ? ' · <a ' + rateAttrs + ' target="_blank" rel="noopener noreferrer">' + span3('Filing reference', '费率备案出处', 'Referencia tarifaria') + '</a>' : '') + '</div>' : '') +
         '</div>' +
 
         '<div class="studio-subcard">' +
@@ -6071,7 +6106,7 @@
           '</div>' +
           recordsHtml + flagsHtml +
           (lienGuidance ? '<div class="small" style="margin-top:8px"><b>' + span3('Role Action:', '角色行动建议：', 'Acción recomendada:') + '</b> ' + esc(cleanPublicText(lienGuidance)) + '</div>' : '') +
-          (recUrl || taxUrl ? '<div class="small" style="margin-top:6px">' + (recUrl ? '<a href="' + esc(recUrl) + '" target="_blank" rel="noopener">' + esc(cleanPublicText((li.recorderPortal && li.recorderPortal.name) || L3('County Recorder', '县记录局', 'Registro del condado'))) + '</a>' : '') + (recUrl && taxUrl ? ' · ' : '') + (taxUrl ? '<a href="' + esc(taxUrl) + '" target="_blank" rel="noopener">' + esc(cleanPublicText((li.recorderPortal && li.recorderPortal.taxCollectorName) || L3('Tax Collector', '税务局', 'Recaudador fiscal'))) + '</a>' : '') + '</div>' : '') +
+          (recAttrs || taxAttrs ? '<div class="small" style="margin-top:6px">' + (recAttrs ? '<a ' + recAttrs + ' target="_blank" rel="noopener noreferrer">' + esc(cleanPublicText((li.recorderPortal && li.recorderPortal.name) || L3('County Recorder', '县记录局', 'Registro del condado'))) + '</a>' : '') + (recAttrs && taxAttrs ? ' · ' : '') + (taxAttrs ? '<a ' + taxAttrs + ' target="_blank" rel="noopener noreferrer">' + esc(cleanPublicText((li.recorderPortal && li.recorderPortal.taxCollectorName) || L3('Tax Collector', '税务局', 'Recaudador fiscal'))) + '</a>' : '') + '</div>' : '') +
         '</div>' +
 
         '<div class="studio-subcard">' +
@@ -6144,8 +6179,8 @@
     var ev = el.evLevel2Charging || {};
     var hp = el.heatPumpComparison || {};
     var sb = el.solarAndBatteryPayback || {};
-    var portalUrl = safeHttpUrl(fc.municipalPortalUrl);
-    var fccUrl = safeHttpUrl(m5.fccMobileMapUrl);
+    var portalAttrs = refLinkAttrs(fc.municipalPortalUrl, 'living_intel', 'city_permits', fc.municipalPortalName || 'City Planning Portal');
+    var fccAttrs = refLinkAttrs(m5.fccMobileMapUrl, 'living_intel', 'fcc_mobile_5g', 'FCC Broadband Map');
 
     var hasCarrierPcts = m5.available !== false && carriers.some(function (c) { return isN(c.outdoor5gNr35x3) || isN(c.outdoor4gLte5x1); });
     var m5Unavail = m5.status === 'unavailable' || m5.status === 'unconfigured' || m5.available === false || /unavail|unconfig/i.test(String(m5.provenance || ''));
@@ -6188,7 +6223,7 @@
           '</div>' +
           (overlays.length ? '<div class="small" style="margin-top:6px"><b>' + span3('Applicable Overlays:', '适用法定叠加条款：', 'Normas aplicables:') + '</b> ' + esc(overlays.map(function (o) { return humanRadarEnum(o.code || o.title); }).join(', ')) + '</div>' : '') +
           projHtml +
-          (portalUrl ? '<div class="small" style="margin-top:6px"><a href="' + esc(portalUrl) + '" target="_blank" rel="noopener">' + esc(cleanPublicText(fc.municipalPortalName || L3('City Planning Portal', '市政规划官网', 'Portal municipal'))) + '</a></div>' : '') +
+          (portalAttrs ? '<div class="small" style="margin-top:6px"><a ' + portalAttrs + ' target="_blank" rel="noopener noreferrer">' + esc(cleanPublicText(fc.municipalPortalName || L3('City Planning Portal', '市政规划官网', 'Portal municipal'))) + '</a></div>' : '') +
         '</div>' +
 
         '<div class="studio-subcard">' +
@@ -6203,7 +6238,7 @@
               (ns.schoolCurbCongestion && ns.schoolCurbCongestion.flaggedWithin250m ? ' · ' + span3('School curb bell traffic (<250m)', '250 米内含上下学接送高峰', 'Tráfico escolar (<250 m)') : '') +
               '</div>'
             : '') +
-          (fccUrl ? '<div class="small" style="margin-top:6px"><a href="' + esc(fccUrl) + '" target="_blank" rel="noopener">' + span3('Open FCC Broadband Map', '查看 FCC 信号地图', 'Ver mapa FCC') + '</a></div>' : '') +
+          (fccAttrs ? '<div class="small" style="margin-top:6px"><a ' + fccAttrs + ' target="_blank" rel="noopener noreferrer">' + span3('Open FCC Broadband Map', '查看 FCC 信号地图', 'Ver mapa FCC') + '</a></div>' : '') +
         '</div>' +
 
         '<div class="studio-subcard">' +
@@ -6710,7 +6745,18 @@
         return res;
       };
     }
+
+    try {
+      if (_initRoleInfo && _initRoleInfo.fromUrl && typeof window !== 'undefined' && typeof window.dispatchEvent === 'function' && typeof CustomEvent === 'function') {
+        window.dispatchEvent(new CustomEvent('openestate:rolechange', { detail: { role: getRole() } }));
+      }
+    } catch (e4) {}
   }
+
+  window.OpenEstateRole = {
+    getRole: getRole,
+    setRole: setRole
+  };
 
   window.OpenEstateWorkspace = {
     setRole: setRole,

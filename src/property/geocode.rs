@@ -45,7 +45,47 @@ static RE_DE_PARTICLE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\bDe\b").unwrap()
 static RE_UNIT_SUFFIX: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r"(?i)(?:,?\s*(?:apt|apartment|unit|ste|suite|fl|floor|rm|room|bldg)\b\.?\s*[a-z0-9-]+|,?\s*#\s*[a-z0-9-]+)").unwrap()
 });
+static RE_UNIT_CAPTURE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"(?i)(?:,?\s*\b(apt|apartment|unit|ste|suite|fl|floor|rm|room|bldg)\b\.?\s*([a-z0-9-]+)|,?\s*#\s*([a-z0-9-]+))").unwrap()
+});
 static RE_MULTI_SPACE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\s+").unwrap());
+
+/// Extracts a normalized display unit designator (`Unit P`, `Apt 4B`, `Ste 200`, `#P`) when the
+/// caller's input address explicitly carried one, so sub-addresses in townhome/condo complexes do
+/// not collapse onto the bare building street address.
+fn extract_unit_display(input: &str) -> Option<String> {
+    let caps = RE_UNIT_CAPTURE.captures(input)?;
+    if let (Some(kind), Some(val)) = (caps.get(1), caps.get(2)) {
+        let label = match kind.as_str().to_ascii_lowercase().as_str() {
+            "apt" | "apartment" => "Apt",
+            "unit" => "Unit",
+            "ste" | "suite" => "Ste",
+            "fl" | "floor" => "Fl",
+            "rm" | "room" => "Rm",
+            "bldg" => "Bldg",
+            _ => "Unit",
+        };
+        let v = val.as_str().trim().to_ascii_uppercase();
+        (!v.is_empty()).then(|| format!("{label} {v}"))
+    } else {
+        let v = caps.get(3)?.as_str().trim().to_ascii_uppercase();
+        (!v.is_empty()).then(|| format!("#{v}"))
+    }
+}
+
+fn attach_unit_to_display_address(display_address: String, input: &str) -> String {
+    let Some(unit_disp) = extract_unit_display(input) else {
+        return display_address;
+    };
+    if RE_UNIT_CAPTURE.is_match(&display_address) {
+        return display_address;
+    }
+    if let Some((street, rest)) = display_address.split_once(',') {
+        format!("{} {},{}", street.trim_end(), unit_disp, rest)
+    } else {
+        format!("{} {}", display_address.trim_end(), unit_disp)
+    }
+}
 
 fn first_geo<'a>(geos: &'a serde_json::Map<String, Value>, names: &[&str]) -> Option<&'a Value> {
     for &n in names {
@@ -515,7 +555,7 @@ pub async fn geocode_address(http: &HttpClient, address: &str) -> Result<ModuleO
             .and_then(|v| v.as_str())
             .unwrap_or(trimmed)
             .to_string();
-        let disp_addr = format_census_display_address(&m);
+        let disp_addr = attach_unit_to_display_address(format_census_display_address(&m), trimmed);
         let tl = m.get("tigerLine");
         let ac = m.get("addressComponents");
         let data = build_geocode_payload(
@@ -558,7 +598,8 @@ pub async fn geocode_address(http: &HttpClient, address: &str) -> Result<ModuleO
                             .map(|s| s.to_string())
                     })
                     .unwrap_or_else(|| trimmed.to_string());
-                let (disp_full, _, _) = split_us_address(&match_addr);
+                let (disp_full_base, _, _) = split_us_address(&match_addr);
+                let disp_full = attach_unit_to_display_address(disp_full_base, trimmed);
                 let city = str_field(attrs, "City").map(|s| title_case(&s));
                 let state = str_field(attrs, "RegionAbbr").map(|s| s.to_uppercase());
                 let zip = str_field(attrs, "Postal");
@@ -626,24 +667,19 @@ pub async fn geocode_address(http: &HttpClient, address: &str) -> Result<ModuleO
             .and_then(|s| s.strip_prefix("US-"))
             .map(|s| s.to_uppercase());
         let zip = str_field(addr_obj, "postcode").map(|z| z.chars().take(5).collect::<String>());
-        let disp_full = [
-            Some(format!("{house_num} {road}").trim().to_string()),
-            city.clone(),
-            Some(
-                format!(
-                    "{} {}",
-                    state.as_deref().unwrap_or(""),
-                    zip.as_deref().unwrap_or("")
-                )
-                .trim()
-                .to_string(),
-            ),
-        ]
-        .into_iter()
-        .flatten()
-        .filter(|s| !s.is_empty())
-        .collect::<Vec<_>>()
-        .join(", ");
+        let disp_full = attach_unit_to_display_address(
+            [
+                Some(format!("{house_num} {road}").trim().to_string()),
+                city.clone(),
+                Some(format!("{} {}", state.as_deref().unwrap_or(""), zip.as_deref().unwrap_or("")).trim().to_string()),
+            ]
+            .into_iter()
+            .flatten()
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
+            .join(", "),
+            trimmed,
+        );
 
         let mut coords_geos: Option<Value> = None;
         if let Ok((coords_url, cj)) = census_coordinates(http, lat, lon).await {
@@ -796,13 +832,16 @@ pub async fn geocode_from_coordinates(
         ));
     }
 
-    let disp_full = if !disp_full_raw.is_empty() {
-        disp_full_raw
-    } else if !primary_street.is_empty() {
-        primary_street
-    } else {
-        trimmed.to_string()
-    };
+    let disp_full = attach_unit_to_display_address(
+        if !disp_full_raw.is_empty() {
+            disp_full_raw
+        } else if !primary_street.is_empty() {
+            primary_street
+        } else {
+            trimmed.to_string()
+        },
+        trimmed,
+    );
 
     warnings.push(format!(
         "Resolved parcel coordinates via {source_label} and attached official U.S. Census geographies by coordinate."
@@ -827,4 +866,34 @@ pub async fn geocode_from_coordinates(
         sources,
         warnings,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unit_designator_is_preserved_in_display_address_without_altering_bare_addresses() {
+        assert_eq!(
+            attach_unit_to_display_address(
+                "236 Synthrincon Ave, Campbell, CA 95008".to_string(),
+                "236 West Synthrincon Ave Unit P, Campbell, CA 95008"
+            ),
+            "236 Synthrincon Ave Unit P, Campbell, CA 95008"
+        );
+        assert_eq!(
+            attach_unit_to_display_address(
+                "236 Synthrincon Ave, Campbell, CA 95008".to_string(),
+                "236 Synthrincon Ave, #4B, Campbell, CA 95008"
+            ),
+            "236 Synthrincon Ave #4B, Campbell, CA 95008"
+        );
+        assert_eq!(
+            attach_unit_to_display_address(
+                "236 Synthrincon Ave, Campbell, CA 95008".to_string(),
+                "236 Synthrincon Ave, Campbell, CA 95008"
+            ),
+            "236 Synthrincon Ave, Campbell, CA 95008"
+        );
+    }
 }

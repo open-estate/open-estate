@@ -2587,6 +2587,7 @@ dependencies = [
  "urlencoding",
  "uuid",
  "world_magnetic_model",
+ "zstd",
 ]
 
 [[package]]

@@ -241,6 +241,8 @@ message ManifestSourceAttributionProto {
   string url = 2;
   optional string schedule_or_version = 3;
   optional string notes = 4;
+  // Property-context-interpolated human-viewable reference URL template (`{{lat}}`, `{{lon}}`, `{{address_urlencoded}}`, `{{apn}}`, etc.).
+  string reference_url_template = 5;
 }
 
 // OpenAPI 3.x operation binding (`openapi` / `openapi_operation`).

@@ -20,8 +20,8 @@ use crate::extensions::shared_cache::{
 };
 use crate::property::deep_research::fetch_municipal_open_data_stage1;
 use crate::property::permits_condition::{classify_permit_category, normalize_permit_record};
-use crate::property::public_records::{parse_street, street_keyword_of, with_data_point_anchor};
-use crate::shared::{round_n, EnvConfig, HttpClient, SourceItem};
+use crate::property::public_records::{extract_unit_token, parse_street, street_keyword_of};
+use crate::shared::{round_n, with_verified_data_anchor, EnvConfig, HttpClient, SourceItem};
 use anyhow::{anyhow, Result};
 use chrono::Datelike;
 use once_cell::sync::Lazy;
@@ -286,7 +286,9 @@ pub async fn fetch_campbell_address_point(
         )
         .await
         .ok()?;
+    let unit_want = extract_unit_token(address);
     let feats = res.get("features").and_then(|v| v.as_array())?;
+    let mut fallback: Option<CampbellAddressPoint> = None;
     for f in feats {
         let Some(attrs) = f.get("attributes") else {
             continue;
@@ -310,14 +312,28 @@ pub async fn fetch_campbell_address_point(
                 .filter(|c| c.is_ascii_alphanumeric())
                 .collect::<String>()
         });
-        return Some(CampbellAddressPoint {
+        let candidate = CampbellAddressPoint {
             apn: apn.filter(|s| !s.is_empty()),
-            full_address: full_addr,
+            full_address: full_addr.clone(),
             lat,
             lon,
-        });
+        };
+        if let Some(ref want_u) = unit_want {
+            let feat_unit = json_str(attrs.get("UnitNumber"))
+                .map(|s| s.trim().to_ascii_uppercase())
+                .filter(|s| !s.is_empty())
+                .or_else(|| extract_unit_token(&full_addr));
+            if feat_unit.as_deref() == Some(want_u.as_str()) {
+                return Some(candidate);
+            }
+            if fallback.is_none() {
+                fallback = Some(candidate);
+            }
+            continue;
+        }
+        return Some(candidate);
     }
-    None
+    fallback
 }
 
 /// Resolves distinct street addresses registered to `apn_digits` in Campbell `Addresses/MapServer/0`
@@ -555,19 +571,12 @@ pub async fn fetch_campbell_mgo_bundle_with_env(
                 .clone()
                 .or_else(|| applied_dt.clone())
                 .or_else(|| json_str(p.get("Year")));
-            let where_num = format!("ProjectNumber='{}'", esc_sql(&num));
-            let q_enc = urlencoding::encode(&where_num);
-            let ds_url = with_data_point_anchor(
-                &format!(
-                    "{layer_url}/query?where={q_enc}&outFields={p_fields}&returnGeometry=false&f=html"
-                ),
-                None,
-                Some(&num),
-            );
+            let _ = layer_url;
+            let ds_url = "https://cityofcampbell.maps.arcgis.com/apps/instant/portfolio/index.html?appid=94865b6a1fbc49c293c0d854ee9d7593".to_string();
             let portal_url = if div_default == "Planning Division" {
-                "https://www.campbellca.gov/181/Planning"
+                "https://www.campbellca.gov/163/Planning"
             } else {
-                "https://www.campbellca.gov/161/Building"
+                "https://www.mgoconnect.org/cp?JID=187"
             };
             let work_type = json_str(p.get("WorkType"))
                 .or_else(|| json_str(p.get("DesignationType")))
@@ -593,7 +602,7 @@ pub async fn fetch_campbell_mgo_bundle_with_env(
                 "sourceVerified": true,
                 "sourceName": format!("City of Campbell {div_default} (MGO GIS)"),
                 "sourceUrl": ds_url,
-                "permitPortalUrl": with_data_point_anchor(portal_url, None, Some(&num)),
+                "permitPortalUrl": with_verified_data_anchor(portal_url, None, Some(&num)),
                 "datasetUrl": ds_url,
             });
             if let Some(norm) = normalize_permit_record(
@@ -643,15 +652,8 @@ pub async fn fetch_campbell_mgo_bundle_with_env(
             if !seen_ce.insert(num.clone()) {
                 continue;
             }
-            let where_num = format!("ProjectNumber='{}'", esc_sql(&num));
-            let q_enc = urlencoding::encode(&where_num);
-            let ds_url = with_data_point_anchor(
-                &format!(
-                    "{layer_url}/query?where={q_enc}&outFields={p_fields}&returnGeometry=false&f=html"
-                ),
-                None,
-                Some(&num),
-            );
+            let _ = (layer_url, p_fields);
+            let ds_url = "https://cityofcampbell.maps.arcgis.com/apps/instant/portfolio/index.html?appid=94865b6a1fbc49c293c0d854ee9d7593".to_string();
             bundle.code_items.push(json!({
                 "number": num,
                 "open": is_open,
@@ -663,7 +665,7 @@ pub async fn fetch_campbell_mgo_bundle_with_env(
                 "description": json_str(p.get("ProjectDescription")).or_else(|| json_str(p.get("WorkType"))),
                 "sourceName": "City of Campbell Code Enforcement GIS",
                 "sourceUrl": ds_url,
-                "permitPortalUrl": with_data_point_anchor("https://www.campbellca.gov/199/Code-Enforcement", None, Some(&num)),
+                "permitPortalUrl": with_verified_data_anchor("https://www.campbellca.gov/134/Code-Enforcement", None, Some(&num)),
                 "datasetUrl": ds_url,
             }));
         }
@@ -672,7 +674,7 @@ pub async fn fetch_campbell_mgo_bundle_with_env(
     if !bundle.permits.is_empty() || bundle.code_checked {
         bundle.sources.push(SourceItem::new(
             "City of Campbell Building, Planning & Code Enforcement GIS (MGO)",
-            "https://www.campbellca.gov/161/Building",
+            "https://www.mgoconnect.org/cp?JID=187",
         ));
     }
     bundle
@@ -1552,7 +1554,7 @@ impl DataExtensionAdapter for CampbellMgoPermitsAdapter {
             persist_city_permit_dataset_page(
                 &city_q,
                 "City of Campbell MGO GIS",
-                "https://www.campbellca.gov/161/Building",
+                "https://www.mgoconnect.org/cp?JID=187",
                 &records,
                 !bundle.queried_layers.is_empty(),
             )
@@ -1561,14 +1563,14 @@ impl DataExtensionAdapter for CampbellMgoPermitsAdapter {
             Ok(vec![wrap_envelope(
                 &m,
                 "City of Campbell Building & Planning GIS (MGO)",
-                "https://www.campbellca.gov/161/Building",
+                "https://www.mgoconnect.org/cp?JID=187",
                 500,
                 t0.elapsed().as_millis().min(u32::MAX as u128) as u32,
                 Payload::PermitsHistory(PermitsHistoryProto {
                     permits: records,
                     sources_checked: vec!["campbell_mgo_gis".into()],
                     portal_name: "City of Campbell MGO GIS".into(),
-                    portal_url: "https://www.campbellca.gov/161/Building".into(),
+                    portal_url: "https://www.mgoconnect.org/cp?JID=187".into(),
                     coverage_complete: !bundle.queried_layers.is_empty(),
                     queried_layers: bundle.queried_layers,
                     open_code_enforcement_count: Some(open_ce),
@@ -1644,18 +1646,22 @@ impl DataExtensionAdapter for MunicipalOpenDataPermitsAdapter {
                 records.push(rec);
             }
             let pname = portal_name.unwrap_or_else(|| "Municipal Open Data Portal".to_string());
+            let purl = sources
+                .first()
+                .map(|s| s.url.clone())
+                .unwrap_or_else(|| "https://www.iccsafe.org/".to_string());
             let m = self.manifest();
             Ok(vec![wrap_envelope(
                 &m,
                 &pname,
-                "",
+                &purl,
                 400,
                 t0.elapsed().as_millis().min(u32::MAX as u128) as u32,
                 Payload::PermitsHistory(PermitsHistoryProto {
                     permits: records,
                     sources_checked: vec![pname.clone()],
                     portal_name: pname.clone(),
-                    portal_url: String::new(),
+                    portal_url: purl.clone(),
                     coverage_complete: true,
                     queried_layers: Vec::new(),
                     open_code_enforcement_count: None,
@@ -1740,6 +1746,15 @@ impl DataExtensionAdapter for ShovelsPermitsAdapter {
 }
 
 /// Stage-2 Roof Lifecycle Extractor (`depends_on` Stage-1 permit fetchers).
+fn upstream_stage1_source_url<'a>(envelopes: &'a [ExtensionEnvelopeProto], default_url: &'a str) -> &'a str {
+    envelopes
+        .iter()
+        .filter_map(|e| e.attribution.as_ref())
+        .map(|a| a.source_url.trim())
+        .find(|u| !u.is_empty())
+        .unwrap_or(default_url)
+}
+
 pub struct PermitRoofExtractorAdapter;
 
 impl DataExtensionAdapter for PermitRoofExtractorAdapter {
@@ -1757,11 +1772,12 @@ impl DataExtensionAdapter for PermitRoofExtractorAdapter {
         let upstream_permits = permits_from_upstream(&query.upstream_envelopes);
         let yb = query.year_built.map(|y| y as i32);
         let roof = extract_roof_lifecycle(&upstream_permits, yb, None, None, chrono::Utc::now().year());
+        let src_url = upstream_stage1_source_url(&query.upstream_envelopes, "https://www.iccsafe.org/");
         let m = self.manifest();
         Ok(vec![wrap_envelope(
             &m,
             "Linked Stage-2 Permit Roof Lifecycle Extractor",
-            "",
+            src_url,
             500,
             0,
             Payload::RoofIntel(roof),
@@ -1786,11 +1802,12 @@ impl DataExtensionAdapter for PermitSolarExtractorAdapter {
     fn execute_sync(&self, query: &ExtensionQueryProto) -> Result<Vec<ExtensionEnvelopeProto>> {
         let upstream_permits = permits_from_upstream(&query.upstream_envelopes);
         let solar = extract_solar_pv(&upstream_permits);
+        let src_url = upstream_stage1_source_url(&query.upstream_envelopes, "https://www.iccsafe.org/");
         let m = self.manifest();
         Ok(vec![wrap_envelope(
             &m,
             "Linked Stage-2 Solar PV Permit Extractor",
-            "",
+            src_url,
             500,
             0,
             Payload::SolarIntel(solar),
@@ -1815,11 +1832,12 @@ impl DataExtensionAdapter for PermitMepExtractorAdapter {
     fn execute_sync(&self, query: &ExtensionQueryProto) -> Result<Vec<ExtensionEnvelopeProto>> {
         let upstream_permits = permits_from_upstream(&query.upstream_envelopes);
         let mep = extract_mep_intel(&upstream_permits);
+        let src_url = upstream_stage1_source_url(&query.upstream_envelopes, "https://www.iccsafe.org/");
         let m = self.manifest();
         Ok(vec![wrap_envelope(
             &m,
             "Linked Stage-2 MEP Permit Extractor",
-            "",
+            src_url,
             500,
             0,
             Payload::MepIntel(mep),
@@ -1844,11 +1862,12 @@ impl DataExtensionAdapter for PermitRemodelExtractorAdapter {
     fn execute_sync(&self, query: &ExtensionQueryProto) -> Result<Vec<ExtensionEnvelopeProto>> {
         let upstream_permits = permits_from_upstream(&query.upstream_envelopes);
         let remodel = extract_remodel_intel(&upstream_permits);
+        let src_url = upstream_stage1_source_url(&query.upstream_envelopes, "https://www.iccsafe.org/");
         let m = self.manifest();
         Ok(vec![wrap_envelope(
             &m,
             "Linked Stage-2 Remodel & ADU Extractor",
-            "",
+            src_url,
             500,
             0,
             Payload::RemodelIntel(remodel),
@@ -1876,11 +1895,12 @@ impl DataExtensionAdapter for PermitCodeEnforcementExtractorAdapter {
             .filter(|p| effective_category(p) == "code_enforcement")
             .collect();
         let ce = extract_code_enforcement_intel(&upstream_cases);
+        let src_url = upstream_stage1_source_url(&query.upstream_envelopes, "https://www.iccsafe.org/");
         let m = self.manifest();
         Ok(vec![wrap_envelope(
             &m,
             "Linked Stage-2 Code Enforcement Extractor",
-            "",
+            src_url,
             500,
             0,
             Payload::CodeEnforcementIntel(ce),
@@ -2195,7 +2215,7 @@ mod tests {
             lon: Some(-121.9500),
             ..Default::default()
         };
-        let portal_url = "https://www.campbellca.gov/161/Building";
+        let portal_url = "https://www.mgoconnect.org/cp?JID=187";
         let cursor = city_permit_page_cursor(portal_url, &query);
         let permits = vec![PermitRecordProto {
             permit_number: "BLD-SYNTH-2026-1".into(),

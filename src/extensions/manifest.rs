@@ -367,6 +367,8 @@ pub struct SourceAttributionYaml {
     pub schedule_or_version: Option<String>,
     #[serde(default)]
     pub notes: Option<String>,
+    #[serde(default)]
+    pub reference_url_template: Option<String>,
 }
 
 impl SourceAttributionYaml {
@@ -376,6 +378,8 @@ impl SourceAttributionYaml {
             url: p.url.clone(),
             schedule_or_version: p.schedule_or_version.clone(),
             notes: p.notes.clone(),
+            reference_url_template: (!p.reference_url_template.trim().is_empty())
+                .then(|| p.reference_url_template.trim().to_string()),
         }
     }
 }

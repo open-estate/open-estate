@@ -114,7 +114,7 @@ async fn test_1_user_profiles_and_match_feedback_ddl_heatwave_and_migration_pari
             .find(|s| s.contains(&format!("CREATE TABLE IF NOT EXISTS {tbl}")))
             .unwrap_or_else(|| panic!("Missing MySQL DDL for {tbl}"));
         assert!(my_stmt.contains("PRIMARY KEY"));
-        assert!(my_stmt.contains("LONGTEXT"));
+        assert!(!my_stmt.contains("LONGTEXT"));
         assert!(
             my_stmt.contains("ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci")
         );
@@ -143,8 +143,8 @@ async fn test_1_user_profiles_and_match_feedback_ddl_heatwave_and_migration_pari
         assert!(fn_res.contains("AS new_row ON DUPLICATE KEY UPDATE"));
         assert!(!fn_res.contains("VALUES("));
     }
-    assert!(build_user_profile_upsert("sqlite").contains("ON CONFLICT(user_id) DO UPDATE SET"));
-    assert!(build_match_feedback_upsert("sqlite").contains("ON CONFLICT(id) DO UPDATE SET"));
+    assert!(build_user_profile_upsert("sqlite").contains("ON CONFLICT(user_sk) DO UPDATE SET"));
+    assert!(build_match_feedback_upsert("sqlite").contains("ON CONFLICT(feedback_sk) DO UPDATE SET"));
 
     let src_path = temp_sqlite_path("src");
     let dst_path = temp_sqlite_path("dst");

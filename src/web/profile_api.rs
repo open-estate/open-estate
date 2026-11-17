@@ -7,6 +7,7 @@
 //! with zero protected demographic fields, and computes deterministic weight-adjustment suggestions
 //! from saved vs dismissed home feedback.
 
+use crate::db::proto::{buyer_profile_from_proto, buyer_profile_to_proto, unix_ts_to_iso};
 use crate::db::MatchFeedbackRow;
 use crate::guardrails::{
     clean_untrusted_text, enforce_allowed_body_keys, verify_same_origin, GuardrailError,
@@ -15,7 +16,7 @@ use crate::scoring::profile::{Profile, ALLOWED_PROFILE_KEYS};
 use crate::search::matcher::{
     parse_dimension_snapshot, suggest_weight_adjustments, FeedbackAction, FeedbackSample,
 };
-use crate::shared::now_iso;
+use crate::shared::{now_iso, now_unix_secs};
 use crate::web::server::{
     json_response, map_anyhow, map_guardrail, parse_json_body, req_host_str, ApiResult, AppState,
 };
@@ -194,8 +195,8 @@ fn parse_and_validate_profile(profile_val: &Value) -> std::result::Result<Profil
 }
 
 /// `GET /api/me/profile`
-/// Reads `X-User-Id` (or `?userId=` / `?sessionKey=`), returning the saved profile JSON or a
-/// 404 payload with `promptUploadLocalProfile: true` so clients can offer browser `localStorage` upload.
+/// Reads `X-User-Id` (or `?userId=` / `?sessionKey=`), returning the saved profile JSON from typed
+/// `user_profiles` + `user_profile_places` tables or a 404 payload with `promptUploadLocalProfile: true`.
 pub async fn handle_get_my_profile(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -206,9 +207,9 @@ pub async fn handle_get_my_profile(
         .map_err(map_guardrail)?;
     state.db.ensure_schema().await.map_err(map_anyhow)?;
 
-    let Some(row) = state
+    let Some(up) = state
         .db
-        .get_user_profile(&user_id)
+        .get_user_profile_proto(&user_id)
         .await
         .map_err(map_anyhow)?
     else {
@@ -226,27 +227,26 @@ pub async fn handle_get_my_profile(
         ));
     };
 
-    let profile_val: Value =
-        serde_json::from_str(&row.profile_json).unwrap_or_else(|_| json!({}));
+    let profile = buyer_profile_from_proto(&up);
 
     Ok(json_response(
         StatusCode::OK,
         json!({
             "ok": true,
             "found": true,
-            "userId": row.user_id,
-            "version": row.version,
+            "userId": up.user_id,
+            "version": up.version,
             "promptUploadLocalProfile": false,
-            "profile": profile_val,
-            "updatedAt": row.updated_at,
-            "createdAt": row.created_at,
+            "profile": profile,
+            "updatedAt": unix_ts_to_iso(up.updated_ts),
+            "createdAt": unix_ts_to_iso(up.created_ts),
         }),
     ))
 }
 
 /// `PUT /api/me/profile`
-/// Validates `Profile::from_json` / `Profile::validate()`, persists to `user_profiles`, and returns
-/// the saved profile document.
+/// Validates `Profile::from_json` / `Profile::validate()`, persists directly as typed `UserProfileProto`
+/// into `user_profiles` + `user_profile_places`, and returns the saved profile document.
 pub async fn handle_put_my_profile(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -275,11 +275,23 @@ pub async fn handle_put_my_profile(
     };
 
     let profile = parse_and_validate_profile(profile_val)?;
-    let canonical_json = serde_json::to_string(&profile).map_err(|e| map_anyhow(e.into()))?;
-
-    let saved = state
+    let existing = state
         .db
-        .upsert_user_profile(&user_id, &canonical_json, i64::from(profile.version))
+        .get_user_profile_proto(&user_id)
+        .await
+        .map_err(map_anyhow)?;
+    let now_ts = now_unix_secs();
+    let created_ts = existing
+        .as_ref()
+        .map(|e| e.created_ts)
+        .filter(|&t| t > 0)
+        .unwrap_or(now_ts);
+    let user_sk = existing.as_ref().map(|e| e.user_sk).unwrap_or(0);
+    let up = buyer_profile_to_proto(user_sk, &user_id, &profile, created_ts, now_ts);
+
+    let _ = state
+        .db
+        .upsert_user_profile_proto(&up)
         .await
         .map_err(map_anyhow)?;
 
@@ -287,11 +299,11 @@ pub async fn handle_put_my_profile(
         StatusCode::OK,
         json!({
             "ok": true,
-            "userId": saved.user_id,
-            "version": saved.version,
+            "userId": up.user_id,
+            "version": up.version,
             "profile": profile,
-            "updatedAt": saved.updated_at,
-            "createdAt": saved.created_at,
+            "updatedAt": unix_ts_to_iso(now_ts),
+            "createdAt": unix_ts_to_iso(created_ts),
         }),
     ))
 }
@@ -408,11 +420,11 @@ pub async fn handle_post_match_feedback(
         p
     } else if let Some(stored) = state
         .db
-        .get_user_profile(&user_id)
+        .get_user_profile_proto(&user_id)
         .await
         .map_err(map_anyhow)?
     {
-        Profile::from_json(&stored.profile_json).unwrap_or_default()
+        buyer_profile_from_proto(&stored)
     } else {
         Profile::default()
     };

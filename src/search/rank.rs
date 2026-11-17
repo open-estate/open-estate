@@ -5,7 +5,10 @@
 // matrices via `RoutingClient`, scores deterministically via `scoring::engine::rank_with`, and
 // optionally kicks off background Tier-2 `ScanEngine` deep reports for the top uncached homes.
 
-use crate::db::{score_to_school_grade, sanitize_area_inputs, DbStore, ListingFactorsRow, ListingRow};
+use crate::db::{
+    sanitize_area_inputs, score_to_school_grade, DbRowExt, DbStore, ListingCoreProto,
+    ListingFactorsRow, SqlParam,
+};
 use crate::modules::commute::{LatLon, RoutingClient, RoutingConfig};
 use crate::scanner::engine::{
     canonical_address_slug, BatchScanRequest, DynScanRunner, ScanEngine, ScanPriority, ScanTask,
@@ -17,7 +20,8 @@ use crate::scoring::engine::{
 use crate::scoring::factors::HomeFactors;
 use crate::scoring::profile::Profile;
 use crate::search::light_scan::{
-    hydrate_from_cached_report, light_scan_listings, LightScanOptions,
+    fetch_report_headers_concurrent, hydrate_factors_from_report_header,
+    resolve_area_factors_for_cores, HydrateListingCtx, LightScanOptions,
 };
 use crate::search::sync::sync_areas_on_demand;
 use crate::shared::{now_iso, round_n, EnvConfig, HttpClient};
@@ -33,6 +37,8 @@ use uuid::Uuid;
 const MAX_AREA_CANDIDATES: usize = 2_000;
 const MAX_DEEP_REFINE_TOP_N: usize = 10;
 const MAX_REGISTRY_JOBS: usize = 256;
+
+const LISTING_CORE_COLS: &str = "listing_sk, external_id, report_slug, zip, state_code, county_fips, city, street, address, lat, lon, status, property_category, price, list_price, sold_price, estimated_value, price_per_sqft, hoa_monthly, all_in_monthly, beds, baths, sqft, lot_sqft, year_built, stories, days_on_market, listed_epoch_day, sold_epoch_day, school_score, school_grade, walk_score, safety_score, overall_score, electric_rate_kwh, max_download_mbps, tag_bits, known_bits, first_seen_ts, last_seen_ts, status_changed_ts, price_changed_ts";
 
 static GLOBAL_RANK_REGISTRY: Lazy<Arc<RankJobRegistry>> =
     Lazy::new(|| Arc::new(RankJobRegistry::new()));
@@ -313,14 +319,26 @@ pub async fn rank_area_with_registry(
         Some(v) => Some(v.clone()),
     };
 
-    let candidates = db
-        .query_listings_in_areas(
+    let (sql, params, had_profile_bounds) = build_rank_candidate_cores_sql(
+        db,
+        &clean_zips,
+        &clean_cities,
+        effective_statuses.as_deref(),
+        Some(&req.profile),
+        MAX_AREA_CANDIDATES,
+    );
+    let mut candidates = db.search_listing_cores(&sql, &params).await?;
+    if candidates.is_empty() && had_profile_bounds {
+        let (fb_sql, fb_params, _) = build_rank_candidate_cores_sql(
+            db,
             &clean_zips,
             &clean_cities,
             effective_statuses.as_deref(),
-            MAX_AREA_CANDIDATES,
-        )
-        .await?;
+            None,
+            100,
+        );
+        candidates = db.search_listing_cores(&fb_sql, &fb_params).await?;
+    }
 
     let mut ls_opts = req.light_scan_options.clone().unwrap_or_default();
     if ls_opts.tile_cache.is_none() {
@@ -329,14 +347,14 @@ pub async fn rank_area_with_registry(
         }
     }
 
-    let ls_res = light_scan_listings(db, http, env, &candidates, &ls_opts).await?;
+    let ls_res = resolve_area_factors_for_cores(db, http, env, &candidates, &ls_opts).await?;
     warnings.extend(ls_res.warnings);
 
     // Build CommuteMatrix across all candidate listings x up to 3 profile places.
     let home_coords: Vec<LatLon> = candidates
         .iter()
         .map(|l| {
-            let row_opt = ls_res.rows.get(&l.id);
+            let row_opt = ls_res.rows.get(&l.external_id);
             let lat = l.lat.or_else(|| row_opt.and_then(|r| r.lat));
             let lon = l.lon.or_else(|| row_opt.and_then(|r| r.lon));
             match (lat, lon) {
@@ -373,9 +391,9 @@ pub async fn rank_area_with_registry(
                     // Feed free-flow minutes into scoring::engine::CommuteMatrix; the engine multiplies
                     // by `profile.traffic_buffer` internally.
                     if dt.estimated {
-                        score_commute.set_estimated(&listing.id, p_idx, dt.free_flow_min);
+                        score_commute.set_estimated(&listing.external_id, p_idx, dt.free_flow_min);
                     } else {
-                        score_commute.set(&listing.id, p_idx, dt.free_flow_min);
+                        score_commute.set(&listing.external_id, p_idx, dt.free_flow_min);
                     }
                     estimates.push(AreaCommuteEstimate {
                         label: place.label.clone(),
@@ -391,7 +409,7 @@ pub async fn rank_area_with_registry(
                 }
             }
             if !estimates.is_empty() {
-                commute_meta_by_id.insert(listing.id.clone(), estimates);
+                commute_meta_by_id.insert(listing.external_id.clone(), estimates);
             }
         }
     }
@@ -402,9 +420,9 @@ pub async fn rank_area_with_registry(
         .iter()
         .map(|l| {
             factors_map
-                .get(&l.id)
+                .get(&l.external_id)
                 .cloned()
-                .unwrap_or_else(|| HomeFactors::from_listing_row(l))
+                .unwrap_or_else(|| HomeFactors::from_listing_core(l))
         })
         .collect();
 
@@ -419,21 +437,23 @@ pub async fn rank_area_with_registry(
     truncate_rank_result(&mut rank_res, req.limit);
 
     let listings_meta = build_ranked_listings_meta(
+        db,
         &candidates,
         &rank_res,
         &lf_rows_map,
         &commute_meta_by_id,
-    );
+    )
+    .await?;
 
     let job_id = format!("rank-{}", Uuid::new_v4().simple());
     let now = now_iso();
 
-    let refine_targets: Vec<(ListingRow, String)> = if req.trigger_deep_scan && scan_engine.is_some()
-    {
-        pick_deep_refine_targets(&rank_res, &candidates, &lf_rows_map, MAX_DEEP_REFINE_TOP_N)
-    } else {
-        Vec::new()
-    };
+    let refine_targets: Vec<(ListingCoreProto, String)> =
+        if req.trigger_deep_scan && scan_engine.is_some() {
+            pick_deep_refine_targets(&rank_res, &candidates, &lf_rows_map, MAX_DEEP_REFINE_TOP_N)
+        } else {
+            Vec::new()
+        };
 
     let mut out = AreaRankResult {
         job_id: job_id.clone(),
@@ -460,7 +480,7 @@ pub async fn rank_area_with_registry(
         let tasks: Vec<ScanTask> = refine_targets
             .iter()
             .map(|(l, slug)| {
-                let row_opt = lf_rows_map.get(&l.id);
+                let row_opt = lf_rows_map.get(&l.external_id);
                 let mut t = ScanTask::new(&l.address);
                 t.slug = slug.clone();
                 t.lat = l.lat.or_else(|| row_opt.and_then(|r| r.lat));
@@ -521,8 +541,8 @@ fn spawn_tier2_refinement_task(
     registry: Arc<RankJobRegistry>,
     job_id: String,
     batch_id: String,
-    refine_targets: Vec<(ListingRow, String)>,
-    candidates: Vec<ListingRow>,
+    refine_targets: Vec<(ListingCoreProto, String)>,
+    candidates: Vec<ListingCoreProto>,
     mut factors_map: HashMap<String, HomeFactors>,
     mut lf_rows_map: HashMap<String, ListingFactorsRow>,
     score_commute: CommuteMatrix,
@@ -561,32 +581,49 @@ fn spawn_tier2_refinement_task(
             }
         }
 
-        let mut to_upsert = Vec::new();
-        let mut to_backfill = Vec::new();
-        let mut refined_ids = Vec::new();
-
-        for (listing, slug) in &refine_targets {
-            let mut rec_opt = db.get_cached_report(slug).await.ok().flatten();
-            if rec_opt.is_none() {
-                let canon = canonical_address_slug(&listing.address);
-                if canon != *slug {
-                    rec_opt = db.get_cached_report(&canon).await.ok().flatten();
-                }
+        let mut target_slugs = Vec::with_capacity(refine_targets.len() * 2);
+        for (core, slug) in &refine_targets {
+            if !slug.is_empty() {
+                target_slugs.push(slug.clone());
             }
-            if let Some(rec) = rec_opt {
-                let (factors, lf_row, maybe_bf) = hydrate_from_cached_report(listing, &rec);
-                factors_map.insert(listing.id.clone(), factors);
-                lf_rows_map.insert(listing.id.clone(), lf_row.clone());
-                to_upsert.push(lf_row);
-                if let Some(bf) = maybe_bf {
-                    to_backfill.push(bf);
-                }
-                refined_ids.push(listing.id.clone());
+            let canon = canonical_address_slug(&core.address);
+            if !canon.is_empty() && canon != *slug {
+                target_slugs.push(canon);
             }
         }
 
-        if !to_upsert.is_empty() {
-            let _ = db.upsert_listing_factors_batch(&to_upsert).await;
+        let headers_map = fetch_report_headers_concurrent(&db, &target_slugs)
+            .await
+            .unwrap_or_default();
+
+        let mut to_upsert_protos = Vec::new();
+        let mut to_backfill = Vec::new();
+        let mut refined_ids = Vec::new();
+
+        for (core, slug) in &refine_targets {
+            let hdr_opt = headers_map.get(slug).or_else(|| {
+                let canon = canonical_address_slug(&core.address);
+                headers_map.get(&canon)
+            });
+            let Some(hdr) = hdr_opt else {
+                continue;
+            };
+            let ctx = HydrateListingCtx::from_core(core);
+            if let Ok((factors, row_proto, prov_proto, lf_row, maybe_bf)) =
+                hydrate_factors_from_report_header(&db, &ctx, hdr).await
+            {
+                factors_map.insert(core.external_id.clone(), factors);
+                lf_rows_map.insert(core.external_id.clone(), lf_row);
+                to_upsert_protos.push((row_proto, Some(prov_proto)));
+                if let Some(bf) = maybe_bf {
+                    to_backfill.push(bf);
+                }
+                refined_ids.push(core.external_id.clone());
+            }
+        }
+
+        if !to_upsert_protos.is_empty() {
+            let _ = db.upsert_home_factors_proto_batch(&to_upsert_protos).await;
         }
         if !to_backfill.is_empty() {
             let _ = db.backfill_listing_summary_fields(&to_backfill).await;
@@ -594,38 +631,158 @@ fn spawn_tier2_refinement_task(
 
         let factors_vec: Vec<HomeFactors> = candidates
             .iter()
-            .filter_map(|l| factors_map.get(&l.id).cloned())
+            .filter_map(|l| factors_map.get(&l.external_id).cloned())
             .collect();
         let mut new_rank = rank_with(&profile, &factors_vec, &score_commute, &rank_opts);
         new_rank.localize(lang);
         truncate_rank_result(&mut new_rank, limit);
 
-        let new_meta = build_ranked_listings_meta(
+        if let Ok(new_meta) = build_ranked_listings_meta(
+            &db,
             &candidates,
             &new_rank,
             &lf_rows_map,
             &commute_meta_by_id,
-        );
-
-        registry.update(&job_id, |job| {
-            job.stage = RankStage::Complete;
-            job.refined_done = target_count;
-            job.refined_ids = refined_ids;
-            job.ranked = new_rank;
-            job.listings = new_meta;
-            job.updated_at = now_iso();
-        });
+        )
+        .await
+        {
+            registry.update(&job_id, |job| {
+                job.stage = RankStage::Complete;
+                job.refined_done = target_count;
+                job.refined_ids = refined_ids;
+                job.ranked = new_rank;
+                job.listings = new_meta;
+                job.updated_at = now_iso();
+            });
+        } else {
+            registry.update(&job_id, |job| {
+                job.stage = RankStage::Complete;
+                job.refined_done = target_count;
+                job.refined_ids = refined_ids;
+                job.ranked = new_rank;
+                job.updated_at = now_iso();
+            });
+        }
     });
+}
+
+fn build_rank_candidate_cores_sql(
+    db: &DbStore,
+    clean_zips: &[String],
+    clean_cities: &[(String, Option<String>)],
+    statuses: Option<&[String]>,
+    profile: Option<&Profile>,
+    limit: usize,
+) -> (String, Vec<SqlParam>, bool) {
+    let hint = db.rapid_query_hint_for_scan(clean_zips.len(), !clean_cities.is_empty());
+    let is_mysql = db.dialect() == "mysql";
+    let mut params: Vec<SqlParam> = Vec::new();
+    let mut where_parts: Vec<String> = Vec::new();
+
+    if clean_zips.is_empty() && clean_cities.is_empty() {
+        where_parts.push("1 = 0".to_string());
+    } else {
+        let mut loc_or: Vec<String> = Vec::new();
+        if !clean_zips.is_empty() {
+            let ph = vec!["?"; clean_zips.len()].join(", ");
+            for z in clean_zips {
+                params.push(SqlParam::from(z.as_str()));
+            }
+            loc_or.push(format!("zip IN ({ph})"));
+        }
+        for (city, st_opt) in clean_cities {
+            let city_clause = if is_mysql {
+                params.push(SqlParam::from(city.as_str()));
+                "city = ?".to_string()
+            } else {
+                params.push(SqlParam::Text(city.to_ascii_lowercase()));
+                "LOWER(city) = ?".to_string()
+            };
+            if let Some(st) = st_opt {
+                let st_up = st.to_ascii_uppercase();
+                params.push(SqlParam::Text(st_up));
+                let st_clause = if is_mysql {
+                    "state_code = ?"
+                } else {
+                    "UPPER(state_code) = ?"
+                };
+                loc_or.push(format!("({city_clause} AND {st_clause})"));
+            } else {
+                loc_or.push(city_clause);
+            }
+        }
+        where_parts.push(format!("({})", loc_or.join(" OR ")));
+    }
+
+    if let Some(st_list) = statuses.filter(|s| !s.is_empty()) {
+        let codes: Vec<i64> = st_list
+            .iter()
+            .map(|s| crate::db::proto::listing_status_to_code(Some(s)) as i64)
+            .collect();
+        let ph = vec!["?"; codes.len()].join(", ");
+        for code in codes {
+            params.push(SqlParam::I64(code));
+        }
+        where_parts.push(format!("status IN ({ph})"));
+    }
+
+    let mut had_profile_bounds = false;
+    if let Some(prof) = profile {
+        // Generous price ceiling (COST_CURVE utility hits 0.0 at 1.25x max_price; 1.35x preserves all
+        // positive-utility and borderline homes plus NULL-price listings while pruning extreme outliers).
+        if let Some(max_p) = prof.budget.max_price.filter(|p| p.is_finite() && *p > 0.0) {
+            let ceiling = (max_p * 1.35).ceil() as i64;
+            if ceiling > 0 {
+                params.push(SqlParam::I64(ceiling));
+                where_parts.push("(price IS NULL OR price <= ?)".to_string());
+                had_profile_bounds = true;
+            }
+        }
+        // `need_fit` gives 40.0 at `need - 1.0` and 0.0 below `need - 1.0`.
+        if let Some(min_b) = prof.min_beds.filter(|b| b.is_finite() && *b > 1.0) {
+            params.push(SqlParam::F64(min_b - 1.0));
+            where_parts.push("(beds IS NULL OR beds >= ?)".to_string());
+            had_profile_bounds = true;
+        }
+        let bath_allowance = if prof.multigenerational { 2.0 } else { 1.0 };
+        if let Some(min_ba) = prof
+            .min_baths
+            .filter(|b| b.is_finite() && *b > bath_allowance)
+        {
+            params.push(SqlParam::F64(min_ba - bath_allowance));
+            where_parts.push("(baths IS NULL OR baths >= ?)".to_string());
+            had_profile_bounds = true;
+        }
+        if let Some(min_sq) = prof.min_sqft.filter(|s| s.is_finite() && *s > 0.0) {
+            let ratio = if prof.multigenerational { 0.40 } else { 0.50 };
+            let floor = (min_sq * ratio).floor() as i64;
+            if floor > 0 {
+                params.push(SqlParam::I64(floor));
+                where_parts.push("(sqft IS NULL OR sqft >= ?)".to_string());
+                had_profile_bounds = true;
+            }
+        }
+    }
+
+    let safe_limit = limit.clamp(1, 5_000) as i64;
+    params.push(SqlParam::I64(safe_limit));
+    let sql = format!(
+        "SELECT {hint}{LISTING_CORE_COLS} FROM listings WHERE {} ORDER BY last_seen_ts DESC LIMIT ?",
+        where_parts.join(" AND ")
+    );
+    (sql, params, had_profile_bounds)
 }
 
 fn pick_deep_refine_targets(
     rank_res: &RankResult,
-    candidates: &[ListingRow],
+    candidates: &[ListingCoreProto],
     lf_rows: &HashMap<String, ListingFactorsRow>,
     max_items: usize,
-) -> Vec<(ListingRow, String)> {
-    let by_id: HashMap<&str, &ListingRow> =
-        candidates.iter().map(|l| (l.id.as_str(), l)).collect();
+) -> Vec<(ListingCoreProto, String)> {
+    let by_id: HashMap<&str, &ListingCoreProto> = candidates
+        .iter()
+        .map(|l| (l.external_id.as_str(), l))
+        .collect();
     let mut picked = Vec::new();
     let mut seen = HashSet::new();
 
@@ -666,48 +823,136 @@ fn truncate_rank_result(rank_res: &mut RankResult, limit: Option<usize>) {
     rank_res.flagged.truncate(n.min(20));
 }
 
-fn build_ranked_listings_meta(
-    candidates: &[ListingRow],
+#[derive(Default)]
+struct TopKCardExtra {
+    property_type_label: Option<String>,
+    photo_url: Option<String>,
+    listing_url: Option<String>,
+    flood_zone: Option<String>,
+    wildfire_zone: Option<String>,
+}
+
+async fn fetch_top_k_card_extras(
+    db: &DbStore,
+    sks: &[i64],
+) -> Result<HashMap<i64, TopKCardExtra>> {
+    if sks.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let placeholders = vec!["?"; sks.len()].join(", ");
+    let params: Vec<SqlParam> = sks.iter().map(|&k| SqlParam::I64(k)).collect();
+
+    let eng_sql = format!(
+        "SELECT listing_sk, listing_url, photo_url FROM listing_engagement WHERE listing_sk IN ({placeholders})"
+    );
+    let fea_sql = format!(
+        "SELECT listing_sk, property_type_label FROM listing_features WHERE listing_sk IN ({placeholders})"
+    );
+    let haz_sql = format!(
+        "SELECT listing_sk, flood_zone, wildfire_tier, wildfire_label FROM listing_hazards WHERE listing_sk IN ({placeholders})"
+    );
+
+    let (eng_rows, fea_rows, haz_rows) = tokio::try_join!(
+        db.fetch_all_mapped_raw(&eng_sql, &params, |r: &dyn DbRowExt| {
+            (
+                r.opt_i64("listing_sk").unwrap_or(0),
+                r.opt_str("listing_url"),
+                r.opt_str("photo_url"),
+            )
+        }),
+        db.fetch_all_mapped_raw(&fea_sql, &params, |r: &dyn DbRowExt| {
+            (
+                r.opt_i64("listing_sk").unwrap_or(0),
+                r.opt_str("property_type_label"),
+            )
+        }),
+        db.fetch_all_mapped_raw(&haz_sql, &params, |r: &dyn DbRowExt| {
+            (
+                r.opt_i64("listing_sk").unwrap_or(0),
+                r.opt_str("flood_zone"),
+                r.opt_i64("wildfire_tier").unwrap_or(0) as i32,
+                r.opt_str("wildfire_label"),
+            )
+        }),
+    )?;
+
+    let mut out: HashMap<i64, TopKCardExtra> = HashMap::with_capacity(sks.len());
+    for (sk, url, photo) in eng_rows {
+        let entry = out.entry(sk).or_default();
+        entry.listing_url = url;
+        entry.photo_url = photo;
+    }
+    for (sk, pt) in fea_rows {
+        out.entry(sk).or_default().property_type_label = pt;
+    }
+    for (sk, fz, wf_tier, wf_lbl) in haz_rows {
+        let entry = out.entry(sk).or_default();
+        entry.flood_zone = fz;
+        entry.wildfire_zone = wf_lbl.or_else(|| {
+            crate::db::proto::wildfire_risk_from_code(wf_tier).map(str::to_string)
+        });
+    }
+    Ok(out)
+}
+
+async fn build_ranked_listings_meta(
+    db: &DbStore,
+    candidates: &[ListingCoreProto],
     rank_res: &RankResult,
     lf_rows: &HashMap<String, ListingFactorsRow>,
     commutes: &HashMap<String, Vec<AreaCommuteEstimate>>,
-) -> HashMap<String, RankedListingMeta> {
+) -> Result<HashMap<String, RankedListingMeta>> {
     let needed: HashSet<&str> = rank_res
         .all()
         .map(|s: &ScoredHome| s.id.as_str())
         .collect();
-    let mut out = HashMap::with_capacity(needed.len());
-    for l in candidates {
-        if !needed.contains(l.id.as_str()) {
-            continue;
-        }
-        let lf = lf_rows.get(&l.id);
+    if needed.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let top_cores: Vec<&ListingCoreProto> = candidates
+        .iter()
+        .filter(|c| needed.contains(c.external_id.as_str()))
+        .collect();
+    let top_sks: Vec<i64> = top_cores.iter().map(|c| c.listing_sk).collect();
+    let extras = fetch_top_k_card_extras(db, &top_sks).await?;
+
+    let mut out = HashMap::with_capacity(top_cores.len());
+    for l in top_cores {
+        let lf = lf_rows.get(&l.external_id);
+        let extra = extras.get(&l.listing_sk);
         let eff_school = lf.and_then(|r| r.school_score).or(l.school_score);
-        let eff_grade = l
-            .school_grade
-            .clone()
+        let eff_grade = crate::db::proto::school_grade_from_code(l.school_grade)
             .or_else(|| score_to_school_grade(eff_school));
+        let prop_type = extra
+            .and_then(|e| e.property_type_label.clone())
+            .filter(|s| !s.is_empty())
+            .or_else(|| {
+                crate::db::proto::property_category_from_code(l.property_category)
+                    .map(str::to_string)
+            });
+
         out.insert(
-            l.id.clone(),
+            l.external_id.clone(),
             RankedListingMeta {
-                id: l.id.clone(),
+                id: l.external_id.clone(),
                 address: l.address.clone(),
                 city: l.city.clone(),
-                state: l.state.clone(),
+                state: l.state_code.clone(),
                 zip: l.zip.clone(),
                 lat: l.lat.or_else(|| lf.and_then(|r| r.lat)),
                 lon: l.lon.or_else(|| lf.and_then(|r| r.lon)),
-                status: l.status.clone(),
+                status: crate::db::proto::listing_status_from_code(l.status).to_string(),
                 price: l.price.or(l.list_price),
                 beds: l.beds,
                 baths: l.baths,
-                sqft: l.sqft,
-                lot_sqft: l.lot_sqft,
-                year_built: l.year_built,
-                property_type: l.property_type.clone(),
-                hoa_monthly: l.hoa_monthly,
-                photo_url: l.photo_url.clone(),
-                url: l.url.clone(),
+                sqft: l.sqft.map(i64::from),
+                lot_sqft: l.lot_sqft.map(i64::from),
+                year_built: l.year_built.map(i64::from),
+                property_type: prop_type,
+                hoa_monthly: l.hoa_monthly.map(i64::from),
+                photo_url: extra.and_then(|e| e.photo_url.clone()),
+                url: extra.and_then(|e| e.listing_url.clone()),
                 report_slug: l.report_slug.clone(),
                 source_tier: lf
                     .map(|r| r.source_tier.clone())
@@ -717,14 +962,49 @@ fn build_ranked_listings_meta(
                 school_score: eff_school,
                 school_grade: eff_grade,
                 walk_score: lf.and_then(|r| r.walk_score).or(l.walk_score),
-                flood_zone: lf.and_then(|r| r.flood_zone.clone()).or_else(|| l.flood_zone.clone()),
+                flood_zone: lf
+                    .and_then(|r| r.flood_zone.clone())
+                    .or_else(|| extra.and_then(|e| e.flood_zone.clone())),
                 wildfire_zone: lf
                     .and_then(|r| r.wildfire_zone.clone())
-                    .or_else(|| l.wildfire_zone.clone()),
+                    .or_else(|| extra.and_then(|e| e.wildfire_zone.clone())),
                 crime_score: lf.and_then(|r| r.crime_score),
-                commutes: commutes.get(&l.id).cloned().unwrap_or_default(),
+                commutes: commutes.get(&l.external_id).cloned().unwrap_or_default(),
             },
         );
     }
-    out
+    Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn rank_candidate_cores_sql_pushes_profile_bounds_and_avoids_select_star() {
+        let db = DbStore::connect_url(":memory:", Some("sqlite"))
+            .await
+            .expect("in-memory sqlite");
+        let mut prof = Profile::default();
+        prof.budget.max_price = Some(2_000_000.0);
+        prof.min_beds = Some(3.0);
+        prof.min_baths = Some(2.0);
+        prof.min_sqft = Some(1_600.0);
+
+        let (sql, params, had_bounds) = build_rank_candidate_cores_sql(
+            &db,
+            &["95118".to_string(), "95008".to_string()],
+            &[("Campbell".to_string(), Some("CA".to_string()))],
+            Some(&["for_sale".to_string(), "pending".to_string()]),
+            Some(&prof),
+            500,
+        );
+        assert!(had_bounds);
+        assert!(!sql.contains("SELECT *"));
+        assert!(sql.contains("(price IS NULL OR price <= ?)"));
+        assert!(sql.contains("(beds IS NULL OR beds >= ?)"));
+        assert!(sql.contains("(baths IS NULL OR baths >= ?)"));
+        assert!(sql.contains("(sqft IS NULL OR sqft >= ?)"));
+        assert_eq!(sql.matches('?').count(), params.len());
+    }
 }

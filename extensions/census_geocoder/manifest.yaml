@@ -50,6 +50,7 @@ sharing:
 source_attribution:
   name: "U.S. Census Bureau Geocoder (Public_AR_Current / Current_Current)"
   url: "https://geocoding.geo.census.gov/"
+  reference_url_template: "https://geocoding.geo.census.gov/geocoder/geographies/onelineaddress?address={{address_urlencoded}}&benchmark=Public_AR_Current&vintage=Current_Current"
 openapi:
   spec_file: "openapi.yaml"
   operation_id: "geocodeOnelineAddress"

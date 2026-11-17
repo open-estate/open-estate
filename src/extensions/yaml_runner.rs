@@ -30,6 +30,7 @@ use anyhow::{anyhow, Context, Result};
 use governor::{DefaultDirectRateLimiter, DefaultKeyedRateLimiter, Quota};
 use minijinja::Environment;
 use moka::future::Cache;
+use once_cell::sync::Lazy;
 use openapiv3::{
     Operation, Parameter, ParameterData, ParameterSchemaOrContent, PathItem, ReferenceOr,
     SchemaKind, Type,
@@ -234,13 +235,27 @@ fn derive_house_number_and_street_stem(street: &str) -> (String, String) {
 pub fn build_template_context(query: &ExtensionQueryProto) -> BTreeMap<String, String> {
     let mut ctx = BTreeMap::new();
     let zip5: String = query.zip.trim().chars().take(5).collect();
-    ctx.insert("address".to_string(), query.address.trim().to_string());
+    let addr_trimmed = query.address.trim();
+    ctx.insert("address".to_string(), addr_trimmed.to_string());
+    ctx.insert(
+        "address_urlencoded".to_string(),
+        urlencoding::encode(addr_trimmed).into_owned(),
+    );
     let street_trimmed = query.street.trim();
     ctx.insert("street".to_string(), street_trimmed.to_string());
+    ctx.insert(
+        "street_urlencoded".to_string(),
+        urlencoding::encode(street_trimmed).into_owned(),
+    );
     let (house_number, street_stem) = derive_house_number_and_street_stem(street_trimmed);
     ctx.insert("house_number".to_string(), house_number);
     ctx.insert("street_stem".to_string(), street_stem);
-    ctx.insert("city".to_string(), query.city.trim().to_string());
+    let city_trimmed = query.city.trim();
+    ctx.insert("city".to_string(), city_trimmed.to_string());
+    ctx.insert(
+        "city_urlencoded".to_string(),
+        urlencoding::encode(city_trimmed).into_owned(),
+    );
     ctx.insert("state".to_string(), query.state.trim().to_ascii_uppercase());
     ctx.insert("zip".to_string(), zip5);
     ctx.insert(
@@ -279,8 +294,28 @@ pub fn build_template_context(query: &ExtensionQueryProto) -> BTreeMap<String, S
         ctx.insert("year_built".to_string(), yb.to_string());
     }
     if let Some(ref apn) = query.apn {
-        if !apn.trim().is_empty() {
-            ctx.insert("apn".to_string(), apn.trim().to_string());
+        let apn_t = apn.trim();
+        if !apn_t.is_empty() {
+            let digits: String = apn_t.chars().filter(|c| c.is_ascii_digit()).collect();
+            let formatted = if query.county_fips.trim() == "06085" && digits.len() == 8 {
+                format!("{}-{}-{}", &digits[..3], &digits[3..5], &digits[5..8])
+            } else {
+                apn_t.to_string()
+            };
+            ctx.insert("apn".to_string(), formatted.clone());
+            ctx.insert(
+                "apn_urlencoded".to_string(),
+                urlencoding::encode(&formatted).into_owned(),
+            );
+            if !digits.is_empty() {
+                ctx.insert("apn_digits".to_string(), digits);
+            }
+        }
+    }
+    if let Some(ref pwsid) = query.sdwis_pwsid {
+        let p_t = pwsid.trim();
+        if !p_t.is_empty() {
+            ctx.insert("pwsid".to_string(), p_t.to_string());
         }
     }
     if let Some(ref parent_addr) = query.parent_address {
@@ -289,10 +324,153 @@ pub fn build_template_context(query: &ExtensionQueryProto) -> BTreeMap<String, S
         }
     }
     for (k, v) in &query.extra_params {
-        ctx.insert(k.clone(), v.clone());
+        if !v.trim().is_empty() {
+            ctx.insert(k.clone(), v.trim().to_string());
+        }
+    }
+    if !ctx.contains_key("dest_lat") {
+        if let Some(la) = query.lat.filter(|v| v.is_finite()) {
+            ctx.insert("dest_lat".to_string(), format!("{:.6}", la + 0.01));
+        }
+    }
+    if !ctx.contains_key("dest_lon") {
+        if let Some(lo) = query.lon.filter(|v| v.is_finite()) {
+            ctx.insert("dest_lon".to_string(), format!("{:.6}", lo + 0.01));
+        }
     }
     ctx
 }
+
+static TPL_VAR_RE: Lazy<regex::Regex> =
+    Lazy::new(|| regex::Regex::new(r"\{\{\s*([a-zA-Z0-9_]+)\s*\}\}").unwrap());
+
+/// Resolves `source_attribution.reference_url_template` against `ctx` when all referenced
+/// placeholders are populated, otherwise falling back cleanly to `sa.url` / `fallback_url`.
+pub fn resolve_manifest_reference_url(
+    pkg: &ParsedExtensionPackage,
+    ctx: &BTreeMap<String, String>,
+    fallback_url: &str,
+) -> String {
+    if let Some(sa) = pkg.doc.source_attribution.as_ref() {
+        if let Some(tpl) = sa
+            .reference_url_template
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            if !tpl.contains("{{") {
+                return tpl.to_string();
+            }
+            let all_vars_present = TPL_VAR_RE.captures_iter(tpl).all(|cap| {
+                let var = &cap[1];
+                ctx.get(var).map(|v| !v.trim().is_empty()).unwrap_or(false)
+            });
+            if all_vars_present {
+                if let Ok(rendered) = YAML_EXPR_JINJA_ENV.render_str(tpl, ctx) {
+                    let trimmed = rendered.trim();
+                    if trimmed.starts_with("https://") || trimmed.starts_with("http://") {
+                        return trimmed.to_string();
+                    }
+                }
+            }
+        }
+        if !sa.url.trim().is_empty() {
+            if let Ok(rendered) = render_query_template(sa.url.trim(), ctx) {
+                let trimmed = rendered.trim();
+                if !trimmed.is_empty() {
+                    return trimmed.to_string();
+                }
+            }
+            return sa.url.trim().to_string();
+        }
+    }
+    fallback_url.trim().to_string()
+}
+
+/// Resolves an extension manifest's live reference URL (including optional catalog `rule_id`)
+/// from an `ExtensionManifestProto` + `ExtensionQueryProto` at redirect time.
+pub fn resolve_manifest_proto_reference_url(
+    manifest: &ExtensionManifestProto,
+    rule_id: Option<&str>,
+    query: &ExtensionQueryProto,
+) -> Option<String> {
+    if let Some(rid) = rule_id.map(str::trim).filter(|s| !s.is_empty()) {
+        if let Some(tc) = manifest.tariff_catalog.as_ref() {
+            for r in &tc.electric_rules {
+                if r.id.eq_ignore_ascii_case(rid) && r.tariff_url.starts_with("https://") {
+                    return Some(r.tariff_url.trim().to_string());
+                }
+            }
+            for r in &tc.gas_rules {
+                if r.id.eq_ignore_ascii_case(rid) && r.tariff_url.starts_with("https://") {
+                    return Some(r.tariff_url.trim().to_string());
+                }
+            }
+            for r in &tc.water_sewer_trash_rules {
+                if r.id.eq_ignore_ascii_case(rid) {
+                    if let Some(u) = r.water_tariff_url.as_deref() {
+                        if u.starts_with("https://") {
+                            return Some(u.trim().to_string());
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(fc) = manifest.footprint_catalog.as_ref() {
+            for r in &fc.broadband_rules {
+                if r.id.eq_ignore_ascii_case(rid) && r.check_url.starts_with("https://") {
+                    return Some(r.check_url.trim().to_string());
+                }
+            }
+        }
+    }
+
+    let ctx = build_template_context(query);
+    if let Some(sa) = manifest.source_attribution.as_ref() {
+        let tpl = sa.reference_url_template.trim();
+        if !tpl.is_empty() {
+            if !tpl.contains("{{") {
+                if tpl.starts_with("https://") {
+                    return Some(tpl.to_string());
+                }
+            } else {
+                let all_present = TPL_VAR_RE.captures_iter(tpl).all(|cap| {
+                    ctx.get(&cap[1])
+                        .map(|v| !v.trim().is_empty())
+                        .unwrap_or(false)
+                });
+                if all_present {
+                    if let Ok(rendered) = YAML_EXPR_JINJA_ENV.render_str(tpl, &ctx) {
+                        let trimmed = rendered.trim();
+                        if trimmed.starts_with("https://") {
+                            return Some(trimmed.to_string());
+                        }
+                    }
+                }
+            }
+        }
+        let u = sa.url.trim();
+        if u.starts_with("https://") {
+            return Some(u.to_string());
+        }
+    }
+
+    manifest
+        .homepage_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| s.starts_with("https://"))
+        .or_else(|| {
+            manifest
+                .documentation_url
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| s.starts_with("https://"))
+        })
+        .map(String::from)
+}
+
+static YAML_EXPR_JINJA_ENV: Lazy<Environment<'static>> = Lazy::new(Environment::new);
 
 /// Render a `minijinja` template string against `ctx`, rejecting missing required template inputs
 /// (e.g., `{{ lat }}` when `query.lat` is `None`).
@@ -300,7 +478,7 @@ pub fn render_query_template(tpl: &str, ctx: &BTreeMap<String, String>) -> Resul
     if !tpl.contains("{{") {
         return Ok(tpl.to_string());
     }
-    for required_var in ["lat", "lon", "address", "zip"] {
+    for required_var in ["lat", "lon", "address", "zip", "house_number", "street_stem"] {
         if (tpl.contains(&format!("{{{{ {required_var} }}}}"))
             || tpl.contains(&format!("{{{{{required_var}}}}}")))
             && ctx
@@ -313,8 +491,8 @@ pub fn render_query_template(tpl: &str, ctx: &BTreeMap<String, String>) -> Resul
             ));
         }
     }
-    let env = Environment::new();
-    env.render_str(tpl, ctx)
+    YAML_EXPR_JINJA_ENV
+        .render_str(tpl, ctx)
         .with_context(|| format!("Failed to render template '{tpl}'"))
 }
 
@@ -586,8 +764,14 @@ fn build_water_envelope(
 
     let source_url = water_tariff_url
         .clone()
-        .or_else(|| pkg.doc.source_attribution.as_ref().map(|a| a.url.clone()))
-        .unwrap_or_else(|| "https://www.epa.gov/ground-water-and-drinking-water".to_string());
+        .unwrap_or_else(|| {
+            let ctx = build_template_context(query);
+            resolve_manifest_reference_url(
+                pkg,
+                &ctx,
+                "https://www.epa.gov/ground-water-and-drinking-water",
+            )
+        });
     let source_name = pkg
         .doc
         .source_attribution
@@ -1448,6 +1632,30 @@ pub fn map_json_to_envelopes(
             if lat.is_none() && lon.is_none() && zip.is_empty() && mapping.require_non_empty {
                 return Ok(Vec::new());
             }
+            let fallback_sd_geoid = ["Unified School Districts", "Elementary School Districts", "Secondary School Districts"]
+                .iter()
+                .find_map(|k| {
+                    target
+                        .get("geographies")
+                        .and_then(|g| g.get(*k))
+                        .and_then(|a| a.get(0))
+                        .and_then(|o| o.get("GEOID"))
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                });
+            let fallback_sd_name = ["Unified School Districts", "Elementary School Districts", "Secondary School Districts"]
+                .iter()
+                .find_map(|k| {
+                    target
+                        .get("geographies")
+                        .and_then(|g| g.get(*k))
+                        .and_then(|a| a.get(0))
+                        .and_then(|o| o.get("NAME"))
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                });
             Payload::Geocode(GeocodeResultProto {
                 matched_address: eval_str(target, mapping, "matched_address").unwrap_or_default(),
                 lat: lat.unwrap_or(0.0),
@@ -1463,8 +1671,10 @@ pub fn map_json_to_envelopes(
                 block_group: eval_str(target, mapping, "block_group"),
                 cbsa_code: eval_str(target, mapping, "cbsa_code"),
                 cbsa_title: eval_str(target, mapping, "cbsa_title"),
-                school_district_geoid: eval_str(target, mapping, "school_district_geoid"),
-                school_district_name: eval_str(target, mapping, "school_district_name"),
+                school_district_geoid: eval_str(target, mapping, "school_district_geoid")
+                    .or(fallback_sd_geoid),
+                school_district_name: eval_str(target, mapping, "school_district_name")
+                    .or(fallback_sd_name),
             })
         }
         CapabilityDomain::DomainPropertyFacts => Payload::PropertyFacts(PropertyFactsProto {
@@ -2172,7 +2382,7 @@ fn build_live_attribution(
     ctx: &BTreeMap<String, String>,
     now: &str,
 ) -> SourceAttributionProto {
-    let (name, raw_url, sched, notes) = match pkg.doc.source_attribution.as_ref() {
+    let (name, fallback_url, sched, notes) = match pkg.doc.source_attribution.as_ref() {
         Some(sa) => (
             sa.name.clone(),
             sa.url.clone(),
@@ -2190,7 +2400,7 @@ fn build_live_attribution(
             None,
         ),
     };
-    let rendered_url = render_query_template(&raw_url, ctx).unwrap_or(raw_url);
+    let rendered_url = resolve_manifest_reference_url(pkg, ctx, &fallback_url);
     SourceAttributionProto {
         extension_id: pkg.extension_id.clone(),
         source_name: name,

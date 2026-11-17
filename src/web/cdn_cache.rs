@@ -64,6 +64,8 @@ pub fn compute_enabled_modules_hash(snap: &RuntimeRegistrySnapshot) -> String {
 
 /// Computes a deterministic RFC 9110 strong `ETag` (`"<hex>"`) from report `slug`, `updated_at`,
 /// enabled modules hash, and representation variant (`"html"` or `"json"`).
+/// For `"html"`, also folds in the active template/JS/CSS bundle digest so template updates
+/// immediately invalidate stale browser/CDN HTML caches across all stored homes.
 pub fn compute_report_etag(
     slug: &str,
     updated_at: &str,
@@ -73,6 +75,12 @@ pub fn compute_report_etag(
     let mut hasher = Sha256::new();
     for field in [slug, updated_at, modules_hash, variant] {
         let bytes = field.as_bytes();
+        hasher.update((bytes.len() as u64).to_le_bytes());
+        hasher.update(bytes);
+    }
+    if variant == "html" {
+        let tpl_hash = crate::web::render::report_template_bundle_hash();
+        let bytes = tpl_hash.as_bytes();
         hasher.update((bytes.len() as u64).to_le_bytes());
         hasher.update(bytes);
     }

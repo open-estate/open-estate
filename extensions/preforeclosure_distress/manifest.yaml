@@ -55,6 +55,7 @@ sharing:
 source_attribution:
   name: "NYC Department of Finance Tax Lien Sale Open Data"
   url: "https://data.cityofnewyork.us/resource/9rz4-mjek.json"
+  reference_url_template: "https://data.cityofnewyork.us/City-Government/Tax-Lien-Sale-Lists/9rz4-mjek"
   schedule_or_version: "Socrata Open Tax-Lien Distress Index"
   notes: "Strictly NYC boroughs only; never overwrites MLS listing_status or parcel APN with municipal tax class codes."
 request:
@@ -62,9 +63,8 @@ request:
   url: "https://data.cityofnewyork.us/resource/9rz4-mjek.json"
   query_params:
     "$limit": "5"
-    "$where": "starts_with(street_name,'{{ street_stem }}')"
+    "$where": "house_number='{{ house_number }}' AND starts_with(street_name,'{{ street_stem }}')"
 response_mapping:
   root_path: "$[0]"
   require_non_empty: true
-  fields:
-    city: "$.borough"
+  fields: {}

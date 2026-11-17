@@ -55,6 +55,16 @@ pub const PACKET_DOC_CATEGORIES: &[&str] = &[
 
 pub const TRIAGE_TIERS: &[&str] = &["Critical", "Major", "Moderate", "Informational"];
 
+/// Canonical file-retention & non-distribution policy returned with all disclosure analyses.
+pub fn build_file_retention_policy() -> Value {
+    json!({
+        "rawFilesSaved": false,
+        "rawFilesDistributed": false,
+        "analysisMode": "per_user_one_time",
+        "notice": "We analyze uploaded files one time in memory and immediately discard the original documents. We do not save, host, or distribute your uploaded files or private contents to anyone."
+    })
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SourceCitation {
@@ -1517,7 +1527,7 @@ pub fn analyze_packet_documents_deterministic(
     }
 
     let mut merged_map: BTreeMap<&'static str, MergedDefect> = BTreeMap::new();
-    for rf in raw_findings {
+    for rf in raw_findings.iter().cloned() {
         let matching_specialist = is_matching_trade_specialist(rf.dedup_key, rf.doc_category);
         let authority_rank: u8 = match (matching_specialist, rf.explicit_bid) {
             (true, true) => 3,
@@ -1740,6 +1750,14 @@ pub fn analyze_packet_documents_deterministic(
         "topQuestionsForSeller": top_questions,
         "hoaSummary": hoa_summary,
         "titleSummary": title_summary,
+        "priorityReading": build_priority_disclosure_reading(
+            &classified_docs,
+            &raw_findings,
+            &contradictions,
+            title_summary.as_ref(),
+            hoa_summary.as_ref(),
+            report,
+        ),
         "disclaimer": "Factual cross-document disclosure & public-record comparison only — NOT legal advice, a structural engineering opinion, or a binding contractor bid. Overlapping defects cited in multiple reports are deduplicated by canonical system/trade key to prevent double-counting."
     });
     crate::modules::move_in_cost::enrich_packet_with_move_in_costs(
@@ -1747,6 +1765,620 @@ pub fn analyze_packet_documents_deterministic(
         report.unwrap_or(&Value::Null),
     );
     out_val
+}
+
+pub const PRIORITY_DISCLOSURE_DISCLAIMER: &str = "This disclosure summary is informational only and does not replace reading the full disclosure reports or obtaining professional inspection, legal, title, tax, or appraisal advice.";
+
+static NHD_NEGATIVE_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(
+        r"(?i)(?:\bis\s+not\s+(?:in|within|located|subject)\b|\bnot\s+in\s+a\b|\[\s*[xX✓]\s*\]\s*is\s+not\b|\[\s*[xX✓]\s*\]\s*no\b|:\s*no\b)",
+    )
+    .unwrap()
+});
+
+static NHD_POSITIVE_RULES: Lazy<Vec<(&'static str, &'static str, Regex)>> = Lazy::new(|| {
+    vec![
+        (
+            "FEMA Special Flood Hazard Area (SFHA)",
+            "Critical",
+            Regex::new(r"(?i)(?:\[\s*[xX✓]\s*\]\s*(?:yes|is\s+in)[^\n]{0,90}flood|\bis\s+(?:in|located\s+in|within)\s+(?:a\s+)?special\s+flood\s+hazard|flood\s+hazard\s+area[^\n]{0,50}(?:\[\s*[xX✓]\s*\]\s*yes|:\s*yes\b|\bis\s+in\b))").unwrap(),
+        ),
+        (
+            "High / Very High Fire Hazard Severity Zone",
+            "Critical",
+            Regex::new(r"(?i)(?:\[\s*[xX✓]\s*\]\s*(?:yes|is\s+in)[^\n]{0,90}(?:fire\s+hazard|wildland|very\s+high\s+fire)|\bis\s+(?:in|located\s+in|within)\s+(?:a\s+)?(?:very\s+high\s+|high\s+)?fire\s+hazard|(?:very\s+high\s+fire|fire\s+hazard\s+severity|state\s+responsibility\s+area)[^\n]{0,60}(?:\[\s*[xX✓]\s*\]\s*yes|:\s*yes\b|\bis\s+in\b))").unwrap(),
+        ),
+        (
+            "Alquist-Priolo Earthquake Fault Zone",
+            "Critical",
+            Regex::new(r"(?i)(?:\[\s*[xX✓]\s*\]\s*(?:yes|is\s+in)[^\n]{0,90}(?:earthquake\s+fault|alquist)|\bis\s+(?:in|located\s+in|within)\s+(?:an?\s+)?(?:alquist[- ]priolo|earthquake\s+fault)|(?:alquist[- ]priolo|earthquake\s+fault\s+zone)[^\n]{0,60}(?:\[\s*[xX✓]\s*\]\s*yes|:\s*yes\b|\bis\s+in\b))").unwrap(),
+        ),
+        (
+            "Seismic Liquefaction Zone",
+            "Major",
+            Regex::new(r"(?i)(?:\[\s*[xX✓]\s*\]\s*(?:yes|is\s+in)[^\n]{0,90}liquefaction|\bis\s+(?:in|located\s+in|within)\s+(?:a\s+)?(?:seismic\s+)?liquefaction|liquefaction\s+zone[^\n]{0,60}(?:\[\s*[xX✓]\s*\]\s*yes|:\s*yes\b|\bis\s+in\b))").unwrap(),
+        ),
+        (
+            "Earthquake-Induced Landslide Zone",
+            "Major",
+            Regex::new(r"(?i)(?:\[\s*[xX✓]\s*\]\s*(?:yes|is\s+in)[^\n]{0,90}landslide|\bis\s+(?:in|located\s+in|within)\s+(?:an?\s+)?(?:earthquake[- ]induced\s+)?landslide|landslide\s+zone[^\n]{0,60}(?:\[\s*[xX✓]\s*\]\s*yes|:\s*yes\b|\bis\s+in\b))").unwrap(),
+        ),
+        (
+            "Dam Inundation Zone",
+            "Major",
+            Regex::new(r"(?i)(?:\[\s*[xX✓]\s*\]\s*(?:yes|is\s+in)[^\n]{0,90}dam\s+inundation|\bis\s+(?:in|located\s+in|within)\s+(?:a\s+)?dam\s+(?:failure\s+)?inundation|dam\s+inundation[^\n]{0,60}(?:\[\s*[xX✓]\s*\]\s*yes|:\s*yes\b|\bis\s+in\b))").unwrap(),
+        ),
+        (
+            "Mello-Roos CFD / 1915 Bond Special Tax District",
+            "Major",
+            Regex::new(r"(?i)(?:\[\s*[xX✓]\s*\]\s*(?:yes|is\s+subject)[^\n]{0,90}(?:mello[- ]roos|community\s+facilities|1915\s+bond)|\bis\s+subject\s+to\s+(?:a\s+)?(?:mello[- ]roos|community\s+facilities|1915\s+bond)|(?:mello[- ]roos|community\s+facilities\s+district)[^\n]{0,60}(?:\[\s*[xX✓]\s*\]\s*yes|:\s*yes\b))").unwrap(),
+        ),
+        (
+            "Airport Influence / Noise Contour Area",
+            "Moderate",
+            Regex::new(r"(?i)(?:\[\s*[xX✓]\s*\]\s*(?:yes|is\s+in)[^\n]{0,90}airport|\bis\s+(?:in|located\s+in|within)\s+(?:an?\s+)?airport\s+influence|airport\s+influence[^\n]{0,60}(?:\[\s*[xX✓]\s*\]\s*yes|:\s*yes\b|\bis\s+in\b))").unwrap(),
+        ),
+    ]
+});
+
+static PERMIT_CONCERN_RULES: Lazy<Vec<(&'static str, &'static str, Regex)>> = Lazy::new(|| {
+    vec![
+        (
+            "Code Enforcement Violation / Stop-Work Order",
+            "Critical",
+            Regex::new(r"(?i)\b(?:notice\s+of\s+violation|code\s+(?:enforcement\s+)?violation|stop[- ]work\s+order|substandard\s+building|illegal\s+conversion|red[- ]tagged)\b").unwrap(),
+        ),
+        (
+            "Expired / Unfinaled / Open Building Permit",
+            "Major",
+            Regex::new(r"(?i)\b(?:permit\s+status\s*[:=\-]?\s*(?:expired|revoked|void|suspended)|expired\s+permit|unfinaled\s+permit|without\s+final\s+inspection|open\s+permit\s+pending\s+final)\b").unwrap(),
+        ),
+    ]
+});
+
+fn build_priority_disclosure_reading(
+    classified_docs: &[(&ExtractedDocument, &'static str, f64)],
+    raw_findings: &[RawFinding],
+    contradictions: &[Value],
+    title_summary: Option<&Value>,
+    hoa_summary: Option<&Value>,
+    report: Option<&Value>,
+) -> Value {
+    struct PrioritySpec {
+        priority: u8,
+        key: &'static str,
+        label: &'static str,
+        categories: &'static [&'static str],
+    }
+
+    const SPECS: &[PrioritySpec] = &[
+        PrioritySpec {
+            priority: 1,
+            key: "home_inspection",
+            label: "Home Inspection Report (incl. Roof / Sewer / Structural)",
+            categories: &["home_inspection", "roof", "sewer", "foundation"],
+        },
+        PrioritySpec {
+            priority: 2,
+            key: "termite_inspection",
+            label: "Termite / WDO Inspection Report",
+            categories: &["termite_wdo"],
+        },
+        PrioritySpec {
+            priority: 3,
+            key: "preliminary_title",
+            label: "Preliminary Title Report",
+            categories: &["prelim_title"],
+        },
+        PrioritySpec {
+            priority: 4,
+            key: "natural_hazard",
+            label: "Natural Hazard Disclosure (NHD) Report",
+            categories: &["nhd"],
+        },
+        PrioritySpec {
+            priority: 5,
+            key: "hoa_financials",
+            label: "HOA Report (Financials & Governance)",
+            categories: &["hoa_reserves"],
+        },
+        PrioritySpec {
+            priority: 6,
+            key: "permits",
+            label: "Permits & Municipal Records",
+            categories: &["permits"],
+        },
+    ];
+
+    let subject_hoa_monthly = report
+        .and_then(|r| {
+            r.pointer("/facts/hoaMonthly")
+                .or_else(|| r.pointer("/hoaProfile/monthlyFeeUsd"))
+        })
+        .and_then(|v| v.as_f64());
+
+    let mut priority_sections: Vec<Value> = Vec::with_capacity(SPECS.len());
+    let mut missing_documents: Vec<Value> = Vec::new();
+    let mut red_flags: Vec<Value> = Vec::new();
+    let mut audit_entries: Vec<Value> = Vec::new();
+    let mut seen_red_flag_keys: HashSet<String> = HashSet::new();
+
+    for spec in SPECS {
+        let matched_docs: Vec<(&ExtractedDocument, &'static str)> = classified_docs
+            .iter()
+            .filter(|(_, cat, _)| spec.categories.contains(cat))
+            .map(|&(d, cat, _)| (d, cat))
+            .collect();
+
+        if matched_docs.is_empty() {
+            let note = if spec.key == "hoa_financials" && subject_hoa_monthly == Some(0.0) {
+                "Not included in packet (public records indicate $0/mo HOA; confirm non-HOA status)."
+            } else {
+                "Not included in uploaded disclosure packet — skipped."
+            };
+            missing_documents.push(json!({
+                "priority": spec.priority,
+                "key": spec.key,
+                "label": spec.label,
+                "note": note,
+            }));
+            priority_sections.push(json!({
+                "priority": spec.priority,
+                "key": spec.key,
+                "label": spec.label,
+                "present": false,
+                "documents": [],
+                "problematicItems": [],
+                "summary": note,
+            }));
+            continue;
+        }
+
+        let doc_names: Vec<String> = matched_docs.iter().map(|(d, _)| d.name.clone()).collect();
+        let mut items: Vec<Value> = Vec::new();
+        let mut seen_item_titles: HashSet<String> = HashSet::new();
+
+        // 1. Collect matching `raw_findings` from these categories
+        for rf in raw_findings {
+            if !spec.categories.contains(&rf.doc_category) {
+                continue;
+            }
+            let dedup_sig = format!("{}:{}:{}", rf.title, rf.citation.doc_name, rf.citation.page);
+            if !seen_item_titles.insert(dedup_sig) {
+                continue;
+            }
+            let item = json!({
+                "title": rf.title,
+                "severity": rf.severity,
+                "trade": rf.trade,
+                "detail": rf.detail,
+                "costLowUsd": if rf.cost_low > 0 { json!(rf.cost_low) } else { Value::Null },
+                "costHighUsd": if rf.cost_high > 0 { json!(rf.cost_high) } else { Value::Null },
+                "sourceDoc": rf.citation.doc_name,
+                "sourcePage": rf.citation.page,
+                "quote": rf.citation.quote,
+            });
+            audit_entries.push(json!({
+                "priority": spec.priority,
+                "category": spec.key,
+                "severity": rf.severity,
+                "title": rf.title,
+                "sourceDoc": rf.citation.doc_name,
+                "sourcePage": rf.citation.page,
+                "quote": rf.citation.quote,
+            }));
+            if matches!(rf.severity, "Critical" | "Major") {
+                let rf_key = format!("{}:{}", spec.key, rf.title);
+                if seen_red_flag_keys.insert(rf_key) {
+                    red_flags.push(json!({
+                        "priority": spec.priority,
+                        "category": spec.label,
+                        "severity": rf.severity,
+                        "title": rf.title,
+                        "detail": rf.detail,
+                        "sourceDoc": rf.citation.doc_name,
+                        "sourcePage": rf.citation.page,
+                        "quote": rf.citation.quote,
+                    }));
+                }
+            }
+            items.push(item);
+        }
+
+        // 2. Category-specific structured enrichment (Prelim Title, NHD, HOA Financials, Permits)
+        if spec.key == "preliminary_title" {
+            if let Some(ts) = title_summary {
+                let fallback_doc = doc_names
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(|| "Prelim_Title.pdf".to_string());
+                if let Some(easements) = ts.get("easementsAndRestrictions").and_then(|v| v.as_array()) {
+                    for eas in easements.iter().take(4) {
+                        let etype = eas
+                            .get("type")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("Schedule B Easement / Restriction");
+                        let excerpt = clean_excerpt(
+                            eas.get("excerpt")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("Recorded Schedule B exception"),
+                            200,
+                        );
+                        let pg = eas.get("page").and_then(|v| v.as_u64()).unwrap_or(1) as u32;
+                        let sig = format!("eas:{etype}:{pg}");
+                        if seen_item_titles.insert(sig) {
+                            items.push(json!({
+                                "title": format!("Schedule B Exception: {etype}"),
+                                "severity": "Moderate",
+                                "trade": "Title / Lien Cure",
+                                "detail": excerpt,
+                                "costLowUsd": Value::Null,
+                                "costHighUsd": Value::Null,
+                                "sourceDoc": fallback_doc,
+                                "sourcePage": pg,
+                                "quote": excerpt,
+                            }));
+                            audit_entries.push(json!({
+                                "priority": spec.priority,
+                                "category": spec.key,
+                                "severity": "Moderate",
+                                "title": format!("Schedule B Exception: {etype}"),
+                                "sourceDoc": fallback_doc,
+                                "sourcePage": pg,
+                                "quote": excerpt,
+                            }));
+                        }
+                    }
+                }
+            }
+        } else if spec.key == "natural_hazard" {
+            for (doc, _) in &matched_docs {
+                for page in &doc.pages {
+                    for raw_line in page.text.lines() {
+                        let line = raw_line.trim();
+                        if line.is_empty() || NHD_NEGATIVE_RE.is_match(line) {
+                            continue;
+                        }
+                        for (hz_title, hz_sev, hz_re) in NHD_POSITIVE_RULES.iter() {
+                            if hz_re.is_match(line) {
+                                let sig = format!("nhd:{hz_title}");
+                                if seen_item_titles.insert(sig) {
+                                    let q = clean_excerpt(line, 220);
+                                    items.push(json!({
+                                        "title": *hz_title,
+                                        "severity": *hz_sev,
+                                        "trade": "Natural Hazard Disclosure",
+                                        "detail": q,
+                                        "costLowUsd": Value::Null,
+                                        "costHighUsd": Value::Null,
+                                        "sourceDoc": doc.name,
+                                        "sourcePage": page.page_number,
+                                        "quote": q,
+                                    }));
+                                    audit_entries.push(json!({
+                                        "priority": spec.priority,
+                                        "category": spec.key,
+                                        "severity": *hz_sev,
+                                        "title": *hz_title,
+                                        "sourceDoc": doc.name,
+                                        "sourcePage": page.page_number,
+                                        "quote": q,
+                                    }));
+                                    if matches!(*hz_sev, "Critical" | "Major") {
+                                        let rf_key = format!("nhd:{hz_title}");
+                                        if seen_red_flag_keys.insert(rf_key) {
+                                            red_flags.push(json!({
+                                                "priority": spec.priority,
+                                                "category": spec.label,
+                                                "severity": *hz_sev,
+                                                "title": *hz_title,
+                                                "detail": q,
+                                                "sourceDoc": doc.name,
+                                                "sourcePage": page.page_number,
+                                                "quote": q,
+                                            }));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        } else if spec.key == "hoa_financials" {
+            if let Some(hs) = hoa_summary {
+                let fallback_doc = doc_names
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(|| "HOA_Financials.pdf".to_string());
+                if let Some(alerts) = hs.get("redFlags").or_else(|| hs.get("alerts")).and_then(|v| v.as_array()) {
+                    for al in alerts {
+                        let title = al
+                            .get("title")
+                            .or_else(|| al.get("category"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("HOA Financial Concern");
+                        let detail = clean_excerpt(
+                            al.get("detail")
+                                .or_else(|| al.get("summary"))
+                                .and_then(|v| v.as_str())
+                                .unwrap_or(title),
+                            220,
+                        );
+                        let sev = al
+                            .get("severity")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("Major");
+                        let sdoc = al
+                            .pointer("/citation/docName")
+                            .or_else(|| al.get("sourceDoc"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or(&fallback_doc);
+                        let spg = al
+                            .pointer("/citation/page")
+                            .or_else(|| al.get("sourcePage"))
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(1) as u32;
+                        let sig = format!("hoa:{title}:{spg}");
+                        if seen_item_titles.insert(sig) {
+                            items.push(json!({
+                                "title": title,
+                                "severity": sev,
+                                "trade": "HOA Financials",
+                                "detail": detail,
+                                "costLowUsd": Value::Null,
+                                "costHighUsd": Value::Null,
+                                "sourceDoc": sdoc,
+                                "sourcePage": spg,
+                                "quote": detail,
+                            }));
+                            audit_entries.push(json!({
+                                "priority": spec.priority,
+                                "category": spec.key,
+                                "severity": sev,
+                                "title": title,
+                                "sourceDoc": sdoc,
+                                "sourcePage": spg,
+                                "quote": detail,
+                            }));
+                            if matches!(sev, "Critical" | "Major") {
+                                let rf_key = format!("hoa:{title}");
+                                if seen_red_flag_keys.insert(rf_key) {
+                                    red_flags.push(json!({
+                                        "priority": spec.priority,
+                                        "category": spec.label,
+                                        "severity": sev,
+                                        "title": title,
+                                        "detail": detail,
+                                        "sourceDoc": sdoc,
+                                        "sourcePage": spg,
+                                        "quote": detail,
+                                    }));
+                                }
+                            }
+                        }
+                    }
+                }
+                if let Some(pct) = hs.pointer("/metrics/reservePercentFunded").and_then(|v| v.as_f64()) {
+                    if pct < 50.0 && seen_item_titles.insert("hoa:low_reserves".to_string()) {
+                        let sev = if pct < 30.0 { "Critical" } else { "Major" };
+                        let msg = format!(
+                            "HOA Reserves {:.1}% funded (below 70% healthy benchmark; elevated special-assessment risk).",
+                            pct
+                        );
+                        items.push(json!({
+                            "title": "Underfunded HOA Reserves",
+                            "severity": sev,
+                            "trade": "HOA Financials",
+                            "detail": msg,
+                            "costLowUsd": Value::Null,
+                            "costHighUsd": Value::Null,
+                            "sourceDoc": fallback_doc,
+                            "sourcePage": 1,
+                            "quote": msg,
+                        }));
+                        audit_entries.push(json!({
+                            "priority": spec.priority,
+                            "category": spec.key,
+                            "severity": sev,
+                            "title": "Underfunded HOA Reserves",
+                            "sourceDoc": fallback_doc,
+                            "sourcePage": 1,
+                            "quote": msg,
+                        }));
+                        if seen_red_flag_keys.insert("hoa:underfunded_reserves".to_string()) {
+                            red_flags.push(json!({
+                                "priority": spec.priority,
+                                "category": spec.label,
+                                "severity": sev,
+                                "title": "Underfunded HOA Reserves",
+                                "detail": msg,
+                                "sourceDoc": fallback_doc,
+                                "sourcePage": 1,
+                                "quote": msg,
+                            }));
+                        }
+                    }
+                }
+            }
+        } else if spec.key == "permits" {
+            for (doc, _) in &matched_docs {
+                for page in &doc.pages {
+                    for raw_line in page.text.lines() {
+                        let line = raw_line.trim();
+                        if line.is_empty() {
+                            continue;
+                        }
+                        for (pm_title, pm_sev, pm_re) in PERMIT_CONCERN_RULES.iter() {
+                            if pm_re.is_match(line) {
+                                let sig = format!("perm:{pm_title}:{}", page.page_number);
+                                if seen_item_titles.insert(sig) {
+                                    let q = clean_excerpt(line, 220);
+                                    items.push(json!({
+                                        "title": *pm_title,
+                                        "severity": *pm_sev,
+                                        "trade": "Permits & Compliance",
+                                        "detail": q,
+                                        "costLowUsd": Value::Null,
+                                        "costHighUsd": Value::Null,
+                                        "sourceDoc": doc.name,
+                                        "sourcePage": page.page_number,
+                                        "quote": q,
+                                    }));
+                                    audit_entries.push(json!({
+                                        "priority": spec.priority,
+                                        "category": spec.key,
+                                        "severity": *pm_sev,
+                                        "title": *pm_title,
+                                        "sourceDoc": doc.name,
+                                        "sourcePage": page.page_number,
+                                        "quote": q,
+                                    }));
+                                    if seen_red_flag_keys.insert(format!("perm:{pm_title}")) {
+                                        red_flags.push(json!({
+                                            "priority": spec.priority,
+                                            "category": spec.label,
+                                            "severity": *pm_sev,
+                                            "title": *pm_title,
+                                            "detail": q,
+                                            "sourceDoc": doc.name,
+                                            "sourcePage": page.page_number,
+                                            "quote": q,
+                                        }));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            // Also include unpermitted-addition findings surfaced in other docs so Permits section is complete
+            for rf in raw_findings.iter().filter(|r| r.topic_key == "unpermitted_additions") {
+                let sig = format!("perm_cross:{}:{}", rf.citation.doc_name, rf.citation.page);
+                if seen_item_titles.insert(sig) {
+                    items.push(json!({
+                        "title": rf.title,
+                        "severity": rf.severity,
+                        "trade": "Permits & Compliance",
+                        "detail": rf.detail,
+                        "costLowUsd": if rf.cost_low > 0 { json!(rf.cost_low) } else { Value::Null },
+                        "costHighUsd": if rf.cost_high > 0 { json!(rf.cost_high) } else { Value::Null },
+                        "sourceDoc": rf.citation.doc_name,
+                        "sourcePage": rf.citation.page,
+                        "quote": rf.citation.quote,
+                    }));
+                }
+            }
+        }
+
+        items.sort_by(|a, b| {
+            let sa = severity_rank(a.get("severity").and_then(|v| v.as_str()).unwrap_or(""));
+            let sb = severity_rank(b.get("severity").and_then(|v| v.as_str()).unwrap_or(""));
+            sb.cmp(&sa)
+        });
+
+        let summary_text = if items.is_empty() {
+            format!(
+                "Reviewed {} ({}) — no material problematic items flagged by automated screening; review full report pages directly.",
+                spec.label,
+                doc_names.join(", ")
+            )
+        } else {
+            let crit_n = items
+                .iter()
+                .filter(|i| i.get("severity").and_then(|v| v.as_str()) == Some("Critical"))
+                .count();
+            let maj_n = items
+                .iter()
+                .filter(|i| i.get("severity").and_then(|v| v.as_str()) == Some("Major"))
+                .count();
+            format!(
+                "Reviewed {} ({}): {} problematic item(s) flagged ({} Critical, {} Major).",
+                spec.label,
+                doc_names.join(", "),
+                items.len(),
+                crit_n,
+                maj_n
+            )
+        };
+
+        priority_sections.push(json!({
+            "priority": spec.priority,
+            "key": spec.key,
+            "label": spec.label,
+            "present": true,
+            "documents": doc_names,
+            "problematicItems": items,
+            "summary": summary_text,
+        }));
+    }
+
+    // Include cross-document Seller Disclosure contradictions in Red Flags & Audit Entries
+    for c in contradictions {
+        let topic = c
+            .get("topic")
+            .and_then(|v| v.as_str())
+            .unwrap_or("Disclosure Contradiction");
+        let analysis = c.get("analysis").and_then(|v| v.as_str()).unwrap_or("");
+        let sdoc = c
+            .get("contradictingDoc")
+            .or_else(|| c.get("sourceDoc"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("Packet.pdf");
+        let spg = c
+            .get("contradictingPage")
+            .or_else(|| c.get("sourcePage"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(1) as u32;
+        let sev = c
+            .get("severity")
+            .and_then(|v| v.as_str())
+            .unwrap_or("Critical");
+        let rf_key = format!("contra:{topic}:{sdoc}");
+        if seen_red_flag_keys.insert(rf_key) {
+            red_flags.push(json!({
+                "priority": 0,
+                "category": "Cross-Document Contradiction",
+                "severity": sev,
+                "title": format!("Disclosure Conflict: {topic}"),
+                "detail": analysis,
+                "sourceDoc": sdoc,
+                "sourcePage": spg,
+                "quote": c.get("contradictingQuote").or_else(|| c.get("quote")),
+            }));
+            audit_entries.push(json!({
+                "priority": 0,
+                "category": "contradiction",
+                "severity": sev,
+                "title": format!("Disclosure Conflict: {topic}"),
+                "sourceDoc": sdoc,
+                "sourcePage": spg,
+                "quote": analysis,
+            }));
+        }
+    }
+
+    red_flags.sort_by(|a, b| {
+        let sa = severity_rank(a.get("severity").and_then(|v| v.as_str()).unwrap_or(""));
+        let sb = severity_rank(b.get("severity").and_then(|v| v.as_str()).unwrap_or(""));
+        sb.cmp(&sa)
+    });
+    red_flags.truncate(12);
+
+    let present_count = priority_sections
+        .iter()
+        .filter(|s| s.get("present").and_then(|v| v.as_bool()) == Some(true))
+        .count();
+
+    json!({
+        "prioritySections": priority_sections,
+        "presentCategoryCount": present_count,
+        "totalPriorityCategories": SPECS.len(),
+        "missingDocuments": missing_documents,
+        "redFlags": red_flags,
+        "auditEntries": audit_entries,
+        "standingDisclaimer": PRIORITY_DISCLOSURE_DISCLAIMER,
+    })
 }
 
 pub const PACKET_REVIEW_INSTRUCTIONS: &str = r#"You are Open Estate Senior Multi-Document Disclosure Packet & Contradiction Analyst.
@@ -1798,7 +2430,10 @@ pub async fn analyze_disclosure_packet(
         220_000,
     )
     .await?;
+    // Immediately discard raw uploaded PDF/.zip buffers after in-memory extraction.
+    drop(documents);
 
+    let file_names: Vec<String> = batch.documents.iter().map(|d| d.name.clone()).collect();
     let mut parsed = analyze_packet_documents_deterministic(
         &batch.documents,
         Some(report),
@@ -1806,12 +2441,21 @@ pub async fn analyze_disclosure_packet(
         regional_multiplier,
     );
 
-    init_deterministic_ai_meta(&mut parsed, Some(batch.files));
+    let scrubbed_lines = batch.scrubbed_lines;
+    let clipped_text = if env.llm_configured() {
+        Some(clip_sanitized_text(&batch.sanitized_text, 75_000))
+    } else {
+        None
+    };
+    let files = batch.files;
+    drop(batch.documents);
+    drop(batch.sanitized_text);
+    init_deterministic_ai_meta(&mut parsed, Some(files));
 
     let mut warnings = Vec::new();
-    append_scrubbed_lines_warning(&mut warnings, batch.scrubbed_lines, "disclosure packet");
+    append_scrubbed_lines_warning(&mut warnings, scrubbed_lines, "disclosure packet");
 
-    if env.llm_configured() {
+    if let Some(clipped_text) = clipped_text {
         let brief = build_report_brief_or_default(report, "Subject Residential Property");
         let det_summary = json!({
             "documentClassifications": parsed.get("documentClassifications"),
@@ -1819,7 +2463,6 @@ pub async fn analyze_disclosure_packet(
             "dealBreakerTriage": parsed.get("dealBreakerTriage"),
             "totalExposureUsd": parsed.get("totalExposureUsd"),
         });
-        let clipped_text = clip_sanitized_text(&batch.sanitized_text, 75_000);
 
         let prompt = format!(
             "Synthesize an executive buyer briefing and negotiation strategy over this multi-document disclosure packet.\n\nPROPERTY_BRIEF_JSON:\n{}\n\nDETERMINISTIC_PACKET_ANALYSIS:\n{}\n\n{}",
@@ -1887,7 +2530,6 @@ pub async fn analyze_disclosure_packet(
         obj.insert("ms".to_string(), json!(t0.elapsed().as_millis() as u64));
     }
 
-    let file_names: Vec<String> = batch.documents.iter().map(|d| d.name.clone()).collect();
     let packet_src_url = {
         let dom = env.brand_domain();
         if dom == "open-estate.local" {

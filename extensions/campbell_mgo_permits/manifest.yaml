@@ -22,8 +22,8 @@ metering:
     - bytes_downloaded
 builtin: true
 provenance: live_verified
-homepage_url: "https://gis.campbellca.gov/"
-documentation_url: "https://gis.campbellca.gov/arcgis/rest/services/MGO"
+homepage_url: "https://www.mgoconnect.org/cp?JID=187"
+documentation_url: "https://cityofcampbell.maps.arcgis.com/apps/instant/portfolio/index.html?appid=94865b6a1fbc49c293c0d854ee9d7593"
 codeowners:
   - "@openestate/permits"
 geo_scope:
@@ -49,5 +49,6 @@ sharing:
     - "parent_address"
 source_attribution:
   name: "City of Campbell GIS / MyGovernmentOnline (MGO) Permit Layers"
-  url: "https://gis.campbellca.gov/arcgis/rest/services/MGO"
+  url: "https://www.mgoconnect.org/cp?JID=187"
+  reference_url_template: "https://www.mgoconnect.org/cp?JID=187"
   notes: "Queries exact parcel addresses including hyphenated building/unit designations and parent-lot subdivision permits separately from subject-unit reroofs."

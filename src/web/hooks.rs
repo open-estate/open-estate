@@ -2,7 +2,7 @@
 //! client scripts, authentication, report authorization, and HTML customization without
 //! embedding downstream code into the core Open Estate crate.
 
-use crate::db::{CachedReportRecord, DbStore};
+use crate::db::{CachedReportRecord, DbStore, ReportHeaderProto};
 use crate::extensions::adapter::DataExtensionAdapter;
 use crate::extensions::proto::{manifest_license_class, manifest_tier, ExtensionManifestProto};
 use crate::metering::{
@@ -26,6 +26,19 @@ use std::sync::Arc;
 
 /// Boxed `Send` future alias used across `ServerExtensionHooks` methods.
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+
+/// Telemetry payload passed to `ServerExtensionHooks::on_reference_redirect` on every `GET /redirect` click.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReferenceRedirectEvent {
+    pub link_type: String,
+    pub data_id: String,
+    pub section: String,
+    pub slug: Option<String>,
+    pub rule_id: Option<String>,
+    pub target_url: String,
+    pub timestamp: String,
+}
 
 /// Result returned by `ServerExtensionHooks::redact_report_for_viewer`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -177,6 +190,44 @@ pub async fn authorize_cached_report(
         .await
 }
 
+/// Enforces `ServerExtensionHooks::authorize_report` on a lightweight `ReportHeaderProto` +
+/// assembled section `Value` without decompressing the full cached report.
+pub async fn authorize_narrow_report(
+    state: &AppState,
+    slug: &str,
+    hdr: Option<&ReportHeaderProto>,
+    partial_report: Value,
+    headers: &HeaderMap,
+    raw_query: &str,
+    html_404: bool,
+) -> std::result::Result<AuthorizedReport, Response> {
+    let eff_slug = hdr
+        .map(|h| h.slug.clone())
+        .unwrap_or_else(|| slug.to_string());
+    let rec = CachedReportRecord {
+        slug: eff_slug.clone(),
+        display_address: hdr
+            .map(|h| h.display_address.clone())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| eff_slug.clone()),
+        zip: hdr
+            .map(|h| h.zip.trim())
+            .filter(|s| !s.is_empty())
+            .map(String::from),
+        report: partial_report,
+        rendered_html: None,
+        osrm_degraded: hdr.map(|h| h.osrm_degraded).unwrap_or(false),
+        updated_at: hdr
+            .filter(|h| h.updated_ts > 0)
+            .map(|h| crate::db::proto::unix_ts_to_iso(h.updated_ts))
+            .unwrap_or_else(crate::shared::now_iso),
+    };
+    state
+        .hooks
+        .authorize_report(state, &eff_slug, Some(rec), headers, raw_query, html_404)
+        .await
+}
+
 /// Extension points for host binaries wrapping the core Open Estate Axum server.
 pub trait ServerExtensionHooks: Send + Sync + 'static {
     fn init_schema<'a>(&'a self, _db: &'a DbStore) -> BoxFuture<'a, anyhow::Result<()>> {
@@ -298,6 +349,11 @@ pub trait ServerExtensionHooks: Send + Sync + 'static {
         Vec::new()
     }
 
+    /// Optional extra YAML/OpenAPI extension packages `(manifest_yaml, openapi_yaml)` injected by host binaries.
+    fn extra_extension_packages(&self) -> Vec<(&'static str, Option<&'static str>)> {
+        Vec::new()
+    }
+
     /// Persists or bills an [`ExtensionUsageEvent`] emitted by `MeterScope`.
     /// Default OSS implementation stores local daily rollups in `extension_usage_rollups_local`.
     fn record_extension_usage<'a>(
@@ -362,6 +418,47 @@ pub trait ServerExtensionHooks: Send + Sync + 'static {
         _state: &'a AppState,
     ) -> BoxFuture<'a, anyhow::Result<()>> {
         Box::pin(async { Ok(()) })
+    }
+
+    /// Optional telemetry hook invoked whenever a report viewer follows a `GET /redirect` reference link.
+    fn on_reference_redirect<'a>(
+        &'a self,
+        _state: &'a AppState,
+        _event: &'a ReferenceRedirectEvent,
+    ) -> BoxFuture<'a, ()> {
+        Box::pin(async {})
+    }
+
+    /// Whether hosted collaboration/sharing features (account verification, deal-team redaction,
+    /// authorized seller/listing disclosure sharing, and public report link sharing) are active.
+    /// Standalone open-source servers keep this `false`.
+    fn sharing_enabled(&self) -> bool {
+        false
+    }
+
+    /// Optional hook to resolve the verified collaborator/owner `client_id` for sharing requests.
+    /// When `reject_invalid_session` is `true`, an invalid or expired session token should return
+    /// an HTTP error response (`401`) rather than falling back to anonymous access.
+    fn resolve_shared_disclosure_owner<'a>(
+        &'a self,
+        _state: &'a AppState,
+        _headers: &'a HeaderMap,
+        _reject_invalid_session: bool,
+    ) -> BoxFuture<'a, std::result::Result<Option<String>, Response>> {
+        Box::pin(async { Ok(None) })
+    }
+
+    /// Optional hook to load `(shared_deal_team_data, authorized_disclosures_data)` for a report
+    /// viewer. When `recipient_view_only` is `true` (e.g. `?deal_team=1`), only shared deal-team
+    /// data should be returned (or an HTTP error if missing/unavailable).
+    fn load_shared_disclosures_for_viewer<'a>(
+        &'a self,
+        _state: &'a AppState,
+        _headers: &'a HeaderMap,
+        _slug: &'a str,
+        _recipient_view_only: bool,
+    ) -> BoxFuture<'a, std::result::Result<(Option<Value>, Option<Value>), Response>> {
+        Box::pin(async { Ok((None, None)) })
     }
 }
 

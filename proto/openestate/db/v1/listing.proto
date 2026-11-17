@@ -1,0 +1,175 @@
+syntax = "proto3";
+
+package openestate.db.v1;
+
+import "openestate/db/v1/enums.proto";
+
+message ListingPriceStatusProto {
+  int64 listing_sk = 1;
+  ListingStatus status = 2;
+  optional int64 price = 3;
+  optional int64 list_price = 4;
+  optional int64 sold_price = 5;
+  optional int64 estimated_value = 6;
+  optional int32 all_in_monthly = 7;
+  int64 status_changed_ts = 8;
+  optional int64 price_changed_ts = 9;
+}
+
+message ListingCoreProto {
+  int64 listing_sk = 1;
+  string external_id = 2;
+  optional string report_slug = 3;
+  string zip = 4;
+  optional string state_code = 5;
+  optional string county_fips = 6;
+  optional string city = 7;
+  optional string street = 8;
+  string address = 9;
+  optional double lat = 10;
+  optional double lon = 11;
+  ListingStatus status = 12;
+  PropertyCategory property_category = 13;
+  optional int64 price = 14;
+  optional int64 list_price = 15;
+  optional int64 sold_price = 16;
+  optional int64 estimated_value = 17;
+  optional int32 price_per_sqft = 18;
+  optional int32 hoa_monthly = 19;
+  optional int32 all_in_monthly = 20;
+  optional double beds = 21;
+  optional double baths = 22;
+  optional int32 sqft = 23;
+  optional int32 lot_sqft = 24;
+  optional int32 year_built = 25;
+  optional double stories = 26;
+  optional int32 days_on_market = 27;
+  optional int32 listed_epoch_day = 28;
+  optional int32 sold_epoch_day = 29;
+  optional double school_score = 30;
+  optional int32 school_grade = 31;
+  optional double walk_score = 32;
+  optional double safety_score = 33;
+  optional double overall_score = 34;
+  optional double electric_rate_kwh = 35;
+  optional int32 max_download_mbps = 36;
+  int64 tag_bits = 37;
+  int64 known_bits = 38;
+  int64 first_seen_ts = 39;
+  int64 last_seen_ts = 40;
+  int64 status_changed_ts = 41;
+  optional int64 price_changed_ts = 42;
+}
+
+message ListingSchoolsProto {
+  int64 listing_sk = 1;
+  optional double school_score = 2;
+  optional int32 school_grade = 3;
+  optional string elem_name = 4;
+  optional double elem_rating = 5;
+  optional string mid_name = 6;
+  optional double mid_rating = 7;
+  optional string high_name = 8;
+  optional double high_rating = 9;
+  optional string district_name = 10;
+}
+
+message ListingUtilitiesProto {
+  int64 listing_sk = 1;
+  ElectricUtilityKind electric_utility_kind = 2;
+  optional string electric_carrier = 3;
+  optional double electric_rate_kwh = 4;
+  HeatingFuelKind gas_fuel_kind = 5;
+  optional string gas_carrier = 6;
+  optional double gas_rate_therm = 7;
+  WaterSourceKind water_source_kind = 8;
+  optional string water_carrier = 9;
+  SewerKind sewer_kind = 10;
+  optional int32 est_monthly_utilities = 11;
+  BroadbandTier broadband_tier = 12;
+  optional bool fiber_available = 13;
+  optional bool high_speed_internet = 14;
+  optional int32 max_download_mbps = 15;
+  optional int32 max_upload_mbps = 16;
+  optional string fiber_carriers = 17;
+  optional string internet_carriers = 18;
+}
+
+message ListingHazardsProto {
+  int64 listing_sk = 1;
+  FloodRiskTier flood_tier = 2;
+  optional string flood_zone = 3;
+  WildfireRiskTier wildfire_tier = 4;
+  optional string wildfire_label = 5;
+  optional double seismic_pga = 6;
+  optional double noise_max_db = 7;
+  optional bool quiet_street = 8;
+  optional double safety_score = 9;
+}
+
+message ListingFeaturesProto {
+  int64 listing_sk = 1;
+  ArchitecturalStyleCode style_code = 2;
+  optional string architectural_style = 3;
+  optional string property_type_label = 4;
+  optional double garage_spaces = 5;
+  optional double property_tax_rate = 6;
+  optional bool has_special_tax = 7;
+  optional bool has_solar = 8;
+  optional bool has_ev_charger = 9;
+  optional bool has_heat_pump = 10;
+  optional bool has_adu = 11;
+  optional bool adu_feasible = 12;
+  optional bool has_pool = 13;
+  optional bool has_hardwood_floors = 14;
+  optional bool has_updated_kitchen = 15;
+  optional bool has_remodeled = 16;
+  optional string verdict = 17;
+}
+
+message ListingEngagementProto {
+  int64 listing_sk = 1;
+  optional string mls_number = 2;
+  PortalPlatform source_platform = 3;
+  optional string source_label = 4;
+  optional string listing_url = 5;
+  optional string photo_url = 6;
+}
+
+message PortalSignalProto {
+  int64 listing_sk = 1;
+  string slug = 2;
+  PortalPlatform platform = 3;
+  optional int32 likes_count = 4;
+  optional int32 views_count = 5;
+  bool is_hot_home = 6;
+  optional string hot_tag = 7;
+  optional string portal_url = 8;
+  int64 updated_ts = 9;
+  optional bytes extra_proto_utf8 = 10;
+}
+
+message ListingDescriptionsProto {
+  int64 listing_sk = 1;
+  optional string features_text = 2;
+  optional string mls_remarks = 3;
+}
+
+message ListingTagRowProto {
+  int64 listing_sk = 1;
+  int32 tag_id = 2;
+  string tag_code = 3;
+}
+
+message ListingEventProto {
+  int64 event_sk = 1;
+  int64 listing_sk = 2;
+  string external_id = 3;
+  string zip = 4;
+  ListingEventKind event_kind = 5;
+  optional int32 old_status = 6;
+  ListingStatus new_status = 7;
+  optional int64 old_price = 8;
+  optional int64 new_price = 9;
+  int64 created_ts = 10;
+}

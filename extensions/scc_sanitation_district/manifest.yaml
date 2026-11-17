@@ -22,7 +22,7 @@ metering:
     - bytes_downloaded
 builtin: true
 provenance: live_verified
-homepage_url: "https://geo.sanjoseca.gov/"
+homepage_url: "https://geo.sanjoseca.gov/server/rest/services/REF/REF_CountyReferenceLayers/MapServer/1"
 documentation_url: "https://geo.sanjoseca.gov/server/rest/services/REF/REF_CountyReferenceLayers/MapServer/1"
 codeowners:
   - "@openestate/utilities"
@@ -48,3 +48,4 @@ sharing:
 source_attribution:
   name: "Santa Clara County Sanitation District GIS & West Valley Collection"
   url: "https://geo.sanjoseca.gov/server/rest/services/REF/REF_CountyReferenceLayers/MapServer/1"
+  reference_url_template: "https://www.wvsdca.gov/161/District-Service-Area"

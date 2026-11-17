@@ -265,8 +265,10 @@ fn ensure_https_public_url(raw_url: &str, field_name: &str) -> Result<()> {
     Ok(())
 }
 
+static ADMIN_EXPR_JINJA_ENV: Lazy<minijinja::Environment<'static>> =
+    Lazy::new(minijinja::Environment::new);
+
 fn sanitize_template_url_for_ssrf_check(raw_url: &str) -> String {
-    let mut env = minijinja::Environment::new();
     let sample_ctx: std::collections::BTreeMap<&str, &str> = std::collections::BTreeMap::from([
         ("lat", "0.0"),
         ("lon", "0.0"),
@@ -277,12 +279,12 @@ fn sanitize_template_url_for_ssrf_check(raw_url: &str) -> String {
         ("address", "example"),
         ("ip", "8.8.8.8"),
     ]);
-    if env.add_template("u", raw_url).is_ok() {
-        if let Ok(tmpl) = env.get_template("u") {
-            if let Ok(rendered) = tmpl.render(minijinja::Value::from_pairs(sample_ctx)) {
-                return rendered;
-            }
-        }
+    if let Ok(rendered) = ADMIN_EXPR_JINJA_ENV.render_named_str(
+        "u",
+        raw_url,
+        minijinja::Value::from_pairs(sample_ctx),
+    ) {
+        return rendered;
     }
     raw_url.to_string()
 }
@@ -845,10 +847,6 @@ pub(crate) fn format_extension_summary_json(row: &InstalledExtensionRow, env: &E
 }
 
 fn render_jinja_str(template_str: &str, ctx: &Value) -> Result<String> {
-    let mut env = minijinja::Environment::new();
-    env.add_template("expr", template_str)
-        .map_err(|e| anyhow!("Template syntax error: {e}"))?;
-    let tmpl = env.get_template("expr")?;
     let mut pairs = std::collections::BTreeMap::new();
     if let Some(obj) = ctx.as_object() {
         for (k, v) in obj {
@@ -862,8 +860,15 @@ fn render_jinja_str(template_str: &str, ctx: &Value) -> Result<String> {
             pairs.insert(k.clone(), sv);
         }
     }
-    tmpl.render(minijinja::Value::from_pairs(pairs))
-        .map_err(|e| anyhow!("Template render error: {e}"))
+    ADMIN_EXPR_JINJA_ENV
+        .render_named_str("expr", template_str, minijinja::Value::from_pairs(pairs))
+        .map_err(|e| {
+            if e.kind() == minijinja::ErrorKind::SyntaxError {
+                anyhow!("Template syntax error: {e}")
+            } else {
+                anyhow!("Template render error: {e}")
+            }
+        })
 }
 
 fn score_geo_rule_match(match_scope: &Value, query_ctx: &Value) -> Option<i64> {
@@ -2735,12 +2740,26 @@ async fn build_admin_overview_payload(
     let _ = state.db.seed_default_system_modules_if_empty().await;
     let bridge = active_extension_bridge();
     let comm_bridge = active_commercial_bridge();
-    let (extensions_list, modules, users, subs_res, watched_zips, audit_logs, ops_snap, tiers, comm_users) = tokio::join!(
+    let (
+        extensions_list,
+        modules,
+        users,
+        subs_total_res,
+        watched_zips_total_res,
+        audit_logs,
+        ops_snap,
+        tiers,
+        comm_users,
+    ) = tokio::join!(
         bridge.sync_and_list(state),
         state.db.list_system_modules(),
         state.db.list_app_users(),
-        state.db.list_admin_subscriptions(None, 1, 0),
-        state.db.list_admin_watched_zips(500),
+        state
+            .db
+            .fetch_scalar_i64("SELECT COUNT(*) AS cnt FROM subscriptions", &[], "cnt"),
+        state
+            .db
+            .fetch_scalar_i64("SELECT COUNT(*) AS cnt FROM watched_zips", &[], "cnt"),
         state.db.list_admin_audit_logs(25),
         build_ops_telemetry_snapshot(state),
         comm_bridge.list_plan_tiers(state),
@@ -2750,8 +2769,8 @@ async fn build_admin_overview_payload(
     let modules = modules.unwrap_or_default();
     let users = users.unwrap_or_default();
     let comm_users = comm_users.unwrap_or_default();
-    let (_, subs_total) = subs_res.unwrap_or_default();
-    let watched_zips = watched_zips.unwrap_or_default();
+    let subs_total = subs_total_res.unwrap_or(0);
+    let watched_zips_total = watched_zips_total_res.unwrap_or(0);
     let audit_logs = audit_logs.unwrap_or_default();
 
     let mut unique_emails: BTreeSet<String> = users
@@ -2818,7 +2837,7 @@ async fn build_admin_overview_payload(
             "reportJobs": ops_snap.pointer("/inventory/reportJobs").cloned().unwrap_or_else(|| json!({})),
             "usersTotal": unique_emails.len(),
             "subscriptionsTotal": subs_total,
-            "watchedZipsTotal": watched_zips.len(),
+            "watchedZipsTotal": watched_zips_total,
         },
         "osrm": ops_snap.get("osrm").cloned().unwrap_or_else(|| json!({})),
         "database": ops_snap.get("database").cloned().unwrap_or_else(|| json!({})),
@@ -3826,6 +3845,7 @@ pub async fn handle_admin_report_get(
                     "displayAddress": rec.display_address,
                     "zip": rec.zip,
                     "updatedAt": rec.updated_at,
+                    "runtimeSsr": true,
                     "hasRenderedHtml": rec.rendered_html.is_some(),
                     "moduleKeys": module_keys,
                     "sourcesCount": sources_count,
@@ -4132,26 +4152,32 @@ async fn collect_merged_admin_users(
     q: &AdminUsersQuery,
 ) -> Result<(Vec<Value>, Vec<Value>)> {
     let comm_bridge = active_commercial_bridge();
-    let (app_users, tiers, comm_users, sub_rows) = tokio::join!(
+    let (app_users, tiers, comm_users, sub_counts_res) = tokio::join!(
         state.db.list_app_users(),
         comm_bridge.list_plan_tiers(state),
         comm_bridge.list_commercial_users(state),
-        state
-            .db
-            .fetch_subscriptions_sql("SELECT * FROM subscriptions ORDER BY created_at DESC", &[]),
+        state.db.fetch_all_mapped_raw(
+            "SELECT LOWER(TRIM(email)) AS em, \
+                    COUNT(CASE WHEN active != 0 THEN 1 END) AS act_cnt, \
+                    COUNT(CASE WHEN active = 0 THEN 1 END) AS paused_cnt \
+             FROM subscriptions \
+             GROUP BY LOWER(TRIM(email))",
+            &[],
+            |r| {
+                (
+                    r.opt_str("em").unwrap_or_default(),
+                    r.opt_i64("act_cnt").unwrap_or(0) as usize,
+                    r.opt_i64("paused_cnt").unwrap_or(0) as usize,
+                )
+            }
+        ),
     );
     let app_users = app_users?;
     let comm_users = comm_users.unwrap_or_default();
-    let sub_rows = sub_rows.unwrap_or_default();
-
     let mut sub_counts_by_email: HashMap<String, (usize, usize)> = HashMap::new();
-    for s in &sub_rows {
-        let em = s.email.trim().to_ascii_lowercase();
-        let entry = sub_counts_by_email.entry(em).or_insert((0, 0));
-        if s.active != 0 {
-            entry.0 += 1;
-        } else {
-            entry.1 += 1;
+    for (em, act_c, paused_c) in sub_counts_res.unwrap_or_default() {
+        if !em.is_empty() {
+            sub_counts_by_email.insert(em, (act_c, paused_c));
         }
     }
 
@@ -5416,52 +5442,58 @@ async fn fetch_notification_summary_by_sub(
 }
 
 async fn recompute_watched_zip_counts(db: &DbStore, extra_zips: &[String]) -> Result<()> {
-    let active_subs = db
-        .fetch_subscriptions_sql("SELECT * FROM subscriptions WHERE active = 1", &[])
+    let zip_rows = db
+        .fetch_all_mapped_raw(
+            "SELECT sz.zip AS zip, COUNT(*) AS cnt \
+             FROM subscription_zips sz \
+             JOIN subscriptions s ON s.subscription_sk = sz.subscription_sk \
+             WHERE s.active = 1 \
+             GROUP BY sz.zip",
+            &[],
+            |r| (r.opt_str("zip").unwrap_or_default(), r.opt_i64("cnt").unwrap_or(0)),
+        )
         .await?;
     let mut count_map: HashMap<String, i64> = HashMap::new();
-    for sub in &active_subs {
-        if let Ok(arr) = serde_json::from_str::<Vec<String>>(&sub.zips_json) {
-            for z in arr {
-                *count_map.entry(z).or_insert(0) += 1;
-            }
+    for (z, cnt) in zip_rows {
+        if !z.is_empty() {
+            count_map.insert(z, cnt);
         }
     }
     let mut all_zips: BTreeSet<String> = extra_zips.iter().cloned().collect();
     for k in count_map.keys() {
         all_zips.insert(k.clone());
     }
-    let now = now_iso();
+    let now_ts = crate::shared::now_unix_secs();
     for z in all_zips {
         let sub_cnt = *count_map.get(&z).unwrap_or(&0);
         if let Some(existing) = db.get_watched_zip(&z).await? {
             let active = if sub_cnt > 0 { 1_i64 } else { existing.active };
-            db.execute_params(
+            db.execute_params_raw(
                 "UPDATE watched_zips SET subscriber_count = ?, active = ? WHERE zip = ?",
                 &[sub_cnt.into(), active.into(), z.as_str().into()],
             )
             .await?;
         } else if sub_cnt > 0 {
-            db.upsert_row(
+            db.upsert_row_raw(
                 "watched_zips",
                 &[
                     ("zip", z.into()),
                     ("city", SqlParam::Null),
-                    ("state", SqlParam::Null),
+                    ("state_code", SqlParam::Null),
                     ("lat", SqlParam::Null),
                     ("lon", SqlParam::Null),
                     ("active", 1_i64.into()),
                     ("subscriber_count", sub_cnt.into()),
                     ("sync_interval_min", 15_i64.into()),
-                    ("last_synced_at", SqlParam::Null),
-                    ("last_sync_status", Some("queued").into()),
+                    ("last_synced_ts", SqlParam::Null),
+                    ("last_sync_status", 2_i64.into()),
                     ("last_new_count", 0_i64.into()),
                     ("last_sold_count", 0_i64.into()),
                     ("total_active_listings", 0_i64.into()),
                     ("total_sold_listings", 0_i64.into()),
                     ("sources_used", SqlParam::Null),
                     ("last_error", SqlParam::Null),
-                    ("created_at", now.clone().into()),
+                    ("created_ts", now_ts.into()),
                 ],
                 &["zip"],
             )
@@ -5939,36 +5971,7 @@ pub async fn handle_admin_subscription_update(
     }
 
     row.updated_at = now;
-    if let Err(e) = state
-        .db
-        .execute_params(
-            "UPDATE subscriptions
-             SET email = ?, name = ?, zips_json = ?, cities_json = ?, requirements_text = ?,
-                 parsed_filters_json = ?, notify_on_new = ?, notify_on_sold = ?, active = ?,
-                 frequency = ?, digest_pending_json = ?, filter_schema_version = ?,
-                 plan_tier = ?, filters_refreshed_at = ?, updated_at = ?
-             WHERE id = ?",
-            &[
-                row.email.as_str().into(),
-                row.name.as_deref().into(),
-                row.zips_json.as_str().into(),
-                row.cities_json.as_deref().into(),
-                row.requirements_text.as_str().into(),
-                row.parsed_filters_json.as_str().into(),
-                row.notify_on_new.into(),
-                row.notify_on_sold.into(),
-                row.active.into(),
-                row.frequency.as_str().into(),
-                row.digest_pending_json.as_deref().into(),
-                row.filter_schema_version.into(),
-                row.plan_tier.as_deref().into(),
-                row.filters_refreshed_at.as_deref().into(),
-                row.updated_at.as_str().into(),
-                row.id.as_str().into(),
-            ],
-        )
-        .await
-    {
+    if let Err(e) = state.db.upsert_subscription_normalized(&row).await {
         return map_anyhow(e);
     }
 
@@ -6069,32 +6072,15 @@ pub async fn handle_admin_subscription_retranslate_one(
         serde_json::to_string(&next_filters.cities).unwrap_or_else(|_| "[]".to_string());
     let now = now_iso();
 
-    if let Err(e) = state
-        .db
-        .execute_params(
-            "UPDATE subscriptions
-             SET parsed_filters_json = ?, cities_json = ?, filter_schema_version = ?,
-                 filters_refreshed_at = ?, updated_at = ?
-             WHERE id = ?",
-            &[
-                next_json.as_str().into(),
-                cities_json.as_str().into(),
-                CURRENT_FILTER_SCHEMA_VERSION.into(),
-                Some(now.clone()).into(),
-                now.clone().into(),
-                row.id.as_str().into(),
-            ],
-        )
-        .await
-    {
-        return map_anyhow(e);
-    }
-
     row.parsed_filters_json = next_json;
     row.cities_json = Some(cities_json);
     row.filter_schema_version = CURRENT_FILTER_SCHEMA_VERSION;
     row.filters_refreshed_at = Some(now.clone());
     row.updated_at = now;
+
+    if let Err(e) = state.db.upsert_subscription_normalized(&row).await {
+        return map_anyhow(e);
+    }
 
     log_admin_action(
         &state,
@@ -7181,8 +7167,8 @@ pre.json-view {
             <tr>
               <th>Address &amp; Slug</th>
               <th>ZIP</th>
-              <th>Rendered HTML</th>
-              <th>JSON Size</th>
+              <th>Render &amp; Format</th>
+              <th>Stored Size</th>
               <th>Updated At</th>
               <th>Actions</th>
             </tr>
@@ -7835,7 +7821,7 @@ description: Active community water systems by 5-digit ZIP from U.S. EPA Envirof
 domain: DOMAIN_ENVIRONMENTAL
 driver: DRIVER_DECLARATIVE_YAML
 proto_message_type: openestate.extension.v1.EnvironmentalSummaryProto
-documentation_url: https://www.epa.gov/enviro/sdwis-model
+documentation_url: https://www.epa.gov/enviro/sdwis-overview
 default_provenance: PROVENANCE_LIVE_VERIFIED
 priority: 115
 enabled: true
@@ -8484,7 +8470,8 @@ geo_rules:
           </td>
           <td class="mono">${esc(r.zip || '—')}</td>
           <td>
-            <span class="pill ${r.hasRenderedHtml ? 'pill-good' : 'pill-muted'}">${r.hasRenderedHtml ? 'SSR Ready' : 'JSON Only'}</span>
+            <span class="pill pill-good">Runtime SSR</span>
+            ${r.compressed ? '<span class="pill pill-info" style="margin-left:4px">zstd</span>' : ''}
             ${r.osrmDegraded ? '<span class="pill pill-warn" style="margin-left:4px">OSRM Degraded</span>' : ''}
           </td>
           <td class="mono">${(Number(r.reportBytes || 0) / 1024).toFixed(1)} KB</td>

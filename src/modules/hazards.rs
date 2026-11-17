@@ -52,6 +52,7 @@ pub const URL_GRP: &str = "https://services.arcgis.com/cJ9YHowT8TU7DUyn/arcgis/r
 pub const URL_EPQS: &str = "https://epqs.nationalmap.gov/v1/json";
 pub const URL_3DEP_IMAGE: &str =
     "https://elevation.nationalmap.gov/arcgis/rest/services/3DEPElevation/ImageServer";
+pub const URL_3DEP_VIEWER: &str = "https://apps.nationalmap.gov/3depdem/";
 pub const URL_OPEN_METEO_ELEVATION: &str = "https://api.open-meteo.com/v1/elevation";
 
 pub const ELEV_SOURCE_EPQS: &str = "USGS 3DEP Elevation Point Query Service";
@@ -1627,14 +1628,14 @@ where
                 r = &mut epqs, if !epqs_done => {
                     epqs_done = true;
                     match r {
-                        Ok(m) => return Ok(Elevation { meters: m, source: ELEV_SOURCE_EPQS, source_url: URL_EPQS }),
+                        Ok(m) => return Ok(Elevation { meters: m, source: ELEV_SOURCE_EPQS, source_url: URL_3DEP_VIEWER }),
                         Err(e) => last_err = e,
                     }
                 }
                 r = &mut hedged, if !hedged_done => {
                     hedged_done = true;
                     match r {
-                        Ok(m) => return Ok(Elevation { meters: m, source: ELEV_SOURCE_3DEP_IMAGE, source_url: URL_3DEP_IMAGE }),
+                        Ok(m) => return Ok(Elevation { meters: m, source: ELEV_SOURCE_3DEP_IMAGE, source_url: URL_3DEP_VIEWER }),
                         Err(e) => last_err = e,
                     }
                 }
@@ -2832,7 +2833,7 @@ pub fn summarize_fault_features(
     let format_row = |a: &Value, dist_m: f64, nlat: f64, nlon: f64| -> Value {
         let age = val_str(a.get("age")).unwrap_or("");
         let fid = val_str(a.get("fault_id")).unwrap_or("");
-        let sid = val_str(a.get("section_id")).unwrap_or("");
+        let _sid = val_str(a.get("section_id")).unwrap_or("");
         let dir = if dist_m >= 1.0 {
             Some(compass8(bearing_deg(lat, lon, nlat, nlon)))
         } else {
@@ -2852,7 +2853,7 @@ pub fn summarize_fault_features(
             "class": val_str(a.get("class")),
             "recentlyActive": is_active(age),
             "url": if !fid.is_empty() && fid != "0" {
-                Some(format!("https://earthquake.usgs.gov/cfusion/qfault/show_report_AB_archive.cfm?fault_id={fid}&section_id={sid}"))
+                Some("https://earthquake.usgs.gov/nshmp/".to_string())
             } else { None },
         })
     };
@@ -3228,7 +3229,10 @@ pub async fn run_hazards_with_db(
     let asce_checked = r_asce.is_ok();
     let design_maps = match r_asce {
         Ok(j) => {
-            sources.push(SourceItem::new("USGS Seismic Design Web Services (ASCE 7-22)", URL_ASCE722));
+            sources.push(SourceItem::new(
+                "USGS Seismic Design Web Services (ASCE 7-22)",
+                "https://earthquake.usgs.gov/ws/designmaps/asce7-22.html",
+            ));
             let d = j.pointer("/response/data").unwrap_or(&Value::Null);
             let m = j.pointer("/response/metadata").unwrap_or(&Value::Null);
             let sc = j.pointer("/request/parameters/siteClass").and_then(|v| v.as_str()).unwrap_or("D");
@@ -3716,7 +3720,6 @@ pub async fn run_hazards_with_db(
             obj.insert("caNaturalHazardDisclosure".into(), nhd.clone());
             obj.insert("californiaNhd".into(), nhd);
         }
-        layers_map.insert("list".into(), Value::Array(map_layers.clone()));
         obj.insert("mapLayers".into(), Value::Array(map_layers));
         obj.insert("layers".into(), Value::Object(layers_map));
     }

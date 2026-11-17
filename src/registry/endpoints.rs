@@ -21,10 +21,10 @@ pub const USGS_IMAGERY_ONLY_TILE_URL: &str =
     "https://basemap.nationalmap.gov/arcgis/rest/services/USGSImageryOnly/MapServer/tile/";
 pub const USGS_IMAGERY_ONLY_EXPORT_URL: &str =
     "https://basemap.nationalmap.gov/arcgis/rest/services/USGSImageryOnly/MapServer/export";
-pub const USGS_IMAGERY_TOPO_BASE_URL: &str =
-    "https://basemap.nationalmap.gov/arcgis/rest/services/USGSImageryTopo/MapServer";
-pub const USGS_IMAGERY_TOPO_EXPORT_URL: &str =
-    "https://basemap.nationalmap.gov/arcgis/rest/services/USGSImageryTopo/MapServer/export";
+pub const USGS_TOPO_BASE_URL: &str =
+    "https://basemap.nationalmap.gov/arcgis/rest/services/USGSTopo/MapServer";
+pub const USGS_TOPO_EXPORT_URL: &str =
+    "https://basemap.nationalmap.gov/arcgis/rest/services/USGSTopo/MapServer/export";
 pub const USGS_3DEP_INFO_URL: &str = "https://www.usgs.gov/3d-elevation-program";
 pub const USGS_NATIONAL_MAP_URL: &str = "https://apps.nationalmap.gov/viewer/";
 
@@ -45,10 +45,12 @@ pub const KINGCO_ORTHO_2023_EXPORT_URL: &str =
 // Commercial / BYOK high-resolution satellite providers (proxied server-side via media_api.rs)
 pub const ARCGIS_BASEMAPS_WORLD_IMAGERY_BASE_URL: &str =
     "https://ibasemaps-api.arcgis.com/arcgis/rest/services/World_Imagery/MapServer";
+pub const ARCGIS_WORLD_IMAGERY_TILE_FALLBACK_URL: &str =
+    "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/";
 pub const ARCGIS_WORLD_IMAGERY_EXPORT_FALLBACK_URL: &str =
     "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/export";
 pub const MAPBOX_SATELLITE_TILES_BASE_URL: &str =
-    "https://api.mapbox.com/v4/mapbox.satellite";
+    "https://api.mapbox.com/styles/v1/mapbox/satellite-v9/tiles/256";
 pub const MAPBOX_SATELLITE_STATIC_BASE_URL: &str =
     "https://api.mapbox.com/styles/v1/mapbox/satellite-v9/static";
 pub const GOOGLE_MAP_TILES_SESSION_URL: &str =

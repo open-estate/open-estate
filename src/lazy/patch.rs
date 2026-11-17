@@ -407,12 +407,28 @@ pub fn build_lazy_sections_map(
             LazySectionStatusKind::NotEnabled => {
                 format!("{label} extension is disabled by default.")
             }
-            LazySectionStatusKind::Failed => job
-                .last_error
-                .as_deref()
-                .filter(|s| !s.trim().is_empty())
-                .map(|e| format!("{label} failed: {}", e.trim()))
-                .unwrap_or_else(|| format!("{label} could not be loaded.")),
+            LazySectionStatusKind::Failed => {
+                let err_lc = job
+                    .last_error
+                    .as_deref()
+                    .unwrap_or("")
+                    .to_ascii_lowercase();
+                if err_lc.contains("sign in")
+                    || err_lc.contains("upgrade")
+                    || err_lc.contains("entitlement")
+                    || err_lc.contains("premium")
+                {
+                    format!(
+                        "Sign in or upgrade your plan to auto-check records for {label}, or upload your packet below."
+                    )
+                } else if job.section_id.to_ascii_lowercase().contains("disclosure")
+                    || job.section_id.to_ascii_lowercase().contains("inspection")
+                {
+                    "No public packet was posted online for this property — upload your files below or request them through the listing agent.".to_string()
+                } else {
+                    format!("{label} is not currently posted online — check back later or verify directly with local records.")
+                }
+            }
         };
 
         if let Some(existing) = map.get_mut(&job.section_id) {

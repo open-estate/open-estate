@@ -10,7 +10,10 @@ use crate::ai::llm::{
     parse_model_spec, responses_json_with_cache, DbLlmCache, LlmCallOptions,
     DEFAULT_FALLBACK_MODEL, DEFAULT_MATCH_MODEL,
 };
-use crate::db::{DbStore, SqlParam};
+use crate::db::{
+    proto, sql_bit_is_set_expr, sql_bitmask_all_set_expr, sql_bitmask_none_set_expr, DbStore,
+    FeatureTag, ListingFullView, PropertyCategory, ReportHeaderProto, SqlParam,
+};
 use crate::scoring::catalog::{Dimension, Lang};
 use crate::scoring::engine::{rank_with, CommuteMatrix, RankOptions, RankResult};
 use crate::scoring::factors::HomeFactors;
@@ -912,6 +915,7 @@ fn format_preview_param(p: &SqlParam) -> String {
         SqlParam::I64(n) => n.to_string(),
         SqlParam::F64(f) => fmt_clean_num(*f),
         SqlParam::Text(s) => format!("'{}'", s.replace('\'', "''")),
+        SqlParam::Bytes(b) => format!("X'{}'", hex::encode(b)),
     }
 }
 
@@ -1198,11 +1202,13 @@ pub fn compile_filters_where_condition(
         for tag in filters.required_tags.iter().take(6) {
             let clean_tag = tag.trim().to_ascii_lowercase().replace(' ', "_");
             if !clean_tag.is_empty() {
-                let pat_tag = format!("%\"{clean_tag}\"%");
                 let pat_words = format!("%{}%", clean_tag.replace('_', " "));
                 cond = cond.add(
                     Condition::any()
-                        .add(Func::lower(Expr::col(Alias::new("tags_json"))).like(pat_tag))
+                        .add(Expr::cust_with_values(
+                            "EXISTS (SELECT 1 FROM listing_tags lt WHERE lt.listing_sk = listings.listing_sk AND lt.tag_code = ?)",
+                            [clean_tag],
+                        ))
                         .add(Func::lower(Expr::col(Alias::new("features_text"))).like(pat_words)),
                 );
             }
@@ -1345,6 +1351,500 @@ pub fn compile_filters_to_sql(
         params,
         sql_preview,
     }
+}
+
+const NARROW_LISTING_CORE_PROJ: &str = "l.listing_sk, l.external_id, l.report_slug, l.zip, l.state_code, l.county_fips, l.city, l.street, l.address, l.lat, l.lon, l.status, l.property_category, l.price, l.list_price, l.sold_price, l.estimated_value, l.price_per_sqft, l.hoa_monthly, l.all_in_monthly, l.beds, l.baths, l.sqft, l.lot_sqft, l.year_built, l.stories, l.days_on_market, l.listed_epoch_day, l.sold_epoch_day, l.school_score, l.school_grade, l.walk_score, l.safety_score, l.overall_score, l.electric_rate_kwh, l.max_download_mbps, l.tag_bits, l.known_bits, l.first_seen_ts, l.last_seen_ts, l.status_changed_ts, l.price_changed_ts";
+
+fn render_sql_preview(sql: &str, params: &[SqlParam]) -> String {
+    let mut sql_preview = String::with_capacity(sql.len() + 64);
+    let mut param_iter = params.iter();
+    for ch in sql.chars() {
+        if ch == '?' {
+            if let Some(p) = param_iter.next() {
+                sql_preview.push_str(&format_preview_param(p));
+            } else {
+                sql_preview.push('?');
+            }
+        } else {
+            sql_preview.push(ch);
+        }
+    }
+    sql_preview
+}
+
+/// Narrow v3 SQL compiler over `listings l` (`Q1_pure_sql`):
+/// - Uses Rapid-safe bitmask predicates (`sql_bitmask_all_set_expr` / `sql_bitmask_none_set_expr` / `sql_bit_is_set_expr` — zero MySQL `&`, zero `LOWER(tags_json) LIKE`).
+/// - Drops index-defeating `LOWER(l.city)` and `UPPER(l.state_code)`.
+/// - Attaches 1:1 domain `LEFT JOIN`s ONLY when non-core filter columns are requested.
+pub fn compile_core_filters_to_sql(
+    filters: &SearchFilters,
+    dialect: &str,
+    rapid_hint: &str,
+    relaxed: bool,
+    override_statuses: Option<&[String]>,
+    limit: usize,
+) -> CompiledSqlQuery {
+    let need_utilities = (!relaxed
+        && (!filters.internet_carriers.is_empty() || !filters.electric_carriers.is_empty()))
+        || filters.max_monthly_utilities.is_some();
+    let need_hazards =
+        !relaxed && (filters.max_noise_db.is_some() || filters.max_seismic_pga.is_some());
+    let need_features =
+        !relaxed && (filters.min_garage_spaces.is_some() || !filters.architectural_styles.is_empty());
+    let need_descriptions = !relaxed
+        && filters
+            .must_have_keywords
+            .iter()
+            .take(3)
+            .any(|k| !k.trim().is_empty());
+
+    let mut joins = String::new();
+    if need_utilities {
+        joins.push_str(" LEFT JOIN listing_utilities lu ON lu.listing_sk = l.listing_sk");
+    }
+    if need_hazards {
+        joins.push_str(" LEFT JOIN listing_hazards lh ON lh.listing_sk = l.listing_sk");
+    }
+    if need_features {
+        joins.push_str(" LEFT JOIN listing_features lf ON lf.listing_sk = l.listing_sk");
+    }
+    if need_descriptions {
+        joins.push_str(" LEFT JOIN listing_descriptions ld ON ld.listing_sk = l.listing_sk");
+    }
+
+    let mut clauses: Vec<String> = Vec::new();
+    let mut params: Vec<SqlParam> = Vec::new();
+
+    let raw_statuses: &[String] = override_statuses.unwrap_or_else(|| {
+        if filters.statuses.is_empty() {
+            &[]
+        } else {
+            filters.statuses.as_slice()
+        }
+    });
+    let mut status_codes: Vec<i64> = if raw_statuses.is_empty() {
+        vec![1, 2]
+    } else {
+        raw_statuses
+            .iter()
+            .map(|s| i64::from(proto::listing_status_to_code(Some(s))))
+            .collect()
+    };
+    status_codes.sort_unstable();
+    status_codes.dedup();
+    if status_codes.len() == 1 {
+        clauses.push("l.status = ?".to_string());
+        params.push(SqlParam::I64(status_codes[0]));
+    } else if !status_codes.is_empty() {
+        let ph = vec!["?"; status_codes.len()].join(", ");
+        clauses.push(format!("l.status IN ({ph})"));
+        for c in status_codes {
+            params.push(SqlParam::I64(c));
+        }
+    }
+
+    if !filters.zips.is_empty() || !filters.cities.is_empty() {
+        let mut loc_or: Vec<String> = Vec::new();
+        if !filters.zips.is_empty() {
+            if filters.zips.len() == 1 {
+                loc_or.push("l.zip = ?".to_string());
+                params.push(SqlParam::Text(filters.zips[0].clone()));
+            } else {
+                let ph = vec!["?"; filters.zips.len()].join(", ");
+                loc_or.push(format!("l.zip IN ({ph})"));
+                for z in &filters.zips {
+                    params.push(SqlParam::Text(z.clone()));
+                }
+            }
+        }
+        if !filters.cities.is_empty() {
+            let mut city_or: Vec<String> = Vec::new();
+            for c in &filters.cities {
+                let clean_c = c.trim();
+                if clean_c.is_empty() {
+                    continue;
+                }
+                if dialect == "mysql" {
+                    city_or.push("l.city = ?".to_string());
+                } else {
+                    city_or.push("l.city = ? COLLATE NOCASE".to_string());
+                }
+                params.push(SqlParam::Text(clean_c.to_string()));
+            }
+            if !city_or.is_empty() {
+                loc_or.push(format!("({})", city_or.join(" OR ")));
+            }
+        }
+        if !loc_or.is_empty() {
+            clauses.push(if loc_or.len() == 1 {
+                loc_or.remove(0)
+            } else {
+                format!("({})", loc_or.join(" OR "))
+            });
+        }
+    }
+
+    if !filters.states.is_empty() && filters.zips.is_empty() {
+        let mut clean_states: Vec<String> = filters
+            .states
+            .iter()
+            .map(|s| s.trim().to_ascii_uppercase())
+            .filter(|s| !s.is_empty())
+            .collect();
+        clean_states.sort();
+        clean_states.dedup();
+        if clean_states.len() == 1 {
+            clauses.push("l.state_code = ?".to_string());
+            params.push(SqlParam::Text(clean_states.remove(0)));
+        } else if !clean_states.is_empty() {
+            let ph = vec!["?"; clean_states.len()].join(", ");
+            clauses.push(format!("l.state_code IN ({ph})"));
+            for st in clean_states {
+                params.push(SqlParam::Text(st));
+            }
+        }
+    }
+
+    if let Some(min_p) = filters.min_price {
+        let eff = ((min_p as f64) * if relaxed { 0.88 } else { 1.0 }).round() as i64;
+        clauses.push("l.price >= ?".to_string());
+        params.push(SqlParam::I64(eff));
+    }
+    if let Some(max_p) = filters.max_price {
+        let eff = ((max_p as f64) * if relaxed { 1.15 } else { 1.0 }).round() as i64;
+        clauses.push("l.price <= ?".to_string());
+        params.push(SqlParam::I64(eff));
+    }
+
+    if let Some(min_b) = filters.min_beds {
+        let eff = (min_b - if relaxed { 1.0 } else { 0.0 }).max(1.0);
+        clauses.push("(l.beds IS NULL OR l.beds >= ?)".to_string());
+        params.push(SqlParam::F64(eff));
+    }
+    if let (Some(max_b), false) = (filters.max_beds, relaxed) {
+        clauses.push("l.beds <= ?".to_string());
+        params.push(SqlParam::F64(max_b));
+    }
+
+    if let Some(min_ba) = filters.min_baths {
+        let eff = (min_ba - if relaxed { 0.5 } else { 0.0 }).max(1.0);
+        clauses.push("(l.baths IS NULL OR l.baths >= ?)".to_string());
+        params.push(SqlParam::F64(eff));
+    }
+
+    if let Some(min_sq) = filters.min_sqft {
+        let eff = ((min_sq as f64) * if relaxed { 0.85 } else { 1.0 }).round() as i64;
+        clauses.push("(l.sqft IS NULL OR l.sqft >= ?)".to_string());
+        params.push(SqlParam::I64(eff));
+    }
+    if let (Some(max_sq), false) = (filters.max_sqft, relaxed) {
+        clauses.push("l.sqft <= ?".to_string());
+        params.push(SqlParam::I64(max_sq));
+    }
+
+    if let Some(min_lot) = filters.min_lot_sqft {
+        let eff = ((min_lot as f64) * if relaxed { 0.8 } else { 1.0 }).round() as i64;
+        clauses.push("(l.lot_sqft IS NULL OR l.lot_sqft >= ?)".to_string());
+        params.push(SqlParam::I64(eff));
+    }
+
+    if !relaxed {
+        if let Some(min_yr) = filters.min_year_built {
+            clauses.push("(l.year_built IS NULL OR l.year_built >= ?)".to_string());
+            params.push(SqlParam::I64(min_yr));
+        }
+        if let Some(max_yr) = filters.max_year_built {
+            clauses.push("(l.year_built IS NULL OR l.year_built <= ?)".to_string());
+            params.push(SqlParam::I64(max_yr));
+        }
+        if let Some(st) = filters.stories {
+            clauses.push("(l.stories IS NULL OR l.stories = ?)".to_string());
+            params.push(SqlParam::F64(st as f64));
+        }
+        if let Some(max_hoa) = filters.max_hoa_monthly {
+            clauses.push("(l.hoa_monthly IS NULL OR l.hoa_monthly <= ?)".to_string());
+            params.push(SqlParam::I64(max_hoa));
+        }
+        if !filters.property_types.is_empty() {
+            let mut cat_codes: Vec<i64> = Vec::new();
+            for pt in &filters.property_types {
+                let code = proto::property_category_to_code(Some(pt));
+                if code == PropertyCategory::Manufactured as i32
+                    || code == PropertyCategory::LandLot as i32
+                    || pt.eq_ignore_ascii_case("Manufactured / Land")
+                {
+                    cat_codes.push(PropertyCategory::Manufactured as i64);
+                    cat_codes.push(PropertyCategory::LandLot as i64);
+                } else if code > 0 {
+                    cat_codes.push(i64::from(code));
+                }
+            }
+            cat_codes.sort_unstable();
+            cat_codes.dedup();
+            if cat_codes.len() == 1 {
+                clauses.push("l.property_category = ?".to_string());
+                params.push(SqlParam::I64(cat_codes[0]));
+            } else if !cat_codes.is_empty() {
+                let ph = vec!["?"; cat_codes.len()].join(", ");
+                clauses.push(format!("l.property_category IN ({ph})"));
+                for c in cat_codes {
+                    params.push(SqlParam::I64(c));
+                }
+            }
+        }
+    }
+
+    let eff_school = filters
+        .min_school_score
+        .or_else(|| school_grade_to_min_score(filters.min_school_grade.as_deref()));
+    if let Some(sc) = eff_school {
+        let threshold = round_n(sc - if relaxed { 1.0 } else { 0.2 }, 1);
+        clauses.push("(l.school_score IS NULL OR l.school_score >= ?)".to_string());
+        params.push(SqlParam::F64(threshold));
+    }
+
+    if !relaxed {
+        let (mut req_mask, mut excl_mask) = proto::build_search_filter_tag_masks(
+            filters.fiber_only,
+            filters.high_speed_internet_only,
+            filters.municipal_electric_only,
+            filters.municipal_water_only,
+            filters.municipal_sewer_only,
+            filters.has_solar,
+            filters.has_ev_charger,
+            filters.has_heat_pump,
+            filters.has_adu,
+            filters.adu_feasible,
+            filters.has_pool,
+            filters.exclude_special_tax,
+            &[],
+        );
+        if filters.has_hardwood_floors {
+            req_mask |= proto::feature_tag_bit(FeatureTag::HardwoodFloors);
+        }
+        if filters.has_updated_kitchen {
+            req_mask |= proto::feature_tag_bit(FeatureTag::UpdatedKitchen);
+        }
+        if filters.remodeled_only {
+            req_mask |= proto::feature_tag_bit(FeatureTag::Remodeled);
+        }
+        if filters.quiet_street_only {
+            req_mask |= proto::feature_tag_bit(FeatureTag::QuietStreet);
+        }
+        if filters.exclude_high_flood_risk {
+            excl_mask |= proto::feature_tag_bit(FeatureTag::InSfhaFlood);
+        }
+        if filters.exclude_high_wildfire_risk {
+            excl_mask |= proto::feature_tag_bit(FeatureTag::HighWildfire);
+        }
+        if req_mask > 0 {
+            clauses.push(sql_bitmask_all_set_expr(dialect, "l.tag_bits", req_mask));
+        }
+        if excl_mask > 0 {
+            clauses.push(sql_bitmask_none_set_expr(dialect, "l.tag_bits", excl_mask));
+        }
+
+        if let Some(min_dl) = filters.min_download_mbps {
+            clauses.push("l.max_download_mbps >= ?".to_string());
+            params.push(SqlParam::I64(min_dl));
+        }
+        if let Some(min_safety) = filters.min_safety_score {
+            clauses.push("l.safety_score >= ?".to_string());
+            params.push(SqlParam::F64(min_safety));
+        }
+
+        if !filters.internet_carriers.is_empty() {
+            let mut isp_or = Vec::new();
+            for c in filters.internet_carriers.iter().take(6) {
+                let needle = c.trim();
+                if !needle.is_empty() {
+                    let pat = format!("%{needle}%");
+                    isp_or.push("(lu.internet_carriers LIKE ? OR lu.fiber_carriers LIKE ?)".to_string());
+                    params.push(SqlParam::Text(pat.clone()));
+                    params.push(SqlParam::Text(pat));
+                }
+            }
+            if !isp_or.is_empty() {
+                clauses.push(format!("({})", isp_or.join(" OR ")));
+            }
+        }
+        if !filters.electric_carriers.is_empty() {
+            let mut elec_or = Vec::new();
+            for c in filters.electric_carriers.iter().take(6) {
+                let needle = c.trim();
+                if !needle.is_empty() {
+                    elec_or.push("lu.electric_carrier LIKE ?".to_string());
+                    params.push(SqlParam::Text(format!("%{needle}%")));
+                }
+            }
+            if !elec_or.is_empty() {
+                clauses.push(format!("({})", elec_or.join(" OR ")));
+            }
+        }
+
+        if let Some(min_g) = filters.min_garage_spaces {
+            clauses.push("lf.garage_spaces >= ?".to_string());
+            params.push(SqlParam::F64(min_g));
+        }
+        if !filters.architectural_styles.is_empty() {
+            let mut st_or = Vec::new();
+            for s in filters.architectural_styles.iter().take(6) {
+                let needle = s.trim();
+                if !needle.is_empty() {
+                    let code = proto::architectural_style_str_to_code(Some(needle));
+                    if code > 0 {
+                        st_or.push("(lf.style_code = ? OR lf.architectural_style LIKE ?)".to_string());
+                        params.push(SqlParam::I64(i64::from(code)));
+                        params.push(SqlParam::Text(format!("%{needle}%")));
+                    } else {
+                        st_or.push("lf.architectural_style LIKE ?".to_string());
+                        params.push(SqlParam::Text(format!("%{needle}%")));
+                    }
+                }
+            }
+            if !st_or.is_empty() {
+                clauses.push(format!("({})", st_or.join(" OR ")));
+            }
+        }
+
+        if let Some(max_db) = filters.max_noise_db {
+            clauses.push("lh.noise_max_db <= ?".to_string());
+            params.push(SqlParam::F64(max_db));
+        }
+        if let Some(max_pga) = filters.max_seismic_pga {
+            clauses.push("lh.seismic_pga <= ?".to_string());
+            params.push(SqlParam::F64(max_pga));
+        }
+
+        for tag in filters.required_tags.iter().take(6) {
+            let clean_tag = tag.trim().to_ascii_lowercase().replace(' ', "_");
+            if clean_tag.is_empty() {
+                continue;
+            }
+            let pat_words = format!("%{}%", clean_tag.replace('_', " "));
+            if let Some(ft) = proto::feature_tag_from_slug(&clean_tag) {
+                let bit_expr = sql_bit_is_set_expr(dialect, "l.tag_bits", ft as u32);
+                clauses.push(format!(
+                    "({bit_expr} OR EXISTS (SELECT 1 FROM listing_descriptions ld_t WHERE ld_t.listing_sk = l.listing_sk AND ld_t.features_text LIKE ?))"
+                ));
+                params.push(SqlParam::Text(pat_words));
+            } else {
+                clauses.push(
+                    "(EXISTS (SELECT 1 FROM listing_tags lt WHERE lt.listing_sk = l.listing_sk AND lt.tag_code = ?) \
+                      OR EXISTS (SELECT 1 FROM listing_descriptions ld_t WHERE ld_t.listing_sk = l.listing_sk AND ld_t.features_text LIKE ?))"
+                        .to_string(),
+                );
+                params.push(SqlParam::Text(clean_tag));
+                params.push(SqlParam::Text(pat_words));
+            }
+        }
+    }
+
+    if let Some(max_r) = filters.max_electric_rate_kwh {
+        let eff = round_n(max_r * if relaxed { 1.15 } else { 1.0 }, 4);
+        clauses.push("l.electric_rate_kwh <= ?".to_string());
+        params.push(SqlParam::F64(eff));
+    }
+    if let Some(max_u) = filters.max_monthly_utilities {
+        let eff = ((max_u as f64) * if relaxed { 1.15 } else { 1.0 }).round() as i64;
+        clauses.push("lu.est_monthly_utilities <= ?".to_string());
+        params.push(SqlParam::I64(eff));
+    }
+    if let Some(max_m) = filters.max_all_in_monthly {
+        let eff = ((max_m as f64) * if relaxed { 1.15 } else { 1.0 }).round() as i64;
+        clauses.push("l.all_in_monthly <= ?".to_string());
+        params.push(SqlParam::I64(eff));
+    }
+
+    if need_descriptions {
+        for kw in filters.must_have_keywords.iter().take(3) {
+            let clean_kw = kw.trim();
+            if !clean_kw.is_empty() {
+                clauses.push("ld.features_text LIKE ?".to_string());
+                params.push(SqlParam::Text(format!("%{clean_kw}%")));
+            }
+        }
+    }
+
+    let where_sql = if clauses.is_empty() {
+        String::new()
+    } else {
+        format!(" WHERE {}", clauses.join(" AND "))
+    };
+
+    let order_sql = match filters.sort_by.as_str() {
+        "price_asc" => "CASE WHEN l.price IS NULL THEN 1 ELSE 0 END ASC, l.price ASC".to_string(),
+        "price_desc" => "COALESCE(l.price, 0) DESC".to_string(),
+        "monthly_asc" => {
+            "CASE WHEN l.all_in_monthly IS NULL THEN 1 ELSE 0 END ASC, l.all_in_monthly ASC, l.price ASC"
+                .to_string()
+        }
+        "electric_rate_asc" => {
+            "CASE WHEN l.electric_rate_kwh IS NULL THEN 1 ELSE 0 END ASC, l.electric_rate_kwh ASC, l.price ASC"
+                .to_string()
+        }
+        "internet_desc" => {
+            let fiber_expr =
+                sql_bit_is_set_expr(dialect, "l.tag_bits", FeatureTag::FiberAvailable as u32);
+            format!(
+                "CASE WHEN {fiber_expr} THEN 1 ELSE 0 END DESC, COALESCE(l.max_download_mbps, 0) DESC, l.price ASC"
+            )
+        }
+        "newest" => "l.status_changed_ts DESC".to_string(),
+        "school_desc" => {
+            "CASE WHEN l.school_score IS NULL THEN 1 ELSE 0 END ASC, l.school_score DESC, l.price ASC"
+                .to_string()
+        }
+        "sqft_desc" => "COALESCE(l.sqft, 0) DESC".to_string(),
+        _ => {
+            "CASE l.status WHEN 1 THEN 0 WHEN 2 THEN 1 WHEN 3 THEN 2 ELSE 3 END ASC, COALESCE(l.school_score, 0) DESC, l.price ASC"
+                .to_string()
+        }
+    };
+
+    let safe_limit = limit.clamp(1, 500) as i64;
+    params.push(SqlParam::I64(safe_limit));
+    let sql = format!(
+        "SELECT {rapid_hint}{NARROW_LISTING_CORE_PROJ} FROM listings l{joins}{where_sql} ORDER BY {order_sql} LIMIT ?"
+    );
+    let sql_preview = render_sql_preview(&sql, &params);
+    CompiledSqlQuery {
+        sql,
+        params,
+        sql_preview,
+    }
+}
+
+/// Executes narrow `Q1_pure_sql` core search (`db.search_listing_cores`) followed by top-K card
+/// hydration (`db.hydrate_listing_cards`) on ONLY the returned `limit` (e.g. 24) candidates.
+pub async fn search_listings_narrow(
+    db: &DbStore,
+    filters: &SearchFilters,
+    relaxed: bool,
+    override_statuses: Option<&[String]>,
+    limit: usize,
+) -> Result<(CompiledSqlQuery, Vec<ListingRow>)> {
+    let uses_non_rapid_descriptions = !relaxed
+        && (!filters.must_have_keywords.is_empty() || !filters.required_tags.is_empty());
+    let rapid_hint = if uses_non_rapid_descriptions {
+        db.innodb_pk_hint()
+    } else {
+        db.rapid_query_hint_for_scan(filters.zips.len(), !filters.cities.is_empty())
+    };
+    let compiled = compile_core_filters_to_sql(
+        filters,
+        db.dialect(),
+        rapid_hint,
+        relaxed,
+        override_statuses,
+        limit,
+    );
+    let cores = db
+        .search_listing_cores(&compiled.sql, &compiled.params)
+        .await?;
+    let cards = db.hydrate_listing_cards(&cores).await?;
+    let rows = cards.iter().map(ListingFullView::to_listing_row).collect();
+    Ok((compiled, rows))
 }
 
 // ---------------------------------------------------------------- Deterministic Scorer
@@ -2105,6 +2605,77 @@ pub fn build_candidate_report_highlights(report: &Value, l: &ListingRow) -> Opti
     }
 }
 
+/// Builds `reportHighlights` strictly from narrow `ReportHeaderProto` (`~240 B/row`) + hydrated
+/// `ListingRow` fields (`Q1_highlights` — eliminates 12x N+1 `get_cached_report` 409 KB decompressions!).
+pub fn build_candidate_report_highlights_from_header(
+    hdr: Option<&ReportHeaderProto>,
+    l: &ListingRow,
+) -> Option<Value> {
+    let mut hl = serde_json::Map::new();
+
+    if let Some(est) = hdr.and_then(|h| h.estimated_value).or(l.estimated_value) {
+        hl.insert("estimateValue".to_string(), json!(est));
+    }
+    if let Some(mc) = hdr
+        .and_then(|h| h.all_in_monthly.map(i64::from))
+        .or(l.all_in_monthly)
+    {
+        hl.insert("monthlyCost".to_string(), json!(mc));
+    }
+    if let Some(re) = hdr.and_then(|h| h.rent_estimate) {
+        hl.insert("rentEstimate".to_string(), json!(re));
+    }
+    if let Some(fz) = l
+        .flood_zone
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        hl.insert("floodZone".to_string(), json!(fz));
+    }
+    if let Some(pga) = l.seismic_pga.filter(|x| x.is_finite()) {
+        hl.insert("seismicPgaG".to_string(), json!(pga));
+    }
+    if let Some(wf) = l
+        .wildfire_zone
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        hl.insert("wildfireHazard".to_string(), json!(wf));
+    }
+    if let Some(elec) = l
+        .electric_carrier
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        hl.insert("utilityElectric".to_string(), json!(elec));
+    }
+    if let Some(fiber) = l.fiber_available.map(|v| v != 0) {
+        hl.insert("fiberAvailable".to_string(), json!(fiber));
+    }
+    if let Some(raw_hl) = hdr
+        .and_then(|h| h.ai_headline.as_deref().or(h.verdict.as_deref()))
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        let clean: String = crate::shared::scrub_competitor_brands(raw_hl)
+            .chars()
+            .take(180)
+            .collect();
+        if !clean.is_empty() {
+            hl.insert("aiHeadline".to_string(), json!(clean));
+        }
+    }
+
+    if hl.is_empty() {
+        None
+    } else {
+        Some(Value::Object(hl))
+    }
+}
+
 pub async fn rank_candidates_with_llm(
     db: &DbStore,
     http: &HttpClient,
@@ -2161,6 +2732,25 @@ pub async fn rank_candidates_with_llm(
         };
     }
 
+    let top_slugs: Vec<String> = pre_scored
+        .iter()
+        .take(12)
+        .filter_map(|(l, _)| {
+            l.report_slug
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+        })
+        .collect();
+    let header_map: HashMap<String, ReportHeaderProto> = if top_slugs.is_empty() {
+        HashMap::new()
+    } else {
+        db.get_report_headers_batch(&top_slugs)
+            .await
+            .unwrap_or_default()
+    };
+
     let mut compact: Vec<Value> = Vec::with_capacity(pre_scored.len().min(12));
     for (l, _) in pre_scored.iter().take(12) {
         let schools_joined = [
@@ -2206,8 +2796,8 @@ pub async fn rank_candidates_with_llm(
             .map(str::trim)
             .filter(|s| !s.is_empty())
         {
-            if let Ok(Some(rec)) = db.get_cached_report(slug).await {
-                if let Some(highlights) = build_candidate_report_highlights(&rec.report, l) {
+            if let Some(hdr) = header_map.get(slug) {
+                if let Some(highlights) = build_candidate_report_highlights_from_header(Some(hdr), l) {
                     if let Some(obj) = cand.as_object_mut() {
                         obj.insert("reportHighlights".to_string(), highlights);
                     }
@@ -2448,19 +3038,14 @@ pub async fn search_listings_with_llm(
         }
     }
 
-    let dialect = db.dialect();
     let mut fallback_mode = "exact";
-    let mut compiled = compile_filters_to_sql(&filters, dialect, false, None, 24);
-    let mut rows = db
-        .fetch_listings_sql(&compiled.sql, &compiled.params)
-        .await?;
+    let (mut compiled, mut rows) =
+        search_listings_narrow(db, &filters, false, None, 24).await?;
 
     // Relaxed numeric bounds fallback
     if rows.is_empty() {
-        let relaxed_q = compile_filters_to_sql(&filters, dialect, true, None, 24);
-        let r_rows = db
-            .fetch_listings_sql(&relaxed_q.sql, &relaxed_q.params)
-            .await?;
+        let (relaxed_q, r_rows) =
+            search_listings_narrow(db, &filters, true, None, 24).await?;
         if !r_rows.is_empty() {
             fallback_mode = "relaxed_bounds";
             compiled = relaxed_q;
@@ -2484,10 +3069,8 @@ pub async fn search_listings_with_llm(
             "sold".to_string(),
             "off_market".to_string(),
         ];
-        let inc_sold_q = compile_filters_to_sql(&filters, dialect, true, Some(&all_st), 20);
-        let s_rows = db
-            .fetch_listings_sql(&inc_sold_q.sql, &inc_sold_q.params)
-            .await?;
+        let (inc_sold_q, s_rows) =
+            search_listings_narrow(db, &filters, true, Some(&all_st), 20).await?;
         if !s_rows.is_empty() {
             fallback_mode = "recent_sales_in_area";
             compiled = inc_sold_q;

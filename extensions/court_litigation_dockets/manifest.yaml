@@ -22,8 +22,8 @@ metering:
     - bytes_downloaded
 builtin: true
 provenance: live_verified
-homepage_url: "https://www.courtlistener.com/help/api/rest/v4/"
-documentation_url: "https://www.courtlistener.com/api/rest/v4/search/"
+homepage_url: "https://www.courtlistener.com/recap/"
+documentation_url: "https://www.courtlistener.com/help/api/rest/"
 codeowners:
   - "@openestate/core"
 geo_scope:
@@ -57,7 +57,8 @@ sharing:
     - "state"
 source_attribution:
   name: "Free Law Project — CourtListener REST API v4 (RECAP Federal Dockets)"
-  url: "https://www.courtlistener.com/api/rest/v4/search/"
+  url: "https://www.courtlistener.com/recap/"
+  reference_url_template: "https://www.courtlistener.com/recap/"
   schedule_or_version: "CourtListener REST API v4 (type=r RECAP Dockets)"
   notes: "Requires COURTLISTENER_API_TOKEN; scrubs all natural-person plaintiff/defendant/debtor names from docket titles prior to storage or rendering."
 request:
@@ -69,5 +70,4 @@ request:
 response_mapping:
   root_path: "$.results[0]"
   require_non_empty: true
-  fields:
-    matched_address: "$.caseName"
+  fields: {}

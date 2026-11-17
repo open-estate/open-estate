@@ -33,6 +33,7 @@ cache_ttl_secs: 604800
 source_attribution:
   name: "Published Municipal Water, Sewer & Solid Waste Rate Schedules"
   url: "https://www.epa.gov/ground-water-and-drinking-water"
+  reference_url_template: "https://www.epa.gov/ground-water-and-drinking-water"
 tariff_catalog:
   water_sewer_trash_rules:
     - id: santa_clara_water
@@ -107,7 +108,7 @@ tariff_catalog:
       water_rate_unit: "CCF (748 gal)"
       water_volumetric_rate_usd: 6.95
       water_base_monthly_usd: 29.40
-      water_tariff_url: "https://www.ebmud.com/customers/billing-questions/rates-and-charges"
+      water_tariff_url: "https://www.ebmud.com/customers/billing-questions/understanding-your-bill"
       sewer_carrier_name: "EBMUD / City Wastewater"
       sewer_type: "municipal"
       sewer_monthly_usd: 54
@@ -123,7 +124,7 @@ tariff_catalog:
       water_rate_unit: "CCF (748 gal)"
       water_volumetric_rate_usd: 7.85
       water_base_monthly_usd: 24.00
-      water_tariff_url: "https://www.ladwp.com/"
+      water_tariff_url: "https://www.ladwp.com/account/understanding-your-rates"
       sewer_carrier_name: "LA Sanitation (LASAN) / County Sanitation"
       sewer_type: "municipal"
       sewer_monthly_usd: 48
@@ -140,7 +141,7 @@ tariff_catalog:
       water_rate_unit: "1,000 gal"
       water_volumetric_rate_usd: 5.80
       water_base_monthly_usd: 14.50
-      water_tariff_url: "https://www.austintexas.gov/department/austin-water-rates"
+      water_tariff_url: "https://www.austintexas.gov/water"
       sewer_carrier_name: "Austin Water Wastewater"
       sewer_type: "municipal"
       sewer_monthly_usd: 46
@@ -172,7 +173,7 @@ tariff_catalog:
       water_rate_unit: "CCF (748 gal)"
       water_volumetric_rate_usd: 4.90
       water_base_monthly_usd: 15.00
-      water_tariff_url: "https://www.nyc.gov/site/dep/pay-my-bills/water-rates.page"
+      water_tariff_url: "https://www.nyc.gov/site/nycwaterboard/index.page"
       sewer_carrier_name: "NYC DEP Sewer (159% of Water)"
       sewer_type: "municipal"
       sewer_monthly_usd: 62

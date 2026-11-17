@@ -13,7 +13,8 @@ mod common;
 
 use open_estate::db::{
     build_mysql_upsert, listing_slug, migrate_database, migrate_database_with_batch, mysql_ddl,
-    parse_mysql_connect_options, BuildQueueJobInput, DbBackend, DbStore, SqlParam, TABLE_NAMES,
+    parse_mysql_connect_options, BuildQueueJobInput, DbBackend, DbStore, SqlParam,
+    RAPID_TABLE_NAMES, TABLE_NAMES,
 };
 use open_estate::search::{
     build_lettre_message, build_match_alert_email, compile_filters_to_sql, create_subscription,
@@ -229,7 +230,7 @@ async fn test_1_sqlite_wal_bootstrap_and_cached_report_lifecycle() {
         panic!("expected Sqlite backend");
     }
 
-    // 1a. `cached_reports`: store & retrieve primary synthetic report + rendered HTML + legacy NULL upgrade
+    // 1a. `cached_reports`: store & retrieve primary synthetic report via `report_zstd` (`rendered_html` always NULL in DB) + legacy uncompressed row upgrade
     let rpt_primary = common::synth_report_primary();
     let html_primary = format!(
         "<!doctype html><html><body><h1>{}</h1></body></html>",
@@ -250,7 +251,10 @@ async fn test_1_sqlite_wal_bootstrap_and_cached_report_lifecycle() {
         .expect("record exists");
     assert_eq!(fetched.display_address, common::SYNTH_PRIMARY_ADDRESS);
     assert_eq!(fetched.zip.as_deref(), Some("95118"));
-    assert_eq!(fetched.rendered_html.as_deref(), Some(html_primary.as_str()));
+    assert!(
+        fetched.rendered_html.is_none(),
+        "rendered_html must never be persisted or served from DB"
+    );
     assert_eq!(
         fetched
             .report
@@ -259,18 +263,9 @@ async fn test_1_sqlite_wal_bootstrap_and_cached_report_lifecycle() {
         Some(2040)
     );
 
-    // Insert legacy row with NULL rendered_html for secondary synthetic report and verify upgrade
+    // Store secondary report (passing stale `rendered_html` to verify it is ignored) and verify
+    // clean-slate v3 `cached_reports` header + `cached_report_sections` zstd-dict frames
     let rpt_secondary = common::synth_report_secondary();
-    db.put_cached_report(common::SYNTH_SECONDARY_SLUG, &rpt_secondary, None)
-        .await
-        .unwrap();
-    let legacy = db
-        .get_cached_report(common::SYNTH_SECONDARY_SLUG)
-        .await
-        .unwrap()
-        .unwrap();
-    assert!(legacy.rendered_html.is_none());
-
     let upgraded_html = format!(
         "<!doctype html><html><body><h1>{}</h1></body></html>",
         common::SYNTH_SECONDARY_ADDRESS
@@ -281,17 +276,48 @@ async fn test_1_sqlite_wal_bootstrap_and_cached_report_lifecycle() {
         Some(&upgraded_html),
     )
     .await
-    .expect("upgrade legacy rendered_html");
+    .expect("put_cached_report secondary into 27-section v3 schema");
     db.l1_reports.invalidate_all();
     let after_upgrade = db
         .get_cached_report(common::SYNTH_SECONDARY_SLUG)
         .await
         .unwrap()
         .unwrap();
+    assert!(after_upgrade.rendered_html.is_none());
     assert_eq!(
-        after_upgrade.rendered_html.as_deref(),
-        Some(upgraded_html.as_str())
+        after_upgrade.report.pointer("/facts/sqft"),
+        rpt_secondary.pointer("/facts/sqft")
     );
+    if let DbBackend::Sqlite(ref pool) = db.backend {
+        let cols: Vec<String> = sqlx::query("PRAGMA table_info(cached_reports)")
+            .fetch_all(pool)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|r| r.get::<String, _>("name"))
+            .collect();
+        assert!(!cols.iter().any(|c| c == "report_json" || c == "rendered_html"));
+
+        let row = sqlx::query(
+            "SELECT report_id, section_mask, total_compressed_bytes FROM cached_reports WHERE slug = ?",
+        )
+        .bind(common::SYNTH_SECONDARY_SLUG)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        let report_id: i64 = row.get("report_id");
+        assert!(row.get::<i64, _>("section_mask") != 0);
+        assert!(row.get::<i64, _>("total_compressed_bytes") > 0);
+
+        let sec_blob: Vec<u8> = sqlx::query_scalar(
+            "SELECT payload_proto_zstd FROM cached_report_sections WHERE report_id = ? ORDER BY section_kind ASC LIMIT 1",
+        )
+        .bind(report_id)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        assert_eq!(&sec_blob[..4], &[0x28, 0xB5, 0x2F, 0xFD]);
+    }
 
     // 1b. `llm_cache` put/get + TTL expiration + L1 coherence
     let llm_val = json!({
@@ -433,23 +459,21 @@ async fn test_2_oci_mysql_heatwave_ddl_and_upsert_compliance() {
             stmt.contains("ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci"),
             "Missing InnoDB utf8mb4_0900_ai_ci clause on {table_name}"
         );
-        if !matches!(
-            table_name,
-            "listing_events" | "saas_auth_tokens" | "alert_manage_tokens"
-        ) {
+        let up = stmt.to_ascii_uppercase();
+        assert!(
+            !up.contains("LONGTEXT"),
+            "Clean-slate v3 schema must contain ZERO LONGTEXT columns ({table_name})"
+        );
+        assert!(
+            !up.contains(" JSON"),
+            "Clean-slate v3 schema must contain ZERO JSON columns ({table_name})"
+        );
+        if RAPID_TABLE_NAMES.contains(&table_name) {
             assert!(
-                stmt.contains("LONGTEXT"),
-                "Expected LONGTEXT column in {table_name}"
+                !up.contains(" TEXT") && !up.contains("BLOB"),
+                "HeatWave Rapid analytical table {table_name} must contain ZERO TEXT/BLOB columns"
             );
         }
-        assert!(
-            !stmt.contains(" JSON "),
-            "Use LONGTEXT rather than native JSON for cross-dialect HeatWave compatibility in {table_name}"
-        );
-        assert!(
-            !stmt.contains(" TEXT "),
-            "Use LONGTEXT rather than 64KB TEXT for cross-dialect HeatWave compatibility in {table_name}"
-        );
     }
 
     // Verify MySQL 8.4/9.0 & OCI HeatWave `AS new_row ON DUPLICATE KEY UPDATE col = new_row.col` syntax
@@ -494,6 +518,19 @@ async fn test_2_oci_mysql_heatwave_ddl_and_upsert_compliance() {
     assert_eq!(
         format!("{:?}", opts.get_ssl_mode()),
         format!("{:?}", sqlx::mysql::MySqlSslMode::Required)
+    );
+    let opts_disabled = parse_mysql_connect_options(
+        "mysql://admin:placeholder@mysql.openestate.internal:3306/openestate",
+        "heatwave",
+        Some(&EnvConfig::from_map(HashMap::from([(
+            "MYSQL_SSL_MODE".to_string(),
+            "disabled".to_string(),
+        )]))),
+    )
+    .expect("parse heatwave mysql options with disabled ssl");
+    assert_eq!(
+        format!("{:?}", opts_disabled.get_ssl_mode()),
+        format!("{:?}", sqlx::mysql::MySqlSslMode::Disabled)
     );
 
     // Optional live MySQL / HeatWave check when MYSQL_URL is configured
@@ -640,16 +677,16 @@ async fn test_3_live_database_migration_streaming_parity_and_idempotency() {
     let dst_listings_cnt = sqlite_count(&dst, "SELECT COUNT(*) FROM listings", None).await as usize;
     assert_eq!(dst_listings_cnt, src_listings_cnt);
 
-    // Verify full JSON fidelity on migrated primary report
+    // Verify full JSON fidelity on migrated primary report (with rendered_html dropped)
     let dst_primary = dst
         .get_cached_report(common::SYNTH_PRIMARY_SLUG)
         .await
         .unwrap()
         .expect("migrated primary report");
     assert_eq!(dst_primary.display_address, common::SYNTH_PRIMARY_ADDRESS);
-    assert_eq!(
-        dst_primary.rendered_html.as_deref(),
-        Some(primary_html.as_str())
+    assert!(
+        dst_primary.rendered_html.is_none(),
+        "migrate_database must write NULL for rendered_html"
     );
     assert_eq!(
         dst_primary.report.pointer("/facts/lotSqft"),
@@ -992,11 +1029,11 @@ async fn test_6_subscriptions_alert_dedup_unsubscribe_and_rfc_mime_compliance() 
         Some(1)
     );
 
-    // Verify `subscription_notifications` persisted cleanly with `queued_no_smtp` and `event_key` deduplication blocks duplicate alerts
+    // Verify `subscription_notifications` persisted cleanly with `delivery_status = 2` (`queued_no_smtp`) and `event_key` deduplication blocks duplicate alerts
     let notif_cnt = sqlite_count(
         &db,
-        "SELECT COUNT(*) FROM subscription_notifications WHERE delivery_status = ?",
-        Some("queued_no_smtp"),
+        "SELECT COUNT(*) FROM subscription_notifications WHERE delivery_status = 2",
+        None,
     )
     .await;
     assert_eq!(notif_cnt, 1);

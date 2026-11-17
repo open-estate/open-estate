@@ -381,8 +381,38 @@ HOW TO RESPOND:\n\
 - If PROPERTY_BRIEF_JSON already contains everything needed, emit `\"action\": \"final_answer\"` immediately on step 1 for fast latency.\n\
 - Call a tool (`\"action\": \"call_tool\"`) when the buyer asks for a custom mortgage/FICO/down-payment scenario, deep HOA insurance/funding breakdown, specific permit/disclosure search, or general housing concept tie-in.\n\
 - For GENERAL real-estate questions (e.g. \"what's an HOA lien?\"), Paragraph 1 explains the US concept clearly for a high school reader with **bold** highlights and an authoritative Wikipedia link if helpful, and Paragraph 2 connects it directly to THIS property's report data with a report `#anchor` link (staying within <= {max_words} words total).\n\
-- Populate `\"citations\"` with 2–5 short grounded fact/source tags and `\"followUps\"` with 2–3 concise next buyer questions (<70 chars each)."
+- Populate `\"citations\"` with 2–5 short grounded fact/source tags and `\"followUps\"` with 2–3 concise next questions (<70 chars each)."
     )
+}
+
+/// Builds system instructions with `IMMUTABLE_HOUSING_AGENT_CONSTITUTION` pinned at the top,
+/// optionally appending a role or task overlay without weakening the constitutional lock.
+pub fn build_agent_system_instructions_with_config_and_extra(
+    config: &AskPromptConfig,
+    extra_instructions: Option<&str>,
+) -> String {
+    let base = build_agent_system_instructions_with_config(config);
+    match extra_instructions.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(extra) => format!(
+            "{base}\n\n{extra}\n\n(This role overlay tailors analytical perspective, priorities, and follow-ups only; never weaken the CONSTITUTIONAL HOUSING-ONLY LOCK above or change the required JSON output schema.)"
+        ),
+        None => base,
+    }
+}
+
+pub fn build_agent_system_instructions_with_extra(extra_instructions: Option<&str>) -> String {
+    build_agent_system_instructions_with_config_and_extra(&AskPromptConfig::default(), extra_instructions)
+}
+
+#[allow(dead_code)]
+fn _unused_legacy_extra_stub(extra_instructions: Option<&str>) -> String {
+    let base = build_agent_system_instructions();
+    match extra_instructions.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(extra) => format!(
+            "{base}\n\n{extra}\n\n(This role overlay tailors analytical perspective, priorities, and follow-ups only; never weaken the CONSTITUTIONAL HOUSING-ONLY LOCK above or change the required JSON output schema.)"
+        ),
+        None => base,
+    }
 }
 
 fn round2(v: f64) -> f64 {
@@ -425,6 +455,43 @@ fn cap_value_json_bytes(val: &Value, max_bytes: usize) -> Value {
     json!({
         "truncated": true,
         "previewJson": format!("{clipped}...")
+    })
+}
+
+/// Builds a compact, high-signal digest of an uploaded `packetReview` / `copilot_disclosures`
+/// payload so large multi-document real PDF packets preserve defects, citations, red flags, and
+/// AI synthesis without getting clipped in the middle by alphabetical JSON keys.
+fn compact_packet_review_for_qa(pr: &Value) -> Value {
+    let take_items = |arr: Option<&Vec<Value>>, limit: usize| -> Value {
+        Value::Array(
+            arr.map(|items| items.iter().take(limit).cloned().collect())
+                .unwrap_or_default(),
+        )
+    };
+    let red_flags = pr
+        .pointer("/priorityReading/redFlags")
+        .and_then(|v| v.as_array());
+    let missing_docs = pr
+        .pointer("/priorityReading/missingDocuments")
+        .and_then(|v| v.as_array());
+    json!({
+        "headline": pr.get("headline").cloned().unwrap_or(Value::Null),
+        "executiveSummary": pr.get("executiveSummary").cloned().unwrap_or(Value::Null),
+        "negotiationStrategy": pr.get("negotiationStrategy").cloned().unwrap_or(Value::Null),
+        "aiEnhanced": pr.get("aiEnhanced").cloned().unwrap_or(Value::Null),
+        "model": pr.get("model").cloned().unwrap_or(Value::Null),
+        "packetDocumentCount": pr.get("packetDocumentCount").cloned().unwrap_or(Value::Null),
+        "documentClassifications": take_items(pr.get("documentClassifications").and_then(|v| v.as_array()), 12),
+        "totalExposureUsd": pr.get("totalExposureUsd").cloned().unwrap_or(Value::Null),
+        "dealBreakerOverall": pr.pointer("/dealBreakerTriage/overallLevel").cloned().unwrap_or(Value::Null),
+        "dealBreakerCounts": pr.pointer("/dealBreakerTriage/counts").cloned().unwrap_or(Value::Null),
+        "contradictions": take_items(pr.get("contradictions").and_then(|v| v.as_array()), 8),
+        "deduplicatedDefects": take_items(pr.get("deduplicatedDefects").and_then(|v| v.as_array()), 12),
+        "priorityRedFlags": take_items(red_flags, 10),
+        "missingDocuments": take_items(missing_docs, 8),
+        "topQuestionsForSeller": take_items(pr.get("topQuestionsForSeller").and_then(|v| v.as_array()), 6),
+        "titleSummary": pr.get("titleSummary").cloned().unwrap_or(Value::Null),
+        "hoaSummary": pr.get("hoaSummary").cloned().unwrap_or(Value::Null),
     })
 }
 
@@ -921,6 +988,7 @@ fn exec_query_permits_and_disclosures(
             .unwrap_or_else(|_| json!(redacted.chars().take(1_200).collect::<String>()))
     };
 
+    let packet_digest = uploaded.packet_review.map(compact_packet_review_for_qa);
     json!({
         "tool": "query_permits_and_disclosures",
         "query": query_lc,
@@ -934,7 +1002,7 @@ fn exec_query_permits_and_disclosures(
         "uploadedInspection": clean_upload_summary(uploaded.inspection),
         "uploadedTitleReview": clean_upload_summary(uploaded.title_review),
         "uploadedHoaReview": clean_upload_summary(uploaded.hoa_review),
-        "uploadedPacketReview": clean_upload_summary(uploaded.packet_review),
+        "uploadedPacketReview": clean_upload_summary(packet_digest.as_ref()),
         "uploadedRepairAddendum": clean_upload_summary(uploaded.repair_addendum),
     })
 }
@@ -1582,9 +1650,10 @@ pub fn build_agent_messages(
         ));
     }
     if let Some(pr) = uploaded.packet_review {
+        let digest = compact_packet_review_for_qa(pr);
         ctx_parts.push(format!(
             "UPLOADED_PACKET_REVIEW_JSON:\n{}",
-            serde_json::to_string(&cap_value_json_bytes(pr, 5_000))?
+            serde_json::to_string(&cap_value_json_bytes(&digest, 12_000))?
         ));
     }
     if let Some(ra) = uploaded.repair_addendum {
@@ -1697,8 +1766,9 @@ pub async fn run_housing_agent_loop(
     step_schema: &Value,
     final_only_schema: &Value,
     cache: Option<&dyn LlmCache>,
+    extra_instructions: Option<&str>,
 ) -> Result<(Value, String, Option<String>, bool, bool, u64)> {
-    run_housing_agent_loop_with_prompt(
+    run_housing_agent_loop_with_prompt_and_role(
         http,
         env,
         address,
@@ -1710,6 +1780,7 @@ pub async fn run_housing_agent_loop(
         final_only_schema,
         cache,
         &AskPromptConfig::default(),
+        extra_instructions,
     )
     .await
 }
@@ -1729,8 +1800,42 @@ pub async fn run_housing_agent_loop_with_prompt(
     cache: Option<&dyn LlmCache>,
     prompt_config: &AskPromptConfig,
 ) -> Result<(Value, String, Option<String>, bool, bool, u64)> {
+    run_housing_agent_loop_with_prompt_and_role(
+        http,
+        env,
+        address,
+        report,
+        uploaded,
+        compacted,
+        sanitized_q,
+        step_schema,
+        final_only_schema,
+        cache,
+        prompt_config,
+        None,
+    )
+    .await
+}
+
+/// Variant of [`run_housing_agent_loop`] accepting both [`AskPromptConfig`] and optional role overlay.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_housing_agent_loop_with_prompt_and_role(
+    http: &HttpClient,
+    env: &EnvConfig,
+    address: &str,
+    report: &Value,
+    uploaded: &UploadedDocContext<'_>,
+    compacted: &CompactedHistory,
+    sanitized_q: &str,
+    step_schema: &Value,
+    final_only_schema: &Value,
+    cache: Option<&dyn LlmCache>,
+    prompt_config: &AskPromptConfig,
+    extra_instructions: Option<&str>,
+) -> Result<(Value, String, Option<String>, bool, bool, u64)> {
     let brief = build_brief(report);
-    let raw_instructions = build_agent_system_instructions_with_config(prompt_config);
+    let raw_instructions =
+        build_agent_system_instructions_with_config_and_extra(prompt_config, extra_instructions);
     let system_instructions = crate::shared::apply_brand_to_str(
         &raw_instructions,
         &env.brand_name(),
@@ -2454,6 +2559,252 @@ fn build_hazards_qa_section(
     )
 }
 
+fn role_closing_guidance(norm_role: &str) -> Option<&'static str> {
+    match norm_role {
+        "buyer" => Some(
+            "Buyer-Side Strategy: Anchor your offer range to True Estimate and adjusted sold comps, budget for all-in monthly PITI after property-tax reassessment, and protect earnest money with inspection, appraisal, loan, and HOA/title contingencies for repair or closing-cost credits.",
+        ),
+        "seller" => Some(
+            "Seller-Side Strategy: Position list price against True Estimate, sold comps, and active competition; audit permits, statutory disclosures (TDS/SPQ/NHD), and pre-listing inspection items early to prevent escrow retrades; prioritize high-ROI prep; and account for customary seller closing and transfer-tax splits in net proceeds.",
+        ),
+        "agent" => Some(
+            "Agent Co-Pilot Strategy: Defend pricing with $/sq ft comp adjustments and active inventory metrics, verify statutory disclosure and permit completeness, map county/city transfer-tax and closing customs plus rental/yield benchmarks, and structure contingency/COE timelines for your client briefing.",
+        ),
+        _ => None,
+    }
+}
+
+fn build_list_price_context(report: &Value) -> Option<(String, String)> {
+    let list_price = report
+        .pointer("/facts/listPrice")
+        .and_then(|v| v.as_f64())
+        .filter(|v| v.is_finite() && *v > 0.0)?;
+    let est_val = report_module(report, "valuation")
+        .and_then(|v| v.pointer("/estimate/value"))
+        .and_then(|v| v.as_f64())
+        .filter(|v| v.is_finite() && *v > 0.0);
+    if let Some(ev) = est_val {
+        let diff = list_price - ev;
+        let pct = (diff.abs() / ev) * 100.0;
+        let rel = if diff.abs() < 500.0 {
+            "in line with True Estimate".to_string()
+        } else if diff > 0.0 {
+            format!("{} ({pct:.1}%) above True Estimate", fmt_usd(diff))
+        } else {
+            format!("{} ({pct:.1}%) below True Estimate", fmt_usd(diff.abs()))
+        };
+        Some((
+            format!(
+                "The current asking price is {} ({rel}).",
+                fmt_usd_dual(list_price)
+            ),
+            format!("List Price: {}", fmt_usd(list_price)),
+        ))
+    } else {
+        Some((
+            format!("The current asking price is {}.", fmt_usd_dual(list_price)),
+            format!("List Price: {}", fmt_usd(list_price)),
+        ))
+    }
+}
+
+fn build_closing_customs_qa_section(
+    address: &str,
+    report: &Value,
+    norm_role: &str,
+) -> (String, Vec<String>) {
+    let tt = report
+        .pointer("/buyerDiligence/cashToClose/transferTax")
+        .or_else(|| report.pointer("/buyerDiligence/transferTaxes"));
+    let jurisdiction = tt
+        .and_then(|t| t.get("jurisdiction"))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(clean_qa_text);
+    let total_tt = tt
+        .and_then(|t| t.get("totalTransferTaxUsd"))
+        .and_then(|v| v.as_f64())
+        .filter(|v| v.is_finite() && *v > 0.0);
+    let buyer_share = tt
+        .and_then(|t| t.get("buyerEstimatedShareUsd"))
+        .and_then(|v| v.as_f64())
+        .filter(|v| v.is_finite() && *v >= 0.0);
+    let seller_share = tt
+        .and_then(|t| t.get("sellerEstimatedShareUsd"))
+        .and_then(|v| v.as_f64())
+        .filter(|v| v.is_finite() && *v >= 0.0);
+    let custom_note = tt
+        .and_then(|t| t.get("payerCustomNote"))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(clean_qa_text);
+    let break_even_yrs = report
+        .pointer("/buyerDiligence/exitAndBreakEven/breakEvenYears")
+        .and_then(|v| v.as_f64())
+        .filter(|v| v.is_finite() && *v > 0.0);
+    let mandates: Vec<String> = report
+        .pointer("/buyerDiligence/utilitiesAndMandates/pointOfSaleMandates")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|m| m.get("title").and_then(|v| v.as_str()))
+                .map(|s| clean_qa_text(s.trim()))
+                .filter(|s| !s.is_empty())
+                .take(3)
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let mut bits = Vec::new();
+    let mut cites = Vec::new();
+    if let Some(tot) = total_tt {
+        let jur_lbl = jurisdiction
+            .as_deref()
+            .map(|j| format!(" in {j}"))
+            .unwrap_or_default();
+        let split_lbl = match (buyer_share, seller_share) {
+            (Some(b), Some(s)) => {
+                format!(" (est. buyer share {}, seller share {})", fmt_usd(b), fmt_usd(s))
+            }
+            (None, Some(s)) => format!(" (est. seller share {})", fmt_usd(s)),
+            (Some(b), None) => format!(" (est. buyer share {})", fmt_usd(b)),
+            (None, None) => String::new(),
+        };
+        bits.push(format!(
+            "estimated documentary/city transfer taxes{jur_lbl} total {}{split_lbl}",
+            fmt_usd(tot)
+        ));
+        cites.push(format!("Transfer Tax: {}", fmt_usd(tot)));
+    }
+    if let Some(ref note) = custom_note {
+        bits.push(format!("local custom note: {note}"));
+    }
+    if !mandates.is_empty() {
+        bits.push(format!(
+            "point-of-sale mandate checks include {}",
+            mandates.join(", ")
+        ));
+        cites.push(format!("Point-of-Sale Checks: {}", mandates.len()));
+    }
+    if let Some(yrs) = break_even_yrs {
+        bits.push(format!("modeled buy-vs-rent break-even horizon is {yrs:.1} years"));
+        cites.push(format!("Break-Even: {yrs:.1} yrs"));
+    }
+
+    let body = if bits.is_empty() {
+        cites.push(format!("Closing Customs: {address}"));
+        format!(
+            "For {address} ({norm_role} review), itemized county/city transfer-tax splits and point-of-sale mandate totals are not populated in this record; confirm documentary transfer-tax rates, customary title/escrow fee splits, and municipal retrofit rules with your local escrow officer."
+        )
+    } else {
+        format!(
+            "Closing & transfer-tax context for {address}: {}.",
+            bits.join("; ")
+        )
+    };
+    (body, cites)
+}
+
+fn build_prep_and_yield_qa_section(
+    address: &str,
+    report: &Value,
+    norm_role: &str,
+) -> (String, Vec<String>) {
+    let projects = report
+        .pointer("/remodelAndRebuild/remodelProjects")
+        .or_else(|| report.pointer("/remodelAndRebuild/projects"))
+        .or_else(|| report.pointer("/modules/remodel/data/remodelProjects"))
+        .and_then(|v| v.as_array());
+    let mut top_projects = Vec::new();
+    let mut cites = Vec::new();
+    if let Some(arr) = projects {
+        for p in arr.iter().take(2) {
+            let name = p
+                .get("project")
+                .or_else(|| p.get("name"))
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(clean_qa_text);
+            let roi = p
+                .get("costRecoupedPct")
+                .or_else(|| p.get("resaleRoiPct"))
+                .and_then(|v| v.as_f64())
+                .filter(|v| v.is_finite() && *v > 0.0);
+            let cost = p
+                .get("typicalUsd")
+                .or_else(|| p.get("estimatedCostUsd"))
+                .and_then(|v| v.as_f64())
+                .filter(|v| v.is_finite() && *v > 0.0);
+            if let Some(nm) = name {
+                let detail = match (cost, roi) {
+                    (Some(c), Some(r)) => format!("{nm} (~{}, ~{r:.0}% cost recouped)", fmt_usd(c)),
+                    (Some(c), None) => format!("{nm} (~{})", fmt_usd(c)),
+                    (None, Some(r)) => format!("{nm} (~{r:.0}% cost recouped)"),
+                    (None, None) => nm,
+                };
+                top_projects.push(detail);
+            }
+        }
+    }
+    if !top_projects.is_empty() {
+        cites.push(format!("Remodel ROI Projects: {}", top_projects.len()));
+    }
+
+    let own = report_module(report, "valuation").and_then(|v| v.get("ownership"));
+    let rent_mo = own
+        .and_then(|o| o.get("rentEstimate"))
+        .and_then(|v| v.as_f64())
+        .filter(|v| v.is_finite() && *v > 0.0);
+    let gross_yield = own
+        .and_then(|o| o.get("grossYieldPct"))
+        .and_then(|v| v.as_f64())
+        .filter(|v| v.is_finite() && *v > 0.0);
+    let cap_rate = own
+        .and_then(|o| o.get("capRatePct"))
+        .and_then(|v| v.as_f64())
+        .filter(|v| v.is_finite() && *v > 0.0);
+
+    let mut yield_bits = Vec::new();
+    if let Some(r) = rent_mo {
+        yield_bits.push(format!("estimated rent {}/mo", fmt_usd(r)));
+        cites.push(format!("Est. Rent: {}/mo", fmt_usd(r)));
+    }
+    if let Some(gy) = gross_yield {
+        yield_bits.push(format!("gross yield {gy:.2}%"));
+    }
+    if let Some(cr) = cap_rate {
+        yield_bits.push(format!("cap rate {cr:.2}%"));
+        cites.push(format!("Est. Cap Rate: {cr:.2}%"));
+    }
+
+    let mut parts = Vec::new();
+    if !top_projects.is_empty() {
+        parts.push(format!(
+            "modeled value-add remodel options include {}",
+            top_projects.join(" and ")
+        ));
+    }
+    if !yield_bits.is_empty() {
+        parts.push(format!("rental/yield metrics show {}", yield_bits.join(", ")));
+    }
+
+    let body = if parts.is_empty() {
+        cites.push(format!("Subject Property: {address}"));
+        format!(
+            "For {address} ({norm_role} view), itemized remodel ROI and rental/yield benchmarks are not populated in this record; compare local contractor quotes and comparable lease rates before committing prep capital."
+        )
+    } else {
+        format!(
+            "Prep ROI & yield context for {address}: {}.",
+            parts.join("; ")
+        )
+    };
+    (body, cites)
+}
+
 /// Deterministic, grounded Q&A synthesis used when `OPENAI_API_KEY` / `OPENAI_BASE_URL` are unset
 /// (or when upstream LLM endpoints are unreachable offline). Zero `FORBIDDEN_HTML_TOKENS`.
 pub fn build_deterministic_qa_response(
@@ -2462,6 +2813,18 @@ pub fn build_deterministic_qa_response(
     question: &str,
     default_follow_ups: &[String],
 ) -> (String, Vec<String>, Vec<String>) {
+    build_deterministic_qa_response_for_role(report, uploaded, question, default_follow_ups, "unset")
+}
+
+/// Role-aware deterministic, grounded Q&A synthesis (`buyer` | `seller` | `agent` | `unset`).
+pub fn build_deterministic_qa_response_for_role(
+    report: &Value,
+    uploaded: &UploadedDocContext<'_>,
+    question: &str,
+    default_follow_ups: &[String],
+    role: &str,
+) -> (String, Vec<String>, Vec<String>) {
+    let norm_role = crate::ai::ask::normalize_assistant_role(Some(role));
     let raw_address = report
         .pointer("/meta/displayAddress")
         .or_else(|| report.pointer("/geo/displayAddress"))
@@ -2488,8 +2851,16 @@ pub fn build_deterministic_qa_response(
     if let Some(cid) = match_housing_concept_id(&q_lc) {
         if is_concept_style || !q_lc.contains(&address.to_ascii_lowercase()) {
             let tie = build_housing_concept_tie_in(cid, report, uploaded);
-            let ans = format!("{}\n\n{}", tie.general_explanation, tie.this_property_tie_in);
-            return (ans, tie.citations, tie.follow_ups);
+            if norm_role == "unset" {
+                let ans = format!("{}\n\n{}", tie.general_explanation, tie.this_property_tie_in);
+                return (ans, tie.citations, tie.follow_ups);
+            }
+            let guidance = role_closing_guidance(norm_role).unwrap_or("");
+            let ans = format!(
+                "{}\n\n{}\n\n{}",
+                tie.general_explanation, tie.this_property_tie_in, guidance
+            );
+            return (ans, tie.citations, default_follow_ups.to_vec());
         }
     }
 
@@ -2544,9 +2915,28 @@ pub fn build_deterministic_qa_response(
             cites_zh.push(format!("地震 PGA {g:.2}g"));
         }
 
+        let (role_prefix_zh, role_tail_zh) = match norm_role {
+            "buyer" => (
+                "【买家尽调视角】",
+                "建议在出价与解约期前重点核实可比成交支撑的合理出价区间、过户重估后的月供 PITI，以及初步产权报告（Prelim Schedule B）、HOA 储备金、市政许可证与专业验房报告。",
+            ),
+            "seller" => (
+                "【卖家挂牌与售前准备视角】",
+                "建议结合近期可比成交与在售竞品制定挂牌定价策略，在上市前完成房屋预检及法定披露（TDS/NHD/许可证核查）以降低买家二次议价风险，并测算地方过户税费与售前整修 ROI。",
+            ),
+            "agent" => (
+                "【经纪人专业协作视角】",
+                "建议结合每平方英尺可比成交构建 CMA 定价依据，核对法定披露完整度、保护条款与过户期限（COE），并整理地方过户税费分摊惯例与租金收益指标用于客户沟通。",
+            ),
+            _ => (
+                "",
+                "建议在过户前结合初步产权报告（Prelim Schedule B）、市政许可证记录及专业房屋检验报告进一步核实细节。",
+            ),
+        };
+
         let ans = localize_compass_in_cjk(
             &format!(
-                "**{address} 摘要：**{}。\n\n过户前请在[产权与法务](#titleLegalRadarPanel)及[产权托管（Escrow）](https://en.wikipedia.org/wiki/Escrow)阶段核对 Prelim Schedule B、市政[许可证记录](#county)与[验房报告](#inspection)。",
+                "{role_prefix_zh}**{address} 摘要：**{}。\n\n{role_tail_zh}",
                 parts_zh.join("；")
             ),
             false,
@@ -2574,6 +2964,14 @@ pub fn build_deterministic_qa_response(
         || q_lc.contains("comparable")
         || has_ascii_word(&q_lc, "comp")
         || has_ascii_word(&q_lc, "sold")
+        || (norm_role != "unset"
+            && (q_lc.contains("list price")
+                || q_lc.contains("listing price")
+                || q_lc.contains("offer")
+                || has_ascii_word(&q_lc, "cma")
+                || q_lc.contains("pricing")
+                || q_lc.contains("price/sqft")
+                || q_lc.contains("price per sq")))
         || (q_lc.contains("price")
             && (q_lc.contains("compare") || !extract_question_years(&q_lc).is_empty()));
 
@@ -2593,6 +2991,7 @@ pub fn build_deterministic_qa_response(
         || (q_lc.contains("rate")
             && !q_lc.contains("crime rate")
             && !q_lc.contains("tax rate")
+            && !q_lc.contains("cap rate")
             && !q_lc.contains("slip rate"));
 
     let asks_permits = q_lc.contains("permit")
@@ -2601,7 +3000,12 @@ pub fn build_deterministic_qa_response(
         || q_lc.contains("disclosure")
         || q_lc.contains("past report")
         || q_lc.contains("roof")
-        || q_lc.contains("condition");
+        || q_lc.contains("condition")
+        || (norm_role != "unset"
+            && (q_lc.contains("retrade")
+                || has_ascii_word(&q_lc, "tds")
+                || has_ascii_word(&q_lc, "nhd")
+                || q_lc.contains("checklist")));
 
     let asks_hazards = q_lc.contains("hazard")
         || q_lc.contains("flood")
@@ -2614,33 +3018,92 @@ pub fn build_deterministic_qa_response(
         || q_lc.contains("superfund")
         || q_lc.contains("environmental");
 
+    let asks_closing = norm_role != "unset"
+        && (q_lc.contains("transfer tax")
+            || q_lc.contains("closing")
+            || q_lc.contains("net proceeds")
+            || q_lc.contains("title split")
+            || q_lc.contains("point-of-sale")
+            || q_lc.contains("point of sale")
+            || q_lc.contains("mandate")
+            || q_lc.contains("break-even")
+            || q_lc.contains("break even")
+            || q_lc.contains("custom"));
+
+    let asks_prep_yield = norm_role != "unset"
+        && (q_lc.contains("remodel")
+            || has_ascii_word(&q_lc, "prep")
+            || has_ascii_word(&q_lc, "roi")
+            || q_lc.contains("staging")
+            || q_lc.contains("rent")
+            || q_lc.contains("yield")
+            || q_lc.contains("cap rate")
+            || q_lc.contains("talking point")
+            || q_lc.contains("client"));
+
     let matched_count = [
         asks_valuation,
         asks_hoa,
         asks_mortgage,
         asks_permits,
         asks_hazards,
+        asks_closing,
+        asks_prep_yield,
     ]
     .into_iter()
     .filter(|&b| b)
     .count();
 
     if matched_count <= 1 {
-        if asks_hoa {
-            return build_hoa_qa_section(address, report, true);
-        }
-        if asks_mortgage {
-            return build_mortgage_qa_section(address, report, &q_lc);
-        }
-        if asks_permits {
-            return build_permits_qa_section(address, report, uploaded, true);
-        }
-        if asks_hazards {
-            let (ans, cites) = build_hazards_qa_section(address, report, true);
+        if norm_role == "unset" {
+            if asks_hoa {
+                return build_hoa_qa_section(address, report, true);
+            }
+            if asks_mortgage {
+                return build_mortgage_qa_section(address, report, &q_lc);
+            }
+            if asks_permits {
+                return build_permits_qa_section(address, report, uploaded, true);
+            }
+            if asks_hazards {
+                let (ans, cites) = build_hazards_qa_section(address, report, true);
+                return (ans, cites, default_follow_ups.to_vec());
+            }
+            let (ans, cites) = build_valuation_qa_section(address, report, &q_lc, true);
             return (ans, cites, default_follow_ups.to_vec());
         }
-        let (ans, cites) = build_valuation_qa_section(address, report, &q_lc, true);
-        return (ans, cites, default_follow_ups.to_vec());
+
+        let (mut sec, cites) = if asks_hoa {
+            let (s, c, _) = build_hoa_qa_section(address, report, false);
+            (s, c)
+        } else if asks_mortgage {
+            let (s, c, _) = build_mortgage_qa_section(address, report, &q_lc);
+            (s, c)
+        } else if asks_permits {
+            let (s, c, _) = build_permits_qa_section(address, report, uploaded, false);
+            (s, c)
+        } else if asks_hazards {
+            build_hazards_qa_section(address, report, false)
+        } else if asks_closing {
+            build_closing_customs_qa_section(address, report, norm_role)
+        } else if asks_prep_yield {
+            build_prep_and_yield_qa_section(address, report, norm_role)
+        } else {
+            let (mut s, mut c) = build_valuation_qa_section(address, report, &q_lc, false);
+            if let Some((lp_note, lp_cite)) = build_list_price_context(report) {
+                s.push(' ');
+                s.push_str(&lp_note);
+                if !c.contains(&lp_cite) && c.len() < 6 {
+                    c.push(lp_cite);
+                }
+            }
+            (s, c)
+        };
+        if let Some(guidance) = role_closing_guidance(norm_role) {
+            sec.push_str("\n\n");
+            sec.push_str(guidance);
+        }
+        return (sec, cites, default_follow_ups.to_vec());
     }
 
     // Multi-part question: synthesize every requested domain in grounded order
@@ -2657,7 +3120,14 @@ pub fn build_deterministic_qa_response(
     };
 
     if asks_valuation {
-        let (sec, cites) = build_valuation_qa_section(address, report, &q_lc, false);
+        let (mut sec, cites) = build_valuation_qa_section(address, report, &q_lc, false);
+        if norm_role != "unset" {
+            if let Some((lp_note, lp_cite)) = build_list_price_context(report) {
+                sec.push(' ');
+                sec.push_str(&lp_note);
+                push_cites(vec![lp_cite]);
+            }
+        }
         paragraphs.push(sec);
         push_cites(cites);
     }
@@ -2690,15 +3160,27 @@ pub fn build_deterministic_qa_response(
         paragraphs.push(sec);
         push_cites(cites);
     }
+    if asks_closing {
+        let (sec, cites) = build_closing_customs_qa_section(address, report, norm_role);
+        paragraphs.push(sec);
+        push_cites(cites);
+    }
+    if asks_prep_yield {
+        let (sec, cites) = build_prep_and_yield_qa_section(address, report, norm_role);
+        paragraphs.push(sec);
+        push_cites(cites);
+    }
 
-    paragraphs.push(
-        "Verify [Comps](#comps), [County Records](#county) permits, [Title & Legal](#titleLegalRadarPanel) (Schedule B), and [Hazards & Risk](#risk) insurance quotes in your [Docs & Inspection](#inspection) contingency."
-            .to_string(),
+    let closing_line = role_closing_guidance(norm_role).unwrap_or(
+        "Verify [Comps](#comps), [County Records](#county) permits, [Title & Legal](#titleLegalRadarPanel) (Schedule B), and [Hazards & Risk](#risk) insurance quotes in your [Docs & Inspection](#inspection) contingency.",
     );
+    paragraphs.push(closing_line.to_string());
 
-    (
-        paragraphs.join("\n\n"),
-        merged_cites,
-        follow_ups.unwrap_or_else(|| default_follow_ups.to_vec()),
-    )
+    let final_follow_ups = if norm_role == "unset" {
+        follow_ups.unwrap_or_else(|| default_follow_ups.to_vec())
+    } else {
+        default_follow_ups.to_vec()
+    };
+
+    (paragraphs.join("\n\n"), merged_cites, final_follow_ups)
 }

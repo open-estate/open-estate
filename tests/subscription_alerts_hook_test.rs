@@ -926,11 +926,10 @@ async fn test_daily_weekly_digest_batching_flush_and_authorized_crud_manage_link
         .unwrap_or("")
         .contains("301 Synthlisting01 Dr"));
 
-    let past_25h = (chrono::Utc::now() - chrono::Duration::hours(25))
-        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let past_25h_ts = (chrono::Utc::now() - chrono::Duration::hours(25)).timestamp();
     db.execute_params(
-        "UPDATE subscriptions SET created_at = ? WHERE id IN (?, ?)",
-        &[past_25h.into(), daily_id.as_str().into(), weekly_id.as_str().into()],
+        "UPDATE subscriptions SET created_ts = ? WHERE public_id IN (?, ?)",
+        &[past_25h_ts.into(), daily_id.as_str().into(), weekly_id.as_str().into()],
     )
     .await
     .unwrap();
@@ -961,11 +960,10 @@ async fn test_daily_weekly_digest_batching_flush_and_authorized_crud_manage_link
     assert!(weekly_still.last_notified_at.is_none());
     assert!(weekly_still.digest_pending_json.is_some());
 
-    let past_8d = (chrono::Utc::now() - chrono::Duration::days(8))
-        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let past_8d_ts = (chrono::Utc::now() - chrono::Duration::days(8)).timestamp();
     db.execute_params(
-        "UPDATE subscriptions SET created_at = ? WHERE id = ?",
-        &[past_8d.into(), weekly_id.as_str().into()],
+        "UPDATE subscriptions SET created_ts = ? WHERE public_id = ?",
+        &[past_8d_ts.into(), weekly_id.as_str().into()],
     )
     .await
     .unwrap();

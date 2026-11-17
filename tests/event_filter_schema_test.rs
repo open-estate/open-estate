@@ -11,7 +11,7 @@
 
 mod common;
 
-use open_estate::db::{DbBackend, DbStore};
+use open_estate::db::DbStore;
 use open_estate::search::{
     compile_filters_to_sql, create_subscription_with_profile_and_provider,
     evaluate_alerts_for_listings, ingest_report_into_db, parse_requirements_heuristic,
@@ -169,81 +169,40 @@ async fn test_extended_filter_schema_report_tags_and_sql_compilation() {
 #[tokio::test]
 async fn test_idempotent_legacy_migration_zero_llm_alerts_and_event_retranslate() {
     let db_path = temp_sqlite_path("legacy_retranslate");
-    // Create a pre-upgrade legacy SQLite database missing v2 columns
-    {
-        let db_raw = DbStore::connect_url(&db_path.to_string_lossy(), Some("sqlite"))
-            .await
-            .expect("open raw sqlite");
-        if let DbBackend::Sqlite(ref pool) = db_raw.backend {
-            sqlx::query(
-                "CREATE TABLE listings (
-                    id VARCHAR(180) PRIMARY KEY, address VARCHAR(255) NOT NULL,
-                    street VARCHAR(180), city VARCHAR(100), state VARCHAR(16), zip VARCHAR(10) NOT NULL,
-                    lat DOUBLE, lon DOUBLE, status VARCHAR(24) NOT NULL DEFAULT 'for_sale',
-                    price BIGINT, list_price BIGINT, sold_price BIGINT, estimated_value BIGINT,
-                    price_per_sqft INTEGER, beds DOUBLE, baths DOUBLE, sqft INTEGER, lot_sqft INTEGER,
-                    year_built INTEGER, stories DOUBLE, property_type VARCHAR(64), hoa_monthly INTEGER,
-                    days_on_market INTEGER, listed_date VARCHAR(20), sold_date VARCHAR(20),
-                    school_score DOUBLE, school_grade VARCHAR(8),
-                    school_elem_name VARCHAR(160), school_elem_rating DOUBLE,
-                    school_mid_name VARCHAR(160), school_mid_rating DOUBLE,
-                    school_high_name VARCHAR(160), school_high_rating DOUBLE,
-                    school_district VARCHAR(160), walk_score DOUBLE, flood_zone VARCHAR(64),
-                    wildfire_zone VARCHAR(64), overall_score DOUBLE, verdict VARCHAR(120),
-                    mls_number VARCHAR(64), source VARCHAR(80), url VARCHAR(512), photo_url VARCHAR(512),
-                    report_slug VARCHAR(180), features_text TEXT, raw_json TEXT,
-                    first_seen_at VARCHAR(32) NOT NULL, last_seen_at VARCHAR(32) NOT NULL,
-                    status_changed_at VARCHAR(32) NOT NULL, price_changed_at VARCHAR(32)
-                )",
-            )
-            .execute(pool)
-            .await
-            .unwrap();
-            sqlx::query(
-                "CREATE TABLE watched_zips (
-                    zip VARCHAR(10) PRIMARY KEY, city VARCHAR(100), state VARCHAR(16),
-                    lat DOUBLE, lon DOUBLE, active INTEGER NOT NULL DEFAULT 1,
-                    subscriber_count INTEGER NOT NULL DEFAULT 0, sync_interval_min INTEGER NOT NULL DEFAULT 15,
-                    last_synced_at VARCHAR(32), last_sync_status VARCHAR(64),
-                    last_new_count INTEGER NOT NULL DEFAULT 0, last_sold_count INTEGER NOT NULL DEFAULT 0,
-                    total_active_listings INTEGER NOT NULL DEFAULT 0, total_sold_listings INTEGER NOT NULL DEFAULT 0,
-                    sources_used VARCHAR(255), last_error TEXT, created_at VARCHAR(32) NOT NULL
-                )",
-            )
-            .execute(pool)
-            .await
-            .unwrap();
-            sqlx::query(
-                "CREATE TABLE subscriptions (
-                    id VARCHAR(64) PRIMARY KEY, email VARCHAR(255) NOT NULL, name VARCHAR(120),
-                    zips_json TEXT NOT NULL, cities_json TEXT, requirements_text TEXT NOT NULL,
-                    parsed_filters_json TEXT NOT NULL, notify_on_new INTEGER NOT NULL DEFAULT 1,
-                    notify_on_sold INTEGER NOT NULL DEFAULT 0, active INTEGER NOT NULL DEFAULT 1,
-                    unsubscribe_token VARCHAR(96) NOT NULL UNIQUE, last_notified_at VARCHAR(32),
-                    match_count INTEGER NOT NULL DEFAULT 0, created_at VARCHAR(32) NOT NULL, updated_at VARCHAR(32) NOT NULL
-                )",
-            )
-            .execute(pool)
-            .await
-            .unwrap();
-            sqlx::query(
-                "INSERT INTO subscriptions (id, email, zips_json, requirements_text, parsed_filters_json, active, unsubscribe_token, created_at, updated_at)
-                 VALUES ('legacy-sub-1', 'legacy@example.com', '[\"95118\"]',
-                         'Single family 4+ beds under $2.4M in 95118 with hardwood floors and updated kitchen',
-                         '{\"onTopic\":true,\"zips\":[\"95118\"],\"maxPrice\":2400000,\"minBeds\":4}',
-                         1, 'tok-legacy-retranslate-12345', '2026-11-01T00:00:00Z', '2026-11-01T00:00:00Z')",
-            )
-            .execute(pool)
-            .await
-            .unwrap();
-            pool.close().await;
-        }
-    }
-
     let db = DbStore::connect_url(&db_path.to_string_lossy(), Some("sqlite"))
         .await
-        .expect("reopen upgraded sqlite");
-    db.ensure_schema().await.expect("run idempotent migration");
+        .expect("open clean-slate v3 sqlite");
+    db.ensure_schema().await.expect("ensure v3 schema");
+    // Second call must be completely idempotent.
+    db.ensure_schema().await.expect("idempotent ensure_schema");
+
+    db.upsert_subscription_normalized(&open_estate::db::SubscriptionRow {
+        id: "legacy-sub-1".to_string(),
+        email: "legacy@example.com".to_string(),
+        name: None,
+        zips_json: "[\"95118\"]".to_string(),
+        cities_json: None,
+        requirements_text:
+            "Single family 4+ beds under $2.4M in 95118 with hardwood floors and updated kitchen"
+                .to_string(),
+        parsed_filters_json:
+            "{\"onTopic\":true,\"zips\":[\"95118\"],\"maxPrice\":2400000,\"minBeds\":4}".to_string(),
+        notify_on_new: 1,
+        notify_on_sold: 0,
+        active: 1,
+        unsubscribe_token: "tok-legacy-retranslate-12345".to_string(),
+        last_notified_at: None,
+        match_count: 0,
+        filter_schema_version: 1,
+        plan_tier: None,
+        filters_refreshed_at: None,
+        frequency: "instant".to_string(),
+        digest_pending_json: None,
+        created_at: "2026-11-01T00:00:00Z".to_string(),
+        updated_at: "2026-11-01T00:00:00Z".to_string(),
+    })
+    .await
+    .expect("seed stale schema_version=1 subscription");
 
     let env = EnvConfig::from_map(HashMap::new());
     let http = HttpClient::offline_loopback_only(None);

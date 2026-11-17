@@ -47,6 +47,7 @@ sharing:
 source_attribution:
   name: "Mapbox Directions Matrix · © OpenStreetMap"
   url: "https://docs.mapbox.com/api/navigation/matrix/"
+  reference_url_template: "https://docs.mapbox.com/api/navigation/matrix/"
 openapi:
   spec_file: "openapi.yaml"
   operation_id: "getMapboxDrivingMatrix"

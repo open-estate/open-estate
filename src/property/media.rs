@@ -31,8 +31,7 @@ use crate::registry::endpoints::{
     KINGCO_ORTHO_2023_BASE_URL, KINGCO_ORTHO_2023_EXPORT_URL, KINGCO_ORTHO_2023_TILE_URL,
     SCC_SJ_ORTHO_2025_BASE_URL, SCC_SJ_ORTHO_2025_EXPORT_URL, SCC_SJ_ORTHO_2025_TILE_URL,
     USGS_3DEP_INFO_URL, USGS_IMAGERY_ONLY_EXPORT_URL as USGS_IMAGERY_ONLY_EXPORT,
-    USGS_IMAGERY_ONLY_TILE_URL, USGS_IMAGERY_TOPO_EXPORT_URL as USGS_IMAGERY_TOPO_EXPORT,
-    USGS_NATIONAL_MAP_URL,
+    USGS_IMAGERY_ONLY_TILE_URL, USGS_NATIONAL_MAP_URL, USGS_TOPO_EXPORT_URL as USGS_TOPO_EXPORT,
 };
 use crate::shared::{EnvConfig, WGS84_EQUATORIAL_RADIUS_M};
 
@@ -2315,39 +2314,16 @@ fn build_open_gis_cards_with_env(
         return (cards, resolved);
     };
 
-    let short_addr = ctx
-        .address
-        .split(',')
-        .next()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(scrub_text)
-        .unwrap_or_else(|| format!("{lat:.5}, {lon:.5}"));
+    let short_addr = short_addr_from_ctx(ctx, lat, lon);
 
     // 1–3. Crisp rooftop (~28m), lot/setbacks (~60m), and neighborhood block (~145m) aerial crops
     cards.extend(build_three_aerial_cards(lat, lon, ctx, &resolved));
 
-    // 4. Regional USGS Imagery + Topo terrain framing (~0.015 deg lat span / ~835m N/S radius, 10:7 aspect)
+    // 4. Regional USGS Topo terrain framing (~0.015 deg lat span / ~835m N/S radius, 10:7 aspect)
     cards.push(build_usgs_regional_topo_card(lat, lon));
 
-    // 5. USGS Hybrid Street & Topographic Frontage Context (~115m N/S radius, 3:2 aspect)
-    let (sx1, sy1, sx2, sy2) = bbox_wgs84(lat, lon, 115.0, 1.5);
-    cards.push(PropertyMediaItem {
-        id: "usgs-street-topo".to_string(),
-        url: format!(
-            "{USGS_IMAGERY_TOPO_EXPORT}?bbox={sx1:.6},{sy1:.6},{sx2:.6},{sy2:.6}&bboxSR=4326&imageSR=3857&size=960,640&format=jpg&f=image"
-        ),
-        thumb_url: format!(
-            "{USGS_IMAGERY_TOPO_EXPORT}?bbox={sx1:.6},{sy1:.6},{sx2:.6},{sy2:.6}&bboxSR=4326&imageSR=3857&size=480,320&format=jpg&f=image"
-        ),
-        category: "street".to_string(),
-        room_tag: "Street & Topo".to_string(),
-        caption: format!("Street frontage, approach road, and contour overlay for {short_addr}"),
-        captured_at: "USGS National Map".to_string(),
-        source_name: "USGS National Map".to_string(),
-        source_url: USGS_NATIONAL_MAP_URL.to_string(),
-        is_historical_sale: false,
-    });
+    // 5. USGS Street & Topographic Frontage Context (~115m N/S radius, 3:2 aspect)
+    cards.push(build_usgs_street_topo_card(lat, lon, &short_addr));
 
     (cards, resolved)
 }
@@ -2707,20 +2683,50 @@ pub fn build_deterministic_property_media_with_env(
     )
 }
 
+fn short_addr_from_ctx(ctx: &ReportMediaContext, lat: f64, lon: f64) -> String {
+    ctx.address
+        .split(',')
+        .next()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(scrub_text)
+        .unwrap_or_else(|| format!("{lat:.5}, {lon:.5}"))
+}
+
+fn build_usgs_street_topo_card(lat: f64, lon: f64, short_addr: &str) -> PropertyMediaItem {
+    let (sx1, sy1, sx2, sy2) = bbox_wgs84(lat, lon, 115.0, 1.5);
+    PropertyMediaItem {
+        id: "usgs-street-topo".to_string(),
+        url: format!(
+            "{USGS_TOPO_EXPORT}?bbox={sx1:.6},{sy1:.6},{sx2:.6},{sy2:.6}&bboxSR=4326&imageSR=3857&size=960,640&format=jpg&f=image"
+        ),
+        thumb_url: format!(
+            "{USGS_TOPO_EXPORT}?bbox={sx1:.6},{sy1:.6},{sx2:.6},{sy2:.6}&bboxSR=4326&imageSR=3857&size=480,320&format=jpg&f=image"
+        ),
+        category: "street".to_string(),
+        room_tag: "Street & Topo".to_string(),
+        caption: format!("Street frontage, approach road, and contour overlay for {short_addr}"),
+        captured_at: "USGS National Map".to_string(),
+        source_name: "USGS National Map".to_string(),
+        source_url: USGS_NATIONAL_MAP_URL.to_string(),
+        is_historical_sale: false,
+    }
+}
+
 fn build_usgs_regional_topo_card(lat: f64, lon: f64) -> PropertyMediaItem {
     // Regional terrain framing (~0.015 deg lat span / ~835m N/S radius, 10:7 aspect)
     let (tx1, ty1, tx2, ty2) = bbox_wgs84(lat, lon, 835.0, 800.0 / 560.0);
     PropertyMediaItem {
         id: "usgs-3dep-hillshade".to_string(),
         url: format!(
-            "{USGS_IMAGERY_TOPO_EXPORT}?bbox={tx1:.6},{ty1:.6},{tx2:.6},{ty2:.6}&bboxSR=4326&imageSR=3857&size=800,560&format=jpg&f=image"
+            "{USGS_TOPO_EXPORT}?bbox={tx1:.6},{ty1:.6},{tx2:.6},{ty2:.6}&bboxSR=4326&imageSR=3857&size=800,560&format=jpg&f=image"
         ),
         thumb_url: format!(
-            "{USGS_IMAGERY_TOPO_EXPORT}?bbox={tx1:.6},{ty1:.6},{tx2:.6},{ty2:.6}&bboxSR=4326&imageSR=3857&size=480,336&format=jpg&f=image"
+            "{USGS_TOPO_EXPORT}?bbox={tx1:.6},{ty1:.6},{tx2:.6},{ty2:.6}&bboxSR=4326&imageSR=3857&size=480,336&format=jpg&f=image"
         ),
         category: "parcel".to_string(),
         room_tag: "USGS Regional Topo".to_string(),
-        caption: "Regional USGS Imagery + Topo terrain relief, drainage basin & contour framing"
+        caption: "Regional USGS Topo terrain relief, drainage basin & contour framing"
             .to_string(),
         captured_at: "USGS 3DEP / Topo".to_string(),
         source_name: "USGS National Map".to_string(),
@@ -2733,6 +2739,7 @@ fn upgrade_legacy_relief_cards(report: &mut Value, ctx: &ReportMediaContext) {
     let Some((lat, lon)) = ctx.coords else {
         return;
     };
+    let short_addr = short_addr_from_ctx(ctx, lat, lon);
     let Some(items) = report
         .pointer_mut("/propertyMedia/items")
         .and_then(Value::as_array_mut)
@@ -2743,18 +2750,20 @@ fn upgrade_legacy_relief_cards(report: &mut Value, ctx: &ReportMediaContext) {
         let Some(obj) = item.as_object_mut() else {
             continue;
         };
-        let is_shaded_relief = obj
-            .get("url")
-            .and_then(Value::as_str)
-            .is_some_and(|u| u.contains("USGSShadedReliefOnly"))
-            || obj
-                .get("thumbUrl")
-                .and_then(Value::as_str)
-                .is_some_and(|u| u.contains("USGSShadedReliefOnly"));
-        if !is_shaded_relief {
+        let url_str = obj.get("url").and_then(Value::as_str).unwrap_or("");
+        let thumb_str = obj.get("thumbUrl").and_then(Value::as_str).unwrap_or("");
+        let is_legacy = [url_str, thumb_str]
+            .into_iter()
+            .any(|u| u.contains("USGSShadedReliefOnly") || u.contains("USGSImageryTopo"));
+        if !is_legacy {
             continue;
         }
-        let replacement = build_usgs_regional_topo_card(lat, lon);
+        let item_id = obj.get("id").and_then(Value::as_str).unwrap_or("");
+        let replacement = if item_id == "usgs-street-topo" {
+            build_usgs_street_topo_card(lat, lon, &short_addr)
+        } else {
+            build_usgs_regional_topo_card(lat, lon)
+        };
         if let Ok(Value::Object(rep_obj)) = serde_json::to_value(replacement) {
             *obj = rep_obj;
         }

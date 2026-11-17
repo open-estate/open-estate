@@ -1,0 +1,236 @@
+syntax = "proto3";
+
+package openestate.db.v1;
+
+import "openestate/db/v1/enums.proto";
+
+message SubscriptionKeywordProto {
+  int32 term_kind = 1;
+  string term_value = 2;
+}
+
+message UserProfilePlaceProto {
+  int32 place_idx = 1;
+  string label = 2;
+  double lat = 3;
+  double lon = 4;
+  int32 travel_mode = 5;
+  double trips_per_week = 6;
+  double max_minutes = 7;
+}
+
+message UserProfileProto {
+  int64 user_sk = 1;
+  string user_id = 2;
+  int32 version = 3;
+  optional string preset_code = 4;
+  double w_commute = 5;
+  double w_cost = 6;
+  double w_schools = 7;
+  double w_convenience = 8;
+  double w_homefit = 9;
+  double w_style = 10;
+  double w_hazards = 11;
+  double w_crime = 12;
+  double w_environment = 13;
+  double w_investment = 14;
+  double w_fengshui = 15;
+  optional double budget_monthly = 16;
+  optional double budget_max_price = 17;
+  int32 loan_type = 18;
+  double down_payment_pct = 19;
+  optional double cash_available = 20;
+  double comfort_ratio = 21;
+  int32 school_levels_mask = 22;
+  optional double min_beds = 23;
+  optional double min_baths = 24;
+  optional double min_sqft = 25;
+  optional double min_lot_sqft = 26;
+  bool single_story_pref = 27;
+  bool multigenerational = 28;
+  optional double hoa_max_monthly = 29;
+  int32 property_types_mask = 30;
+  int32 style_prefs_mask = 31;
+  int32 style_avoid_mask = 32;
+  int32 feature_wishes_mask = 33;
+  int32 must_have_screens_mask = 34;
+  int32 deal_breakers_mask = 35;
+  int32 avoid_digits_mask = 36;
+  int32 prefer_digits_mask = 37;
+  int32 critical_dims_mask = 38;
+  double traffic_buffer = 39;
+  repeated UserProfilePlaceProto places = 40;
+  int64 created_ts = 41;
+  int64 updated_ts = 42;
+  int32 style_fine_mask = 43;
+}
+
+message SubscriptionCoreProto {
+  int64 subscription_sk = 1;
+  string public_id = 2;
+  string email = 3;
+  optional string subscriber_name = 4;
+  string requirements_text = 5;
+  optional string intent_summary = 6;
+  optional string fair_housing_notice = 7;
+  optional string sort_by = 8;
+  int32 lang_code = 9;
+  bool active = 10;
+  SubscriptionFrequency frequency = 11;
+  bool notify_on_new = 12;
+  bool notify_on_sold = 13;
+  int32 status_mask = 14;
+  int32 property_cat_mask = 15;
+  optional int64 min_price = 16;
+  optional int64 max_price = 17;
+  optional int32 max_all_in_monthly = 18;
+  optional int32 max_monthly_utilities = 19;
+  optional int32 max_hoa_monthly = 20;
+  optional double min_beds = 21;
+  optional double max_beds = 22;
+  optional double min_baths = 23;
+  optional int32 min_sqft = 24;
+  optional int32 max_sqft = 25;
+  optional int32 min_lot_sqft = 26;
+  optional int32 min_year_built = 27;
+  optional int32 max_year_built = 28;
+  optional int32 stories = 29;
+  optional double min_garage_spaces = 30;
+  optional double min_school_score = 31;
+  optional int32 min_school_grade = 32;
+  optional double min_safety_score = 33;
+  optional double max_noise_db = 34;
+  optional double max_seismic_pga = 35;
+  optional double max_electric_rate_kwh = 36;
+  optional int32 min_download_mbps = 37;
+  int64 required_tag_bits = 38;
+  int64 excluded_tag_bits = 39;
+  int32 style_mask = 40;
+  bool has_explicit_profile = 41;
+  optional UserProfileProto profile = 42;
+  int32 match_count = 43;
+  optional string plan_tier = 44;
+  string unsubscribe_token = 45;
+  int32 filter_schema_version = 46;
+  optional int64 last_notified_ts = 47;
+  optional int64 filters_refreshed_ts = 48;
+  int64 created_ts = 49;
+  int64 updated_ts = 50;
+  repeated string zips = 51;
+  repeated string cities = 52;
+  repeated SubscriptionKeywordProto keywords = 53;
+}
+
+message SubscriptionDigestItemProto {
+  int64 subscription_sk = 1;
+  int64 listing_sk = 2;
+  string listing_external_id = 3;
+  ListingEventKind event_kind = 4;
+  optional int64 old_price = 5;
+  string event_key = 6;
+  int32 match_score = 7;
+  string match_tier = 8;
+  string why_it_matches = 9;
+  optional string tradeoffs = 10;
+  int64 queued_ts = 11;
+  bytes listing_snapshot_zstd = 12;
+}
+
+message SubscriptionNotificationProto {
+  int64 notification_sk = 1;
+  string public_id = 2;
+  int64 subscription_sk = 3;
+  string subscription_public_id = 4;
+  int64 listing_sk = 5;
+  string listing_external_id = 6;
+  string email_to = 7;
+  string subject = 8;
+  ListingEventKind event_kind = 9;
+  string event_key = 10;
+  optional int32 match_score = 11;
+  optional string match_reason = 12;
+  NotificationDeliveryStatus delivery_status = 13;
+  optional string delivery_error = 14;
+  int64 sent_ts = 15;
+}
+
+message MatchFeedbackProto {
+  int64 feedback_sk = 1;
+  string public_id = 2;
+  string user_id = 3;
+  optional int64 listing_sk = 4;
+  string listing_external_id = 5;
+  FeedbackActionKind action = 6;
+  int32 estimated_dims_mask = 7;
+  optional double u_commute = 8;
+  optional double u_cost = 9;
+  optional double u_schools = 10;
+  optional double u_convenience = 11;
+  optional double u_homefit = 12;
+  optional double u_style = 13;
+  optional double u_hazards = 14;
+  optional double u_crime = 15;
+  optional double u_environment = 16;
+  optional double u_investment = 17;
+  optional double u_fengshui = 18;
+  optional string reason = 19;
+  int64 created_ts = 20;
+  optional bytes snapshot_utf8 = 21;
+}
+
+message RecommendedAgentAreaProto {
+  int32 area_kind = 1;
+  string area_value = 2;
+}
+
+message RecommendedAgentTagProto {
+  int32 tag_kind = 1;
+  string tag_value = 2;
+}
+
+message RecommendedAgentProto {
+  int64 agent_sk = 1;
+  string partner_id = 2;
+  SpecialistRole role = 3;
+  string role_label = 4;
+  string full_name = 5;
+  optional string firm_name = 6;
+  string license_number = 7;
+  optional string phone = 8;
+  optional string email = 9;
+  optional string website_url = 10;
+  optional int64 min_price = 11;
+  optional int64 max_price = 12;
+  optional string notes = 13;
+  bool is_sponsored = 14;
+  int32 priority = 15;
+  bool active = 16;
+  repeated RecommendedAgentAreaProto areas = 17;
+  repeated RecommendedAgentTagProto tags = 18;
+  int64 created_ts = 19;
+  int64 updated_ts = 20;
+}
+
+message SystemModuleConfigProto {
+  int32 priority = 1;
+  bytes config_utf8 = 2;
+}
+
+message InstalledExtensionManifestProto {
+  string domain_name = 1;
+  string driver_kind = 2;
+  string proto_message_type = 3;
+  string health_status = 4;
+  string manifest_yaml = 5;
+  optional string openapi_yaml = 6;
+  bytes config_utf8 = 7;
+}
+
+message AppUserPreferencesProto {
+  bytes preferences_utf8 = 1;
+}
+
+message AuditDetailsProto {
+  string public_id = 1;
+  bytes details_utf8 = 2;
+}

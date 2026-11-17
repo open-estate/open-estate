@@ -7,9 +7,11 @@
 
 use anyhow::{anyhow, Result};
 use chrono::{Datelike, Utc};
+use geo::{Area, BooleanOps, BoundingRect, Coord, LineString, Polygon as GeoPolygon};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::modules::xuankong::{
@@ -328,7 +330,7 @@ fn pick_subject<'a>(
 
 /// Version of the property-geometry fields (`house.footprint`, `house.additionalStructures`,
 /// `house.lotPolygon`, areas). Stored reports below this version are recomputed once when next read.
-pub const GEOMETRY_VERSION: i64 = 2;
+pub const GEOMETRY_VERSION: i64 = 3;
 
 /// `building=*` values for structures that are never the main dwelling.
 fn is_outbuilding_tag(tag: &str) -> bool {
@@ -358,12 +360,14 @@ fn ring_gap_m(a: &[(f64, f64)], b: &[(f64, f64)]) -> f64 {
 /// The buildings and lot that make up the subject property. Every map outline, area and the feng-shui
 /// footprint come from this one selection, for a freshly generated report and for a refreshed one alike.
 pub(crate) struct PropertySelection<'a> {
-    pub subject: Option<&'a OsmWay>,
+    pub subject: Option<Cow<'a, OsmWay>>,
     pub method: Option<String>,
     /// Every closed building way in the vicinity.
     pub buildings: Vec<&'a OsmWay>,
     /// Other structures standing on the subject's lot (garage, ADU, shed…).
     pub additional: Vec<&'a OsmWay>,
+    /// Remaining neighbour portions of a shared multi-unit row building after carving out `subject`.
+    pub shared_remainders: Vec<Vec<(f64, f64)>>,
     /// The parcel outline, when it can be shown as this property's lot.
     pub lot: Option<Vec<(f64, f64)>>,
     /// Whether the subject building stands on the parcel; `None` when no usable parcel outline is known.
@@ -381,10 +385,270 @@ impl PropertySelection<'_> {
 
     fn uses_fallback_footprints(&self) -> bool {
         self.subject
+            .as_deref()
             .into_iter()
             .chain(self.additional.iter().copied())
             .any(|b| b.id < 0)
     }
+}
+
+struct CarvedSharedUnit {
+    parent_id: i64,
+    unit_way: OsmWay,
+    aligned_lot: Vec<(f64, f64)>,
+    remainder_rings: Vec<Vec<(f64, f64)>>,
+}
+
+fn ring_to_local_poly(ring: &[(f64, f64)], frame: &LocalProj, dx: f64, dy: f64) -> Option<GeoPolygon<f64>> {
+    let mut pts: Vec<Coord<f64>> = Vec::with_capacity(ring.len() + 1);
+    for &(la, lo) in ring {
+        if !la.is_finite() || !lo.is_finite() {
+            return None;
+        }
+        let (x, y) = frame.fwd(la, lo);
+        let c = Coord { x: x + dx, y: y + dy };
+        if pts
+            .last()
+            .map(|p| (p.x - c.x).hypot(p.y - c.y) < 1e-4)
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        pts.push(c);
+    }
+    if let (Some(first), Some(last)) = (pts.first().copied(), pts.last().copied()) {
+        if (first.x - last.x).hypot(first.y - last.y) >= 1e-4 {
+            pts.push(first);
+        }
+    }
+    if pts.len() < 4 {
+        return None;
+    }
+    let poly = GeoPolygon::new(LineString::new(pts), vec![]);
+    (poly.unsigned_area() >= 4.0).then_some(poly)
+}
+
+fn local_poly_to_latlon_ring(poly: &GeoPolygon<f64>, frame: &LocalProj) -> Option<Vec<(f64, f64)>> {
+    let ext = poly.exterior();
+    if ext.0.len() < 4 {
+        return None;
+    }
+    let mut out: Vec<(f64, f64)> = Vec::with_capacity(ext.0.len());
+    for c in &ext.0 {
+        let (la, lo) = frame.inv(c.x, c.y);
+        let pt = (round_n(la, 7), round_n(lo, 7));
+        if out.last().map(|p| *p == pt).unwrap_or(false) {
+            continue;
+        }
+        out.push(pt);
+    }
+    if let (Some(&first), Some(&last)) = (out.first(), out.last()) {
+        if first != last {
+            out.push(first);
+        }
+    }
+    (out.len() >= 4).then_some(out)
+}
+
+/// When a fee-simple townhome / rowhouse parcel (`lot`) sits inside an undivided multi-unit building
+/// shell (`area(b) > area(lot) * 1.20`), co-registers `lot` within ≤ 4 m for cadastral-vs-ortho shift
+/// and carves out this single unit's roof footprint while returning the attached neighbour segments.
+fn carve_unit_from_shared_building(
+    candidates: &[&OsmWay],
+    lot: &[(f64, f64)],
+) -> Option<CarvedSharedUnit> {
+    let (lot_area_m2, lot_clat, lot_clon) = ring_area_centroid(lot);
+    if !(20.0..=900.0).contains(&lot_area_m2) {
+        return None;
+    }
+    let frame = LocalProj::new(lot_clat, lot_clon);
+    let lot_poly0 = ring_to_local_poly(lot, &frame, 0.0, 0.0)?;
+    let lot_poly_area = lot_poly0.unsigned_area();
+    let lot_rect = lot_poly0.bounding_rect()?;
+    let lot_ext = &lot_poly0.exterior().0;
+    let mut lot_edge_samples: Vec<(f64, f64, f64)> = Vec::new();
+    for seg in lot_ext.windows(2) {
+        let (ax, ay) = (seg[0].x, seg[0].y);
+        let (bx, by) = (seg[1].x, seg[1].y);
+        let elen = (bx - ax).hypot(by - ay);
+        if elen < 1e-4 {
+            continue;
+        }
+        let nseg = ((elen / 0.35).round() as usize).max(1);
+        let ds = elen / (nseg as f64);
+        for k in 0..nseg {
+            let t = (k as f64 + 0.5) / (nseg as f64);
+            lot_edge_samples.push((ax + t * (bx - ax), ay + t * (by - ay), ds));
+        }
+    }
+
+    let mut best_hit: Option<(f64, f64, f64, f64, &OsmWay, GeoPolygon<f64>)> = None;
+    for &b in candidates {
+        if is_outbuilding_tag(&building_tag(b)) {
+            continue;
+        }
+        let (b_area_m2, _, _) = ring_area_centroid(&b.coords);
+        if b_area_m2 <= lot_area_m2 * 1.20 {
+            continue;
+        }
+        let Some(b_poly) = ring_to_local_poly(&b.coords, &frame, 0.0, 0.0) else {
+            continue;
+        };
+        let Some(b_rect) = b_poly.bounding_rect() else {
+            continue;
+        };
+        let pad = 4.2;
+        if b_rect.max().x + pad < lot_rect.min().x
+            || b_rect.min().x - pad > lot_rect.max().x
+            || b_rect.max().y + pad < lot_rect.min().y
+            || b_rect.min().y - pad > lot_rect.max().y
+        {
+            continue;
+        }
+
+        let b_edges: Vec<(f64, f64, f64, f64)> = b_poly
+            .exterior()
+            .0
+            .windows(2)
+            .map(|w| (w[0].x, w[0].y, w[1].x, w[1].y))
+            .collect();
+        let dist_to_b_edge = |px: f64, py: f64| -> f64 {
+            b_edges
+                .iter()
+                .map(|&(ax, ay, bx, by)| {
+                    let (vx, vy) = (bx - ax, by - ay);
+                    let l2 = vx * vx + vy * vy;
+                    if l2 < 1e-12 {
+                        return (px - ax).hypot(py - ay);
+                    }
+                    let t = (((px - ax) * vx + (py - ay) * vy) / l2).clamp(0.0, 1.0);
+                    (px - (ax + t * vx)).hypot(py - (ay + t * vy))
+                })
+                .fold(f64::INFINITY, f64::min)
+        };
+
+        let eval_shift = |dx: f64, dy: f64| -> Option<(f64, f64)> {
+            let shifted = ring_to_local_poly(lot, &frame, dx, dy)?;
+            let ov = b_poly.intersection(&shifted).unsigned_area();
+            let hug_m: f64 = lot_edge_samples
+                .iter()
+                .filter_map(|&(sx, sy, ds)| {
+                    let d = dist_to_b_edge(sx + dx, sy + dy);
+                    (d < 0.55).then(|| ds * (1.0 - d / 0.55))
+                })
+                .sum();
+            let score = ov + 0.85 * hug_m - 0.12 * dx.hypot(dy);
+            Some((score, ov))
+        };
+
+        let mut best_local: Option<(f64, f64, f64, f64)> = None;
+        for ix in -5..=5 {
+            for iy in -5..=5 {
+                let (dx, dy) = (ix as f64 * 0.7, iy as f64 * 0.7);
+                if dx.hypot(dy) > 4.0 {
+                    continue;
+                }
+                if let Some((sc, ov)) = eval_shift(dx, dy) {
+                    if best_local.map(|cur| sc > cur.0).unwrap_or(true) {
+                        best_local = Some((sc, ov, dx, dy));
+                    }
+                }
+            }
+        }
+        let Some((_, _, cdx, cdy)) = best_local else {
+            continue;
+        };
+        for ix in -4..=4 {
+            for iy in -4..=4 {
+                let (dx, dy) = (cdx + ix as f64 * 0.15, cdy + iy as f64 * 0.15);
+                if dx.hypot(dy) > 4.0 {
+                    continue;
+                }
+                if let Some((sc, ov)) = eval_shift(dx, dy) {
+                    if best_local.map(|cur| sc > cur.0).unwrap_or(true) {
+                        best_local = Some((sc, ov, dx, dy));
+                    }
+                }
+            }
+        }
+        let Some((sc, ov, bdx, bdy)) = best_local else {
+            continue;
+        };
+        if ov < 22.0 || ov < 0.50 * lot_poly_area {
+            continue;
+        }
+        if best_hit.as_ref().map(|cur| sc > cur.0).unwrap_or(true) {
+            best_hit = Some((sc, ov, bdx, bdy, b, b_poly));
+        }
+    }
+
+    let (_, _, dx, dy, parent, b_poly) = best_hit?;
+    let shifted_lot = ring_to_local_poly(lot, &frame, dx, dy)?;
+    // Aerial/OSM roof polygons include ~0.3–0.9 m front/rear eaves beyond the recorded foundation
+    // parcel. Extending the cutting mask slightly along the front-to-back depth axis (0 m along the
+    // party walls) captures this unit's eaves and splits left/right neighbour roof segments cleanly.
+    let (row_brg, row_len, row_wid, _) = dominant_axis_rect(&parent.coords);
+    let (lot_brg, lot_len, lot_wid, _) = dominant_axis_rect(lot);
+    let depth_vec = if row_len > row_wid * 1.30 {
+        let r = row_brg.to_radians();
+        Some((-r.cos(), r.sin()))
+    } else if lot_len > lot_wid * 1.15 {
+        let r = lot_brg.to_radians();
+        Some((r.sin(), r.cos()))
+    } else {
+        None
+    };
+    let slicer = if let Some((vx, vy)) = depth_vec {
+        let mut mp = geo::MultiPolygon(vec![shifted_lot.clone()]);
+        for s in [-1.15_f64, -0.55_f64, 0.55_f64, 1.15_f64] {
+            if let Some(ext_p) = ring_to_local_poly(lot, &frame, dx + vx * s, dy + vy * s) {
+                mp = mp.union(&geo::MultiPolygon(vec![ext_p]));
+            }
+        }
+        mp
+    } else {
+        geo::MultiPolygon(vec![shifted_lot.clone()])
+    };
+    let b_mp = geo::MultiPolygon(vec![b_poly]);
+    let inter = b_mp.intersection(&slicer);
+    let unit_poly = inter
+        .0
+        .iter()
+        .max_by(|a, b| {
+            a.unsigned_area()
+                .partial_cmp(&b.unsigned_area())
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .filter(|p| p.unsigned_area() >= 18.0)?;
+    let unit_coords = local_poly_to_latlon_ring(unit_poly, &frame)?;
+
+    let diff = b_mp.difference(&slicer);
+    let mut remainder_rings = Vec::new();
+    for rem in &diff.0 {
+        if rem.unsigned_area() >= 12.0 {
+            if let Some(r) = local_poly_to_latlon_ring(rem, &frame) {
+                remainder_rings.push(r);
+            }
+        }
+    }
+
+    let aligned_lot = if dx.hypot(dy) >= 0.20 {
+        local_poly_to_latlon_ring(&shifted_lot, &frame).unwrap_or_else(|| lot.to_vec())
+    } else {
+        lot.to_vec()
+    };
+
+    Some(CarvedSharedUnit {
+        parent_id: parent.id,
+        unit_way: OsmWay {
+            id: parent.id,
+            tags: parent.tags.clone(),
+            coords: unit_coords,
+            closed: true,
+        },
+        aligned_lot,
+        remainder_rings,
+    })
 }
 
 /// Resolves the subject building, its lot and the other structures on that lot.
@@ -470,52 +734,112 @@ pub(crate) fn select_property<'a>(
         }
     };
 
-    let (subject, method, lot_ok) = if let Some(k) = kept {
-        (
-            Some(k),
-            found_method.clone(),
-            lot.is_some() && (stands_on_lot(k) || address_parcel),
-        )
-    } else if let (true, Some(f)) = (by_address_tag, found) {
-        // A building tagged with this address is the strongest evidence there is; a parcel it does not
-        // stand on is not shown as its lot.
-        (
-            Some(f),
-            found_method.clone(),
-            lot.is_some() && stands_on_lot(f),
-        )
-    } else if lot.is_some() && address_parcel {
-        // The parcel is recorded for this very address, so the main building is whatever stands on it —
-        // even when the geocoder interpolated onto a neighbour's house.
-        match main_on_lot {
-            Some(m) => (
-                Some(m),
-                method_for(
-                    Some(m),
-                    "largest building on the parcel recorded for this address",
+    let mut shared_carved: Option<CarvedSharedUnit> = None;
+    let (subject, method, lot_ok): (Option<Cow<'a, OsmWay>>, Option<String>, bool) =
+        if let Some(k) = kept {
+            if !stands_on_lot(k) {
+                if let Some(r) = lot {
+                    if let Some(c) = carve_unit_from_shared_building(&[k], r) {
+                        let w = c.unit_way.clone();
+                        shared_carved = Some(c);
+                        (Some(Cow::Owned(w)), found_method.clone(), true)
+                    } else {
+                        (
+                            Some(Cow::Borrowed(k)),
+                            found_method.clone(),
+                            address_parcel,
+                        )
+                    }
+                } else {
+                    (Some(Cow::Borrowed(k)), found_method.clone(), false)
+                }
+            } else {
+                (Some(Cow::Borrowed(k)), found_method.clone(), lot.is_some())
+            }
+        } else if let (true, Some(f)) = (by_address_tag, found) {
+            // A building tagged with this address is the strongest evidence there is; a parcel it does not
+            // stand on is not shown as its lot.
+            (
+                Some(Cow::Borrowed(f)),
+                found_method.clone(),
+                lot.is_some() && stands_on_lot(f),
+            )
+        } else if let (Some(r), true) = (lot, address_parcel) {
+            // The parcel is recorded for this very address, so the main building is whatever stands on it —
+            // even when the geocoder interpolated onto a neighbour's house or the street entrance of a townhome complex.
+            match main_on_lot {
+                Some(m) => (
+                    Some(Cow::Borrowed(m)),
+                    method_for(
+                        Some(m),
+                        "largest building on the parcel recorded for this address",
+                    ),
+                    true,
                 ),
-                true,
-            ),
-            None => (found, found_method.clone(), true),
-        }
-    } else if let Some(r) = lot {
-        let anchored = found.map(stands_on_lot).unwrap_or(false) || point_in_ring(lat, lon, r);
-        match main_on_lot {
-            Some(m) if anchored => (
-                Some(m),
-                method_for(Some(m), "largest building on the parcel"),
-                true,
-            ),
-            _ => (found, found_method.clone(), false),
-        }
+                None => match carve_unit_from_shared_building(&buildings, r) {
+                    Some(c) => {
+                        let w = c.unit_way.clone();
+                        shared_carved = Some(c);
+                        (
+                            Some(Cow::Owned(w)),
+                            Some(
+                                "unit footprint on the shared building recorded for this address"
+                                    .to_string(),
+                            ),
+                            true,
+                        )
+                    }
+                    None => (found.map(Cow::Borrowed), found_method.clone(), true),
+                },
+            }
+        } else if let Some(r) = lot {
+            let anchored = found.map(stands_on_lot).unwrap_or(false) || point_in_ring(lat, lon, r);
+            match main_on_lot {
+                Some(m) if anchored => (
+                    Some(Cow::Borrowed(m)),
+                    method_for(Some(m), "largest building on the parcel"),
+                    true,
+                ),
+                _ => match carve_unit_from_shared_building(&buildings, r) {
+                    Some(c)
+                        if found.map(|f| f.id == c.parent_id).unwrap_or(false)
+                            || point_in_ring(lat, lon, r) =>
+                    {
+                        let w = c.unit_way.clone();
+                        shared_carved = Some(c);
+                        (
+                            Some(Cow::Owned(w)),
+                            Some(
+                                "unit footprint on the shared building containing this parcel"
+                                    .to_string(),
+                            ),
+                            true,
+                        )
+                    }
+                    _ => (found.map(Cow::Borrowed), found_method.clone(), false),
+                },
+            }
+        } else {
+            (found.map(Cow::Borrowed), found_method.clone(), false)
+        };
+
+    let is_carved_shared = shared_carved.is_some();
+    let subject_on_lot = lot.map(|_| {
+        is_carved_shared || subject.as_deref().map(stands_on_lot).unwrap_or(false)
+    });
+    let lot_without_building = lot_ok && address_parcel && on_lot.is_empty() && !is_carved_shared;
+    let effective_lot: Option<Vec<(f64, f64)>> = if !lot_ok {
+        None
+    } else if let Some(ref c) = shared_carved {
+        Some(c.aligned_lot.clone())
     } else {
-        (found, found_method.clone(), false)
+        lot.map(|r| r.to_vec())
     };
+    let shared_remainders = shared_carved
+        .map(|c| c.remainder_rings)
+        .unwrap_or_default();
 
-    let subject_on_lot = lot.map(|_| subject.map(stands_on_lot).unwrap_or(false));
-    let lot_without_building = lot_ok && address_parcel && on_lot.is_empty();
-
-    let additional: Vec<&OsmWay> = match subject {
+    let additional: Vec<&OsmWay> = match subject.as_deref() {
         None => Vec::new(),
         Some(s) => {
             // Houses a stray outbuilding could belong to instead.
@@ -535,7 +859,7 @@ pub(crate) fn select_property<'a>(
                         b,
                         s,
                         if lot_ok && subject_on_lot != Some(false) {
-                            lot
+                            effective_lot.as_deref()
                         } else {
                             None
                         },
@@ -553,11 +877,8 @@ pub(crate) fn select_property<'a>(
         method,
         buildings,
         additional,
-        lot: if lot_ok {
-            lot.map(|r| r.to_vec())
-        } else {
-            None
-        },
+        shared_remainders,
+        lot: effective_lot,
         subject_on_lot,
         street_norm,
         lot_without_building,
@@ -1196,7 +1517,7 @@ pub async fn run_fengshui_full(
             crate::property::public_records::USA_STRUCTURES,
         ));
     }
-    let subject = selection.subject;
+    let subject = selection.subject.as_deref();
     let method = selection.method.clone();
     let buildings = selection.buildings.clone();
     let ns = selection.street_norm.clone();
@@ -2670,20 +2991,26 @@ pub async fn run_fengshui_full(
         additional_json.push(structure_json(b, facts));
     }
 
-    let diag_buildings: Vec<Vec<[f64; 2]>> = buildings
+    let mut diag_buildings: Vec<Vec<[f64; 2]>> = selection
+        .shared_remainders
         .iter()
-        .filter(|&&b| {
-            subject.map(|s| s.id != b.id).unwrap_or(true) && !additional_ids.contains(&b.id)
-        })
-        .filter_map(|&b| {
-            let (_, clat, clon) = ring_area_centroid(&b.coords);
-            if haversine_m(house_lat, house_lon, clat, clon) < 110.0 {
-                Some(to_local(&b.coords))
-            } else {
-                None
-            }
-        })
+        .map(|r| to_local(r))
         .collect();
+    diag_buildings.extend(
+        buildings
+            .iter()
+            .filter(|&&b| {
+                subject.map(|s| s.id != b.id).unwrap_or(true) && !additional_ids.contains(&b.id)
+            })
+            .filter_map(|&b| {
+                let (_, clat, clon) = ring_area_centroid(&b.coords);
+                if haversine_m(house_lat, house_lon, clat, clon) < 110.0 {
+                    Some(to_local(&b.coords))
+                } else {
+                    None
+                }
+            }),
+    );
 
     let diag_grid: Option<Vec<Value>> = grid_cells_opt.map(|cells| {
         cells
@@ -3001,8 +3328,7 @@ pub async fn run_fengshui_full(
         "terrain": terrain_json,
         "micro": micro_json,
         "grid": grid_summary_json,
-        "diagram": diagram.clone(),
-        "sitePlan": diagram,
+        "diagram": diagram,
         "quickScreens": quick_screens,
         "scores": {
             "form": form_score,
@@ -3022,10 +3348,7 @@ pub async fn run_fengshui_full(
         "highlights": highlights,
         "highlightsZh": highlights_zh,
         "remedies": remedies,
-        "mapLayers": [facing_layer.clone()],
-        "layers": {
-            "facing": facing_layer,
-        }
+        "mapLayers": [facing_layer],
     });
 
     Ok(ModuleOutput {
@@ -3578,6 +3901,68 @@ fn classify_accessory_structure(
     }
 }
 
+/// Keeps `facts.buildingRegister` (`footprintSqft`, `lotCoveragePct`) and `facts.checks` (`footprint`)
+/// aligned with the resolved property footprint from `select_property` / `run_fengshui_full`, so a carved
+/// townhome unit footprint (or an off-lot mismatch) replaces any preliminary whole-building OSM shell area.
+pub fn sync_house_footprint_into_facts(facts: &mut Value, house: &Value) {
+    let Some(fobj) = facts.as_object_mut() else {
+        return;
+    };
+    let on_lot = house.get("onLot").and_then(Value::as_bool);
+    if on_lot == Some(false) {
+        if let Some(br) = fobj.get_mut("buildingRegister").and_then(Value::as_object_mut) {
+            br.insert("footprintSqft".into(), Value::Null);
+            br.insert("lotCoveragePct".into(), Value::Null);
+        }
+        if let Some(checks) = fobj.get_mut("checks").and_then(Value::as_array_mut) {
+            checks.retain(|c| c.get("key").and_then(Value::as_str) != Some("footprint"));
+        }
+        return;
+    }
+    let Some(fp_sq) = house
+        .get("areaSqft")
+        .and_then(Value::as_f64)
+        .filter(|&v| v > 0.0)
+    else {
+        return;
+    };
+    let lot_sq = fobj
+        .get("lotSqft")
+        .and_then(Value::as_f64)
+        .or_else(|| house.get("lotAreaSqft").and_then(Value::as_f64))
+        .or_else(|| fobj.get("lotGisSqft").and_then(Value::as_f64));
+    let lot_cov = lot_sq
+        .filter(|&ls| ls > 0.0)
+        .map(|ls| round_n((fp_sq / ls) * 100.0, 1));
+    if let Some(br) = fobj.get_mut("buildingRegister").and_then(Value::as_object_mut) {
+        br.insert("footprintSqft".into(), json!(fp_sq.round() as i64));
+        br.insert("lotCoveragePct".into(), json!(lot_cov));
+    }
+    if let Some(sq) = fobj.get("sqft").and_then(Value::as_f64).filter(|&s| s > 0.0) {
+        let ratio = fp_sq / sq;
+        let check = json!({
+            "key": "footprint",
+            "text": format!(
+                "Mapped building footprint ≈ {} sq ft vs {} sq ft living area{}.",
+                fp_sq.round() as i64,
+                sq.round() as i64,
+                if ratio < 0.75 { " — suggests a multi-story layout" } else { "" }
+            ),
+            "ok": ratio > 0.45 && ratio < 1.85,
+        });
+        if let Some(checks) = fobj.get_mut("checks").and_then(Value::as_array_mut) {
+            if let Some(existing) = checks
+                .iter_mut()
+                .find(|c| c.get("key").and_then(Value::as_str) == Some("footprint"))
+            {
+                *existing = check;
+            } else {
+                checks.push(check);
+            }
+        }
+    }
+}
+
 /// Recomputes the property geometry of a stored report — lot outline, main footprint, on-lot structures and
 /// their areas — with the same selection a freshly generated report uses, leaving the rest of the analysis
 /// untouched. The building the report was analysed for stays the main building.
@@ -3710,7 +4095,7 @@ pub async fn refresh_property_geometry(
         parcel_match.as_deref(),
         Some(keep_id),
     );
-    let Some(subject) = selection.subject else {
+    let Some(subject) = selection.subject.as_deref() else {
         return true;
     };
 
@@ -3736,15 +4121,21 @@ pub async fn refresh_property_geometry(
         .iter()
         .map(|b| to_local(&b.coords))
         .collect();
-    let diag_buildings: Vec<Vec<[f64; 2]>> = selection
-        .buildings
+    let mut diag_buildings: Vec<Vec<[f64; 2]>> = selection
+        .shared_remainders
         .iter()
-        .filter(|b| b.id != subject.id && !additional_ids.contains(&b.id))
-        .filter_map(|b| {
-            let (_, clat, clon) = ring_area_centroid(&b.coords);
-            (haversine_m(house_lat, house_lon, clat, clon) < 110.0).then(|| to_local(&b.coords))
-        })
+        .map(|r| to_local(r))
         .collect();
+    diag_buildings.extend(
+        selection
+            .buildings
+            .iter()
+            .filter(|b| b.id != subject.id && !additional_ids.contains(&b.id))
+            .filter_map(|b| {
+                let (_, clat, clon) = ring_area_centroid(&b.coords);
+                (haversine_m(house_lat, house_lon, clat, clon) < 110.0).then(|| to_local(&b.coords))
+            }),
+    );
     let uses_fallback = selection.uses_fallback_footprints();
 
     let Some(fs_data) = report
@@ -3753,6 +4144,7 @@ pub async fn refresh_property_geometry(
     else {
         return true;
     };
+    let mut updated_house_snapshot: Option<Value> = None;
     if let Some(h) = fs_data.get_mut("house").and_then(Value::as_object_mut) {
         h.insert("footprint".into(), ring_json(&subject.coords));
         h.insert("areaM2".into(), json!(round_n(area_m2, 1)));
@@ -3767,6 +4159,7 @@ pub async fn refresh_property_geometry(
         h.insert("additionalStructures".into(), json!(additional_json));
         insert_lot_fields(h, &selection);
         h.insert("geometryVersion".into(), json!(GEOMETRY_VERSION));
+        updated_house_snapshot = Some(Value::Object(h.clone()));
     }
     if let Some(d) = fs_data.get_mut("diagram").and_then(Value::as_object_mut) {
         d.insert("subject".into(), json!(to_local(&subject.coords)));
@@ -3776,6 +4169,13 @@ pub async fn refresh_property_geometry(
             "lot".into(),
             json!(selection.lot.as_deref().map(|r| to_local(r))),
         );
+    }
+    if let Some(ref h_snap) = updated_house_snapshot {
+        for target in ["/facts", "/modules/facts/data"] {
+            if let Some(fval) = report.pointer_mut(target) {
+                sync_house_footprint_into_facts(fval, h_snap);
+            }
+        }
     }
     if uses_fallback {
         if let Some(srcs) = report.get_mut("sources").and_then(Value::as_array_mut) {
@@ -3894,7 +4294,7 @@ mod property_selection_tests {
         let geo = synth_subject_geo();
         let (la, lo) = pt_at(BASE_LAT, BASE_LON, 0.0, 18.5);
         let sel = select_property(&ways, la, lo, &geo, Some(&lot), Some("contains"), None);
-        assert_eq!(sel.subject.map(|s| s.id), Some(910001));
+        assert_eq!(sel.subject.as_deref().map(|s| s.id), Some(910001));
         assert_eq!(
             ids(&sel.additional),
             vec![910002],
@@ -4009,7 +4409,7 @@ mod property_selection_tests {
         let lot = synth_parcel_north();
         let (la, lo) = pt_at(BASE_LAT, BASE_LON, 5.0, 6.5);
         let sel = select_property(&ways, la, lo, &geo, Some(&lot), Some("contains"), None);
-        assert_eq!(sel.subject.map(|s| s.id), Some(910001));
+        assert_eq!(sel.subject.as_deref().map(|s| s.id), Some(910001));
         assert_eq!(
             sel.method.as_deref(),
             Some("largest building on the parcel")
@@ -4081,10 +4481,10 @@ mod property_selection_tests {
         fallback_subj.id = -1;
         ways.push(fallback_subj);
         let sel = select_property(&ways, la, lo, &geo, Some(&lot), Some("address"), None);
-        assert_eq!(sel.subject.map(|s| s.id), Some(-1));
+        assert_eq!(sel.subject.as_deref().map(|s| s.id), Some(-1));
         assert!(sel.uses_fallback_footprints() && !sel.needs_more_buildings());
         assert_eq!(
-            footprint_source(sel.subject.unwrap()),
+            footprint_source(sel.subject.as_deref().unwrap()),
             "FEMA USA Structures"
         );
     }
@@ -4190,5 +4590,165 @@ mod property_selection_tests {
         assert_eq!(sel_203.subject.map(|s| s.id), Some(920002));
         assert!(sel_203.lot.is_some());
         assert_eq!(sel_203.subject_on_lot, Some(true));
+    }
+
+    #[test]
+    fn attached_townhome_unit_parcel_carves_single_unit_from_shared_row_building_and_coregisters_datum() {
+        let (c_lat, c_lon) = (37.2846800, -121.9539500);
+        // North 3-unit shared row building (`401516224`, 21.0 m × 12.6 m = 264.6 m² ≈ 2,848 sq ft)
+        // and West 7-unit interior courtyard row building (`401516225`, 12.6 m × 49.0 m = 617.4 m² ≈ 6,646 sq ft).
+        let north_row = osm_way(
+            401516224,
+            &rect_coords(c_lat, c_lon, -10.5, 0.0, 10.5, 12.6),
+            &[("building", "terrace")],
+        );
+        let west_row = osm_way(
+            401516225,
+            &rect_coords(c_lat, c_lon, -22.0, -58.0, -9.4, -9.0),
+            &[("building", "terrace")],
+        );
+        let ways = vec![north_row, west_row];
+
+        // 1) Middle unit `B` on the North row (6.0 m × 12.1 m = 72.6 m² ≈ 781 sq ft), with a 2.0 m south-west
+        // cadastral datum offset (`y = -2.0..10.1`, sticking 2.0 m into the front driveway before co-registration).
+        let lot_unit_b = rect_coords(c_lat, c_lon, -3.5, -2.0, 2.5, 10.1);
+        let geo_bare = json!({ "matchedAddress": "236 SYNTHRINCON AVE, CAMPBELL, CA, 95008" });
+        let (la_front, lo_front) = pt_at(c_lat, c_lon, 0.0, 15.0);
+
+        let sel_b = select_property(
+            &ways,
+            la_front,
+            lo_front,
+            &geo_bare,
+            Some(&lot_unit_b),
+            Some("address"),
+            None,
+        );
+        assert_eq!(sel_b.subject_on_lot, Some(true), "unit parcel inside shared row must be onLot=true");
+        assert!(!sel_b.needs_more_buildings());
+        let subj_b = sel_b.subject.as_deref().expect("carved unit B");
+        assert_eq!(subj_b.id, 401516224);
+        let unit_b_sqft = (ring_area_centroid(&subj_b.coords).0 * SQM_TO_SQFT).round() as i64;
+        assert!(
+            (765..=825).contains(&unit_b_sqft),
+            "carved single-unit roof footprint (~814 sq ft incl. eaves), got {unit_b_sqft}"
+        );
+        assert_eq!(
+            sel_b.shared_remainders.len(),
+            2,
+            "west (Unit A) and east (Unit C) neighbour portions split cleanly"
+        );
+        // Refreshing a stored report (`keep_subject_id = Some(401516224)`) carves the same single unit.
+        let sel_b_refreshed = select_property(
+            &ways,
+            la_front,
+            lo_front,
+            &geo_bare,
+            Some(&lot_unit_b),
+            Some("address"),
+            Some(401516224),
+        );
+        assert_eq!(sel_b_refreshed.subject_on_lot, Some(true));
+        let ref_sqft = (ring_area_centroid(&sel_b_refreshed.subject.as_deref().unwrap().coords).0
+            * SQM_TO_SQFT)
+            .round() as i64;
+        assert!((765..=825).contains(&ref_sqft), "refreshed unit sqft {ref_sqft}");
+
+        // 2) Interior courtyard `Unit P` 45 m south in `west_row`, even when the street geocode landed in front of `north_row`.
+        let lot_unit_p = rect_coords(c_lat, c_lon, -23.5, -38.0, -11.2, -31.5);
+        let geo_p = json!({
+            "matchedAddress": "236 SYNTHRINCON AVE, CAMPBELL, CA, 95008",
+            "displayAddress": "236 Synthrincon Ave Unit P, Campbell, CA 95008"
+        });
+        let sel_p = select_property(
+            &ways,
+            la_front,
+            lo_front,
+            &geo_p,
+            Some(&lot_unit_p),
+            Some("address"),
+            None,
+        );
+        assert_eq!(sel_p.subject_on_lot, Some(true));
+        let subj_p = sel_p.subject.as_deref().expect("carved unit P");
+        assert_eq!(subj_p.id, 401516225, "re-anchors from street building onto courtyard West row");
+        let unit_p_sqft = (ring_area_centroid(&subj_p.coords).0 * SQM_TO_SQFT).round() as i64;
+        assert!(
+            (840..=900).contains(&unit_p_sqft),
+            "carved Unit P footprint (~882 sq ft incl. eaves), got {unit_p_sqft}"
+        );
+        assert_eq!(sel_p.shared_remainders.len(), 2);
+
+        // 3) `sync_house_footprint_into_facts` replaces the preliminary whole-row 2,973 sq ft check & 227.5% BCR.
+        let mut facts = json!({
+            "sqft": 1319,
+            "lotSqft": 1307,
+            "buildingRegister": { "footprintSqft": 2973, "lotCoveragePct": 227.5 },
+            "checks": [{
+                "key": "footprint",
+                "text": "Mapped building footprint ≈ 2973 sq ft vs 1319 sq ft living area.",
+                "ok": false
+            }]
+        });
+        sync_house_footprint_into_facts(
+            &mut facts,
+            &json!({ "areaSqft": unit_b_sqft, "lotAreaSqft": 781, "onLot": true }),
+        );
+        assert_eq!(facts["buildingRegister"]["footprintSqft"], json!(unit_b_sqft));
+        assert!(facts["buildingRegister"]["lotCoveragePct"].as_f64().unwrap() < 75.0);
+        assert_eq!(facts["checks"][0]["ok"], json!(true));
+
+        // 4) Interior L-shaped unit with BOTH lateral (`dx = -2.25 m` west) and longitudinal (`dy = -2.0 m` south)
+        // cadastral datum offset snaps both axes onto the shared building's recessed-porch step corner.
+        let frame_c = LocalTangentFrame::new(c_lat, c_lon);
+        let to_ll = |pts: &[(f64, f64)]| -> Vec<(f64, f64)> {
+            pts.iter()
+                .map(|&(x, y)| {
+                    let (la, lo) = frame_c.inv(x, y);
+                    (round7(la), round7(lo))
+                })
+                .collect()
+        };
+        let stepped_row = osm_way(
+            401516226,
+            &to_ll(&[
+                (-10.4, 6.5),
+                (10.9, 6.5),
+                (10.9, -6.75),
+                (6.06, -6.75),
+                (6.06, -3.24),
+                (2.71, -3.24),
+                (2.71, -7.15),
+                (-10.4, -7.15),
+                (-10.4, 6.5),
+            ]),
+            &[("building", "terrace")],
+        );
+        let shifted_l_lot = to_ll(&[
+            (0.49, -9.11),
+            (-2.86, -9.16),
+            (-3.06, 4.11),
+            (2.62, 4.20),
+            (2.61, 5.02),
+            (3.58, 5.03),
+            (3.72, -4.13),
+            (0.42, -4.17),
+            (0.49, -9.11),
+        ]);
+        let sel_stepped = select_property(
+            std::slice::from_ref(&stepped_row),
+            c_lat,
+            c_lon,
+            &geo_bare,
+            Some(&shifted_l_lot),
+            Some("address"),
+            None,
+        );
+        let aligned_lot_ll = sel_stepped.lot.expect("aligned L-shaped lot");
+        let (step_x, step_y) = frame_c.fwd(aligned_lot_ll[0].0, aligned_lot_ll[0].1);
+        assert!(
+            (step_x - 2.71).abs() < 0.35 && (step_y - (-7.15)).abs() < 0.45,
+            "co-registered lot step corner ({step_x:.2}, {step_y:.2}) must lock onto roof step (2.71, -7.15)"
+        );
     }
 }

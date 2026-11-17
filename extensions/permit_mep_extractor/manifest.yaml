@@ -27,8 +27,8 @@ depends_on:
 input_from_domains:
   - permits
 upstream_require_mode: any
-homepage_url: "https://gis.campbellca.gov/"
-documentation_url: "https://gis.campbellca.gov/arcgis/rest/services/MGO"
+homepage_url: "https://www.iccsafe.org/"
+documentation_url: "https://www.iccsafe.org/"
 codeowners:
   - "@openestate/permits"
 geo_scope:
@@ -45,5 +45,6 @@ rate_limit:
 cache_ttl_secs: 86400
 source_attribution:
   name: "Stage-2 MEP Permit Extractor"
-  url: "https://gis.campbellca.gov/"
+  url: "https://www.mgoconnect.org/cp?JID=187"
+  reference_url_template: "https://www.mgoconnect.org/cp?JID=187"
   notes: "Skipped cleanly if all Stage-1 permit fetchers fail or are disabled."

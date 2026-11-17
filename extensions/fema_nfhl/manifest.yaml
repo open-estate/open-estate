@@ -48,6 +48,7 @@ sharing:
 source_attribution:
   name: "FEMA National Flood Hazard Layer (NFHL) — Flood Hazard Zones"
   url: "https://hazards.fema.gov/arcgis/rest/services/public/NFHL/MapServer/28"
+  reference_url_template: "https://msc.fema.gov/portal/search?AddressQuery={{address_urlencoded}}"
 openapi:
   spec_file: "openapi.yaml"
   operation_id: "queryNfhlFloodZone"

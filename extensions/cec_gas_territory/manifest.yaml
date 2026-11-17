@@ -46,3 +46,4 @@ sharing:
 source_attribution:
   name: "CEC Natural Gas Service Areas / HIFLD Natural Gas Service Territories & US EIA"
   url: "https://services3.arcgis.com/bWPjFyq029ChCGur/arcgis/rest/services/Natural_Gas_Service_Area/FeatureServer/0"
+  reference_url_template: "https://cecgis-caenergy.opendata.arcgis.com/"

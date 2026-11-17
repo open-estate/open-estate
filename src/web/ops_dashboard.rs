@@ -703,14 +703,21 @@ async fn safe_table_count(db: &DbStore, table: &str) -> i64 {
     query_scalar_i64(db, &sql).await.unwrap_or(0)
 }
 
-async fn safe_status_breakdown(db: &DbStore, sql: &str) -> HashMap<String, i64> {
+async fn safe_int_status_breakdown<F>(db: &DbStore, sql: &str, decode_fn: F) -> HashMap<String, i64>
+where
+    F: Fn(i32) -> &'static str,
+{
     let mut map = HashMap::new();
     match &db.backend {
         DbBackend::Sqlite(pool) => {
             if let Ok(rows) = sqlx::query(sql).fetch_all(pool).await {
                 for r in rows {
-                    if let (Ok(st), Ok(cnt)) = (r.try_get::<String, _>(0), r.try_get::<i64, _>(1)) {
-                        map.insert(st.to_ascii_lowercase(), cnt);
+                    let cnt = crate::db::sqlite_opt_i64(&r, "cnt").unwrap_or(0);
+                    if let Some(code) = crate::db::sqlite_opt_i64(&r, "status") {
+                        let key = decode_fn(code as i32).to_ascii_lowercase();
+                        *map.entry(key).or_insert(0) += cnt;
+                    } else if let Some(st) = crate::db::sqlite_opt_str(&r, "status") {
+                        *map.entry(st.to_ascii_lowercase()).or_insert(0) += cnt;
                     }
                 }
             }
@@ -718,8 +725,12 @@ async fn safe_status_breakdown(db: &DbStore, sql: &str) -> HashMap<String, i64> 
         DbBackend::MySql { pool, .. } => {
             if let Ok(rows) = sqlx::query(sql).fetch_all(pool).await {
                 for r in rows {
-                    if let (Ok(st), Ok(cnt)) = (r.try_get::<String, _>(0), r.try_get::<i64, _>(1)) {
-                        map.insert(st.to_ascii_lowercase(), cnt);
+                    let cnt = crate::db::mysql_opt_i64(&r, "cnt").unwrap_or(0);
+                    if let Some(code) = crate::db::mysql_opt_i64(&r, "status") {
+                        let key = decode_fn(code as i32).to_ascii_lowercase();
+                        *map.entry(key).or_insert(0) += cnt;
+                    } else if let Some(st) = crate::db::mysql_opt_str(&r, "status") {
+                        *map.entry(st.to_ascii_lowercase()).or_insert(0) += cnt;
                     }
                 }
             }
@@ -739,90 +750,44 @@ struct RecentReportSummary {
     estimated_value: Option<i64>,
     property_type: Option<String>,
     ai_ready: bool,
+    runtime_ssr: bool,
+    compressed: bool,
     has_html: bool,
     report_url: String,
     command_center_url: String,
 }
 
 async fn fetch_recent_reports(db: &DbStore, limit: i64) -> Vec<RecentReportSummary> {
-    let sql = "SELECT slug, display_address, zip, updated_at, CASE WHEN rendered_html IS NOT NULL THEN 1 ELSE 0 END AS has_html, report_json FROM cached_reports ORDER BY updated_at DESC LIMIT ?";
-
-    let raw_rows: Vec<(String, String, Option<String>, String, i64, String)> = match &db.backend {
-        DbBackend::Sqlite(pool) => match sqlx::query(sql).bind(limit).fetch_all(pool).await {
-            Ok(rows) => rows
-                .into_iter()
-                .map(|r| {
-                    (
-                        r.try_get::<String, _>(0).unwrap_or_default(),
-                        r.try_get::<String, _>(1).unwrap_or_default(),
-                        r.try_get::<Option<String>, _>(2).ok().flatten(),
-                        r.try_get::<String, _>(3).unwrap_or_default(),
-                        r.try_get::<i64, _>(4).unwrap_or(0),
-                        r.try_get::<String, _>(5).unwrap_or_default(),
-                    )
-                })
-                .collect(),
-            Err(_) => Vec::new(),
-        },
-        DbBackend::MySql { pool, .. } => match sqlx::query(sql).bind(limit).fetch_all(pool).await {
-            Ok(rows) => rows
-                .into_iter()
-                .map(|r| {
-                    (
-                        r.try_get::<String, _>(0).unwrap_or_default(),
-                        r.try_get::<String, _>(1).unwrap_or_default(),
-                        r.try_get::<Option<String>, _>(2).ok().flatten(),
-                        r.try_get::<String, _>(3).unwrap_or_default(),
-                        r.try_get::<i64, _>(4).unwrap_or(0),
-                        r.try_get::<String, _>(5).unwrap_or_default(),
-                    )
-                })
-                .collect(),
-            Err(_) => Vec::new(),
-        },
+    let safe_limit = limit.clamp(1, 50) as usize;
+    let Ok((rows, _)) = db.list_admin_reports(None, safe_limit, 0).await else {
+        return Vec::new();
     };
-
-    raw_rows
-        .into_iter()
-        .filter(|(slug, _, _, _, _, _)| !slug.is_empty())
-        .map(|(slug, addr, zip, updated_at, has_html, report_json)| {
-            let parsed: Value = serde_json::from_str(&report_json).unwrap_or(Value::Null);
-            let overall_score = parsed
-                .pointer("/summary/scores/overall")
-                .or_else(|| parsed.pointer("/scorecard/overall"))
-                .and_then(|v| v.as_f64())
-                .filter(|x| x.is_finite())
-                .map(|x| round_n(x, 1));
-            let estimated_value = parsed
-                .pointer("/modules/valuation/data/estimate/value")
-                .or_else(|| parsed.pointer("/valuation/estimate/value"))
-                .and_then(|v| v.as_f64())
-                .filter(|x| x.is_finite() && *x > 0.0)
-                .map(|x| x.round() as i64);
-            let property_type = parsed
-                .pointer("/facts/propertyType")
-                .or_else(|| parsed.pointer("/modules/facts/data/propertyType"))
-                .and_then(|v| v.as_str())
-                .map(normalize_retired_brand)
-                .filter(|s| !s.trim().is_empty());
-            let ai_ready = parsed
-                .pointer("/ai/verdict")
-                .map(|v| !v.is_null())
-                .unwrap_or(false);
-            let clean_addr =
-                normalize_retired_brand(if addr.trim().is_empty() { &slug } else { &addr });
+    rows.into_iter()
+        .filter(|r| !r.slug.is_empty())
+        .map(|r| {
+            let slug = r.slug;
+            let clean_addr = normalize_retired_brand(if r.display_address.trim().is_empty() {
+                &slug
+            } else {
+                &r.display_address
+            });
             RecentReportSummary {
                 report_url: format!("/r/{slug}"),
                 command_center_url: format!("/r/{slug}?view=dashboard"),
                 slug,
                 display_address: clean_addr,
-                zip,
-                updated_at,
-                overall_score,
-                estimated_value,
-                property_type,
-                ai_ready,
-                has_html: has_html != 0,
+                zip: r.zip,
+                updated_at: r.updated_at,
+                overall_score: r.overall_score.map(|x| round_n(x, 1)),
+                estimated_value: r.estimated_value,
+                property_type: r
+                    .property_type
+                    .map(|s| normalize_retired_brand(&s))
+                    .filter(|s| !s.trim().is_empty()),
+                ai_ready: r.ai_ready,
+                runtime_ssr: true,
+                compressed: r.compressed,
+                has_html: r.has_rendered_html,
             }
         })
         .collect()
@@ -1252,6 +1217,10 @@ pub async fn build_ops_telemetry_snapshot(state: &AppState) -> Value {
     let now_unix = now_unix_secs();
 
     // Run independent DB & filesystem probes concurrently.
+    let listings_status_sql = format!(
+        "SELECT {} status, COUNT(*) AS cnt FROM listings GROUP BY status",
+        state.db.rapid_query_hint_for_scan(0, false)
+    );
     let (
         db_info,
         reports_total,
@@ -1277,20 +1246,22 @@ pub async fn build_ops_telemetry_snapshot(state: &AppState) -> Value {
         collect_database_storage_info(&state.db),
         safe_table_count(&state.db, "cached_reports"),
         fetch_recent_reports(&state.db, 10),
-        safe_status_breakdown(
+        safe_int_status_breakdown(
             &state.db,
-            "SELECT status, COUNT(*) AS cnt FROM report_build_queue GROUP BY status"
+            "SELECT status, COUNT(*) AS cnt FROM report_build_queue GROUP BY status",
+            crate::db::proto::build_job_status_from_code,
         ),
         safe_table_count(&state.db, "llm_cache"),
         async {
-            let sql = format!("SELECT COUNT(*) FROM llm_cache WHERE expires_at > {now_unix}");
+            let sql = format!("SELECT COUNT(*) FROM llm_cache WHERE expires_ts > {now_unix}");
             query_scalar_i64(&state.db, &sql).await.unwrap_or(0)
         },
         safe_table_count(&state.db, "client_doc_reviews"),
         safe_table_count(&state.db, "listings"),
-        safe_status_breakdown(
+        safe_int_status_breakdown(
             &state.db,
-            "SELECT status, COUNT(*) AS cnt FROM listings GROUP BY status"
+            &listings_status_sql,
+            crate::db::proto::listing_status_from_code,
         ),
         async {
             query_scalar_i64(

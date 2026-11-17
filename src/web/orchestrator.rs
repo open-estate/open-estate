@@ -4,7 +4,10 @@
 
 use crate::ai::run_ai_analyst_with_prompt;
 use crate::cre::attach_cre_section_with_live_hydration; // [feat/cre-mode]
-use crate::db::{report_has_osrm_router_down, BuildQueueJobInput, CachedReportRecord, DbStore};
+use crate::db::{
+    extract_section_json, report_has_osrm_router_down, BuildQueueJobInput, DbStore,
+    ReportHeaderProto, ReportSectionEnvelopeProto, ReportSectionKind,
+};
 use crate::modules::{
     access::{find_city_hall, run_access_with_env, run_access_with_env_and_hub},
     amenities::run_amenities,
@@ -29,11 +32,12 @@ use crate::property::{
 use crate::scanner::engine::{HomeScanRunner, ScanItemOutcome, ScanTask};
 use crate::search::ingest_report_into_db;
 use crate::shared::{
-    bbox_around, haversine_mi, humanize_progress_step, now_iso, round_n, sanitize_user_warning,
-    sanitize_user_warnings, slugify, EnvConfig, HttpClient, ModuleOutput, SourceItem,
+    bbox_around, haversine_mi, humanize_progress_step, now_iso, now_unix_secs, round_n,
+    sanitize_user_warning, sanitize_user_warnings, slugify, EnvConfig, HttpClient, ModuleOutput,
+    SourceItem,
 };
 use crate::web::{
-    cdn_cache::spawn_static_export_if_configured,
+    cdn_cache::{spawn_static_export_if_configured, static_mirror_config_from_env},
     hooks::RentalResearchData,
     house3d_api::{spawn_scene_warmup, SceneDeps},
     render::render_report_html_with_brand,
@@ -1046,6 +1050,12 @@ where
     timings.insert("rentalResearch".into(), json!(rental_res.0));
     let rental_research = rental_res.1;
 
+    if let Ok(ref fs_out) = fs_res.1 {
+        if let Some(h) = fs_out.data.get("house") {
+            crate::modules::fengshui::sync_house_footprint_into_facts(&mut facts, h);
+        }
+    }
+
     if let Ok(ref cond_mod) = cond_res.1 {
         if let Some(fobj) = facts.as_object_mut() {
             if let Some(perms) = cond_mod.data.get("permits").and_then(Value::as_array) {
@@ -1143,8 +1153,15 @@ where
     // Module warnings are shown to the reader and briefed to the AI analyst, so they are
     // normalised here: no request URLs (coordinates, API keys) and no transport boilerplate.
     let mut collect_mod = |key: &str, res: Result<ModuleOutput>| match res {
-        Ok(m) => {
+        Ok(mut m) => {
             sources.extend(m.sources);
+            if matches!(key, "amenities" | "civic" | "access") {
+                if let Some(dobj) = m.data.as_object_mut() {
+                    if dobj.get("layers").is_some() && dobj.get("layers") == dobj.get("mapLayers") {
+                        dobj.remove("layers");
+                    }
+                }
+            }
             modules.insert(
                 key.to_string(),
                 json!({ "data": m.data, "warnings": sanitize_user_warnings(&m.warnings) }),
@@ -1318,15 +1335,11 @@ where
     }
 
     let rem_out = crate::modules::remodel_rebuild::build_remodel_and_rebuild(&report);
-    report["remodelAndRebuild"] = rem_out.data.clone();
-    if let Some(mobj) = report.get_mut("modules").and_then(|v| v.as_object_mut()) {
-        mobj.insert(
-            "remodel".into(),
-            json!({
-                "data": rem_out.data,
-                "warnings": rem_out.warnings,
-            }),
-        );
+    report["remodelAndRebuild"] = rem_out.data;
+    if !rem_out.warnings.is_empty() {
+        if let Some(mobj) = report.get_mut("modules").and_then(|v| v.as_object_mut()) {
+            mobj.insert("remodel".into(), json!({ "warnings": rem_out.warnings }));
+        }
     }
     if !rem_out.sources.is_empty() {
         if let Some(sarr) = report.get_mut("sources").and_then(|v| v.as_array_mut()) {
@@ -1425,6 +1438,7 @@ where
         crate::property::media::enrich_property_media(&media_client, &mut report).await;
     }
     crate::ai::slides::ensure_walkthrough_slides_on_report(&mut report);
+    crate::shared::round_geojson_coordinates_6dec(&mut report);
 
     // Emit deterministic snapshot immediately so web users view the full interactive report right away!
     on_deterministic_ready(report.clone()).await;
@@ -1524,8 +1538,7 @@ pub async fn complete_report_ai_only(
         merge_ai_into_report(&mut report, ai_out.data);
     }
     report["meta"]["aiPending"] = json!(false);
-    let html = render_report_html_with_brand(&report, &env.brand_name(), &env.brand_domain());
-    db.put_cached_report(slug, &report, Some(&html)).await?;
+    db.put_cached_report(slug, &report, None).await?;
     let _ = ingest_report_into_db(db, Some(http), env, &report, false).await;
     Ok(report)
 }
@@ -1715,12 +1728,117 @@ fn merge_osrm_sources_on_report(
     }
 }
 
+fn unpack_section_envelope_maps(
+    kind: ReportSectionKind,
+    env_opt: Option<&ReportSectionEnvelopeProto>,
+) -> (
+    serde_json::Map<String, Value>,
+    serde_json::Map<String, Value>,
+    bool,
+) {
+    let mut root_map = serde_json::Map::new();
+    let mut mod_map = serde_json::Map::new();
+    let mut has_modules_obj = false;
+    let Some(env) = env_opt else {
+        return (root_map, mod_map, has_modules_obj);
+    };
+    let Ok(val) = extract_section_json(env) else {
+        return (root_map, mod_map, has_modules_obj);
+    };
+    if let Some(obj) = val.as_object() {
+        let is_wrapped = obj.contains_key("root")
+            || obj.contains_key("modules")
+            || obj.contains_key("hasModulesObj");
+        if is_wrapped {
+            has_modules_obj = obj
+                .get("hasModulesObj")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            if let Some(rm) = obj.get("root").and_then(Value::as_object) {
+                for (k, v) in rm {
+                    root_map.insert(k.clone(), v.clone());
+                }
+            }
+            if let Some(mm) = obj.get("modules").and_then(Value::as_object) {
+                for (k, v) in mm {
+                    mod_map.insert(k.clone(), v.clone());
+                }
+            }
+            return (root_map, mod_map, has_modules_obj);
+        }
+    }
+    match kind {
+        ReportSectionKind::ReportSectionAccess => {
+            mod_map.insert("access".to_string(), val);
+        }
+        ReportSectionKind::ReportSectionSources => {
+            root_map.insert("sources".to_string(), val);
+        }
+        _ => {
+            if let Some(obj) = val.as_object() {
+                for (k, v) in obj {
+                    root_map.insert(k.clone(), v.clone());
+                }
+            }
+        }
+    }
+    (root_map, mod_map, has_modules_obj)
+}
+
+fn pack_section_envelope_maps(
+    kind: ReportSectionKind,
+    root_map: serde_json::Map<String, Value>,
+    mod_map: serde_json::Map<String, Value>,
+    has_modules_obj: bool,
+    updated_ts: i64,
+) -> Result<ReportSectionEnvelopeProto> {
+    let mut wrapper = serde_json::Map::with_capacity(3);
+    if !root_map.is_empty() {
+        wrapper.insert("root".to_string(), Value::Object(root_map));
+    }
+    if !mod_map.is_empty() {
+        wrapper.insert("modules".to_string(), Value::Object(mod_map));
+    }
+    if kind == ReportSectionKind::ReportSectionMeta && has_modules_obj {
+        wrapper.insert("hasModulesObj".to_string(), Value::Bool(true));
+    }
+    let section_bytes = serde_json::to_vec(&Value::Object(wrapper))?;
+    Ok(ReportSectionEnvelopeProto {
+        kind: kind as i32,
+        schema_version: 3,
+        updated_ts,
+        typed_summary: None,
+        section_msgpack_or_utf8: section_bytes,
+    })
+}
+
+fn assemble_partial_sections(
+    sections: &std::collections::BTreeMap<ReportSectionKind, ReportSectionEnvelopeProto>,
+) -> Value {
+    let mut root_map = serde_json::Map::new();
+    let mut mod_map = serde_json::Map::new();
+    for (&kind, env) in sections {
+        let (rm, mm, _) = unpack_section_envelope_maps(kind, Some(env));
+        for (k, v) in rm {
+            root_map.insert(k, v);
+        }
+        for (mk, mv) in mm {
+            mod_map.insert(mk, mv);
+        }
+    }
+    if !mod_map.is_empty() {
+        root_map.insert("modules".to_string(), Value::Object(mod_map));
+    }
+    Value::Object(root_map)
+}
+
 /// Targeted in-place OSRM drive-time recomputation for a cached report.
 ///
-/// Reuses the cached `geo`, `modules.amenities.data`, `modules.civic.data`, and synthesized
-/// `downtown` city-hall destination without calling Overpass, Nominatim, or any LLM, and without
-/// touching `report_refresh_log` 24h cooldown state. Only clears `osrm_degraded` when
-/// `router_down` is actually gone.
+/// Reads ONLY the ~240 B `cached_reports` header + narrow `Geo`, `Amenities`, `Civic`, `Access`,
+/// `Meta`, and `Sources` sections (~4–8 KB instead of 409 KB across 27 sections), recomputes live
+/// OSRM routes without calling Overpass, Nominatim, or any LLM, and persists ONLY the updated
+/// `Sources` + `Access` (and `Meta` if top-level warnings changed) sections via `put_report_section`
+/// without touching `report_refresh_log` 24h cooldown state.
 pub async fn recompute_report_access(
     http: &HttpClient,
     env: &EnvConfig,
@@ -1736,7 +1854,7 @@ pub async fn recompute_report_access(
             osrm_degraded_after: false,
         });
     }
-    let Some(rec) = db.get_cached_report(clean_slug).await? else {
+    let Some(hdr) = db.get_report_header(clean_slug).await? else {
         return Ok(RecomputeAccessOutcome {
             slug: clean_slug.to_string(),
             status: RecomputeAccessStatus::NotFound,
@@ -1744,30 +1862,51 @@ pub async fn recompute_report_access(
             osrm_degraded_after: false,
         });
     };
-    let degraded_before = rec.osrm_degraded || report_has_osrm_router_down(&rec.report);
-    let Some((lat, lon)) = report_home_coords(&rec.report) else {
+
+    let read_kinds = [
+        ReportSectionKind::ReportSectionMeta,
+        ReportSectionKind::ReportSectionGeo,
+        ReportSectionKind::ReportSectionAmenities,
+        ReportSectionKind::ReportSectionCivic,
+        ReportSectionKind::ReportSectionAccess,
+    ];
+    let init_sections = db.get_report_sections(&hdr.slug, &read_kinds).await?;
+    let partial = assemble_partial_sections(&init_sections);
+
+    let degraded_before = hdr.osrm_degraded || report_has_osrm_router_down(&partial);
+    let coords = report_home_coords(&partial).or_else(|| {
+        let (la, lo) = hdr.lat.zip(hdr.lon)?;
+        LatLon::new(la, lo).is_valid().then_some((la, lo))
+    });
+    let Some((lat, lon)) = coords else {
         return Ok(RecomputeAccessOutcome {
-            slug: rec.slug,
+            slug: hdr.slug,
             status: RecomputeAccessStatus::SkippedInvalidGeo,
             osrm_degraded_before: degraded_before,
             osrm_degraded_after: degraded_before,
         });
     };
 
-    let orig_generated_at = rec.report.pointer("/meta/generatedAt").cloned();
-    let routed_before = count_routed_access_destinations(&rec.report);
-    let geo = rec.report.get("geo").cloned().unwrap_or_else(|| json!({}));
-    let amenities = rec
-        .report
+    let orig_generated_at = partial.pointer("/meta/generatedAt").cloned();
+    let routed_before = count_routed_access_destinations(&partial);
+    let geo = partial.get("geo").cloned().unwrap_or_else(|| {
+        json!({
+            "lat": lat,
+            "lon": lon,
+            "zip": hdr.zip,
+            "city": hdr.city,
+            "state": hdr.state_code,
+        })
+    });
+    let amenities = partial
         .pointer("/modules/amenities/data")
-        .or_else(|| rec.report.pointer("/modules/amenities"))
+        .or_else(|| partial.pointer("/modules/amenities"))
         .filter(|v| !v.is_null());
-    let civic = rec
-        .report
+    let civic = partial
         .pointer("/modules/civic/data")
-        .or_else(|| rec.report.pointer("/modules/civic"))
+        .or_else(|| partial.pointer("/modules/civic"))
         .filter(|v| !v.is_null());
-    let city_hall = synthesize_city_hall_from_access(&rec.report);
+    let city_hall = synthesize_city_hall_from_access(&partial);
 
     let acc_out = run_access_with_env(
         http,
@@ -1792,68 +1931,155 @@ pub async fn recompute_report_access(
     // If OSRM is still down and made no routing progress, keep the existing cached report intact.
     if degraded_after && (!degraded_before || routed_after <= routed_before) {
         return Ok(RecomputeAccessOutcome {
-            slug: rec.slug,
+            slug: hdr.slug,
             status: RecomputeAccessStatus::StillDegraded,
             osrm_degraded_before: degraded_before,
             osrm_degraded_after: true,
         });
     }
 
-    // Re-read before saving so concurrent AI completion (`complete_report_ai_only`) or report
-    // regeneration is never clobbered.
-    let Some(latest) = db.get_cached_report(&rec.slug).await? else {
+    // Re-read narrow header + target write sections so concurrent report regeneration is never
+    // clobbered, and concurrent AI completion (`ReportSectionAiAnalyst`) stays 100% untouched.
+    let Some(latest_hdr) = db.get_report_header(&hdr.slug).await? else {
         return Ok(RecomputeAccessOutcome {
-            slug: rec.slug,
+            slug: hdr.slug,
             status: RecomputeAccessStatus::NotFound,
             osrm_degraded_before: degraded_before,
             osrm_degraded_after: degraded_after,
         });
     };
-    if latest.report.pointer("/meta/generatedAt").cloned() != orig_generated_at {
+    let write_kinds = [
+        ReportSectionKind::ReportSectionMeta,
+        ReportSectionKind::ReportSectionSources,
+        ReportSectionKind::ReportSectionAccess,
+    ];
+    let latest_sections = db.get_report_sections(&hdr.slug, &write_kinds).await?;
+    let (mut meta_root, meta_mods, meta_has_mods) = unpack_section_envelope_maps(
+        ReportSectionKind::ReportSectionMeta,
+        latest_sections.get(&ReportSectionKind::ReportSectionMeta),
+    );
+    let latest_gen_at = meta_root
+        .get("meta")
+        .and_then(|m| m.get("generatedAt"))
+        .cloned();
+    if latest_hdr.report_id != hdr.report_id || latest_gen_at != orig_generated_at {
         return Ok(RecomputeAccessOutcome {
-            slug: rec.slug,
+            slug: hdr.slug,
             status: RecomputeAccessStatus::SkippedRaceChanged,
             osrm_degraded_before: degraded_before,
             osrm_degraded_after: degraded_after,
         });
     }
 
-    let mut work = latest.report;
-    if !work.get("modules").map(Value::is_object).unwrap_or(false) {
-        if let Some(obj) = work.as_object_mut() {
-            obj.insert("modules".into(), json!({}));
-        }
-    }
-    if let Some(mods) = work.get_mut("modules").and_then(Value::as_object_mut) {
-        mods.insert("access".into(), probe_report["modules"]["access"].take());
-    }
-
-    let has_routed_sm = work
-        .pointer("/modules/access/data/supermarketDriveTimes")
+    let now_ts = now_unix_secs();
+    let new_access_val = probe_report["modules"]["access"].take();
+    let has_routed_sm = new_access_val
+        .pointer("/data/supermarketDriveTimes")
         .and_then(Value::as_array)
         .map(|a| !a.is_empty())
         .unwrap_or(false);
     let ensure_osrm_attr = (routed_after > 0 || has_routed_sm)
         && (acc_out.sources.is_empty()
             || acc_out.sources.iter().any(|s| s.name == OSRM_ATTRIBUTION));
-    merge_osrm_sources_on_report(&mut work, &acc_out.sources, ensure_osrm_attr);
 
+    // 1. Update `ReportSectionSources` (~1 KB)
+    let (mut src_root, src_mods, _) = unpack_section_envelope_maps(
+        ReportSectionKind::ReportSectionSources,
+        latest_sections.get(&ReportSectionKind::ReportSectionSources),
+    );
+    let mut src_holder = json!({
+        "sources": src_root.remove("sources").unwrap_or_else(|| json!([])),
+    });
+    merge_osrm_sources_on_report(&mut src_holder, &acc_out.sources, ensure_osrm_attr);
+    if let Some(updated_sources) = src_holder.get_mut("sources").map(Value::take) {
+        src_root.insert("sources".to_string(), updated_sources);
+    }
+    let src_env = pack_section_envelope_maps(
+        ReportSectionKind::ReportSectionSources,
+        src_root,
+        src_mods,
+        false,
+        now_ts,
+    )?;
+    db.put_report_section(
+        latest_hdr.report_id,
+        ReportSectionKind::ReportSectionSources,
+        &src_env,
+    )
+    .await?;
+
+    // 2. Strip top-level OSRM outage warnings / `router_down` flag on `ReportSectionMeta` if present
     if !degraded_after {
-        if let Some(warr) = work.get_mut("warnings").and_then(Value::as_array_mut) {
+        let mut meta_changed = false;
+        if meta_root.get("router_down").and_then(Value::as_bool) == Some(true) {
+            meta_root.remove("router_down");
+            meta_changed = true;
+        }
+        if let Some(warr) = meta_root.get_mut("warnings").and_then(Value::as_array_mut) {
+            let before_len = warr.len();
             warr.retain(|w| {
                 !w.as_str()
                     .map(|s| s.contains("OSRM router unavailable"))
                     .unwrap_or(false)
             });
+            if warr.len() != before_len {
+                meta_changed = true;
+            }
+        }
+        if meta_changed {
+            let meta_env = pack_section_envelope_maps(
+                ReportSectionKind::ReportSectionMeta,
+                meta_root,
+                meta_mods,
+                meta_has_mods,
+                now_ts,
+            )?;
+            db.put_report_section(
+                latest_hdr.report_id,
+                ReportSectionKind::ReportSectionMeta,
+                &meta_env,
+            )
+            .await?;
         }
     }
 
-    let html = render_report_html_with_brand(&work, &env.brand_name(), &env.brand_domain());
-    db.put_cached_report(&rec.slug, &work, Some(&html)).await?;
-    spawn_static_export_if_configured(env, &rec.slug, &work, html);
+    // 3. Update `ReportSectionAccess` (~1.5 KB) last — `put_report_section` automatically updates
+    //    `cached_reports.osrm_degraded` (`0` when recovered) and invalidates `l1_reports`.
+    let (mut acc_root, mut acc_mods, _) = unpack_section_envelope_maps(
+        ReportSectionKind::ReportSectionAccess,
+        latest_sections.get(&ReportSectionKind::ReportSectionAccess),
+    );
+    if acc_root.contains_key("access") {
+        acc_root.insert("access".to_string(), new_access_val.clone());
+    }
+    acc_mods.insert("access".to_string(), new_access_val);
+    let acc_env = pack_section_envelope_maps(
+        ReportSectionKind::ReportSectionAccess,
+        acc_root,
+        acc_mods,
+        false,
+        now_ts,
+    )?;
+    db.put_report_section(
+        latest_hdr.report_id,
+        ReportSectionKind::ReportSectionAccess,
+        &acc_env,
+    )
+    .await?;
+
+    if static_mirror_config_from_env(env).is_some() {
+        if let Ok(Some(full_rec)) = db.get_cached_report(&hdr.slug).await {
+            let html = render_report_html_with_brand(
+                &full_rec.report,
+                &env.brand_name(),
+                &env.brand_domain(),
+            );
+            spawn_static_export_if_configured(env, &hdr.slug, &full_rec.report, html);
+        }
+    }
 
     Ok(RecomputeAccessOutcome {
-        slug: rec.slug,
+        slug: hdr.slug,
         status: if degraded_after {
             RecomputeAccessStatus::StillDegraded
         } else {
@@ -1978,13 +2204,13 @@ impl OsrmRecoveryCoordinator {
             .map(|p| p.base_url.clone())
             .collect();
 
-        let candidates: Vec<CachedReportRecord> = if let Some(slug) = target_slug {
-            match db.get_cached_report(slug).await? {
-                Some(rec) => vec![rec],
+        let candidates: Vec<ReportHeaderProto> = if let Some(slug) = target_slug {
+            match db.get_report_header(slug).await? {
+                Some(hdr) => vec![hdr],
                 None => Vec::new(),
             }
         } else {
-            db.list_osrm_degraded_reports(limit.clamp(1, 500) as i64)
+            db.list_osrm_degraded_report_headers(limit.clamp(1, 500) as i64)
                 .await?
         };
         let degraded_found = candidates.len();
@@ -1993,18 +2219,33 @@ impl OsrmRecoveryCoordinator {
         let mut skipped_unhealthy_region = 0usize;
         let mut skipped_other = 0usize;
 
-        for rec in candidates {
+        for hdr in candidates {
             if !enabled || healthy_bases.is_empty() {
                 skipped_unhealthy_region += 1;
                 continue;
             }
-            let Some((lat, lon)) = report_home_coords(&rec.report) else {
+            let mut coords = hdr
+                .lat
+                .zip(hdr.lon)
+                .filter(|&(la, lo)| LatLon::new(la, lo).is_valid());
+            if coords.is_none() {
+                if let Ok(Some(geo_env)) = db
+                    .get_report_section(&hdr.slug, ReportSectionKind::ReportSectionGeo)
+                    .await
+                {
+                    let mut gm = std::collections::BTreeMap::new();
+                    gm.insert(ReportSectionKind::ReportSectionGeo, geo_env);
+                    let partial_geo = assemble_partial_sections(&gm);
+                    coords = report_home_coords(&partial_geo);
+                }
+            }
+            let Some((lat, lon)) = coords else {
                 skipped_other += 1;
                 continue;
             };
             let pt = LatLon::new(lat, lon);
             match cfg.resolve_endpoint(pt, pt) {
-                Some(ep) if healthy_bases.contains(ep) => eligible_slugs.push(rec.slug),
+                Some(ep) if healthy_bases.contains(ep) => eligible_slugs.push(hdr.slug),
                 Some(_) => skipped_unhealthy_region += 1,
                 None => skipped_other += 1,
             }
@@ -2578,13 +2819,8 @@ impl ReportJobManager {
                             .pointer("/meta/aiPending")
                             .and_then(|v| v.as_bool())
                             .unwrap_or(false);
-                        let html = render_report_html_with_brand(
-                            &det_rep,
-                            &env_inner.brand_name(),
-                            &env_inner.brand_domain(),
-                        );
                         let _ = db_inner
-                            .put_cached_report(&c_slug, &det_rep, Some(&html))
+                            .put_cached_report(&c_slug, &det_rep, None)
                             .await;
                         if !c_slug.is_empty() {
                             spawn_scene_warmup(
@@ -2729,13 +2965,8 @@ impl ReportJobManager {
                         .and_then(|v| v.as_str())
                         .unwrap_or(&address)
                         .to_string();
-                    let html = render_report_html_with_brand(
-                        &rep,
-                        &env.brand_name(),
-                        &env.brand_domain(),
-                    );
                     let cached_ok = db
-                        .put_cached_report(&final_slug, &rep, Some(&html))
+                        .put_cached_report(&final_slug, &rep, None)
                         .await
                         .is_ok();
                     if cached_ok {
@@ -2920,12 +3151,7 @@ impl ReportJobManager {
                             "ai-analyst failed: {e}"
                         ))));
                     }
-                    let html = render_report_html_with_brand(
-                        &fallback,
-                        &env.brand_name(),
-                        &env.brand_domain(),
-                    );
-                    let _ = db.put_cached_report(&slug, &fallback, Some(&html)).await;
+                    let _ = db.put_cached_report(&slug, &fallback, None).await;
                     if let Ok(mut lr) = h_task.latest_report.write() {
                         *lr = None;
                     }
@@ -3234,27 +3460,27 @@ impl HomeScanRunner for OpenEstateScanRunner {
         async move {
             let t0 = Instant::now();
             if !item.force_refresh {
-                if let Ok(Some(CachedReportRecord { report, .. })) =
-                    db.get_cached_report(&item.slug).await
-                {
+                if let Ok(Some(hdr)) = db.get_report_header(&item.slug).await {
+                    let summary_val = db
+                        .get_report_section(&hdr.slug, ReportSectionKind::ReportSectionSummary)
+                        .await
+                        .ok()
+                        .flatten()
+                        .and_then(|env| extract_section_json(&env).ok())
+                        .and_then(|v| v.pointer("/root/summary").cloned())
+                        .unwrap_or(Value::Null);
                     return Ok(ScanItemOutcome {
                         slug: item.slug,
                         address: item.address,
-                        matched_address: report
-                            .pointer("/meta/displayAddress")
-                            .and_then(|v| v.as_str())
-                            .map(String::from),
-                        lat: report.pointer("/geo/lat").and_then(|v| v.as_f64()),
-                        lon: report.pointer("/geo/lon").and_then(|v| v.as_f64()),
-                        overall_score: report
-                            .pointer("/summary/scores/overall")
-                            .and_then(|v| v.as_f64()),
-                        estimated_value: report
-                            .pointer("/modules/valuation/data/estimate/value")
-                            .and_then(|v| v.as_f64()),
+                        matched_address: (!hdr.display_address.trim().is_empty())
+                            .then_some(hdr.display_address),
+                        lat: hdr.lat,
+                        lon: hdr.lon,
+                        overall_score: hdr.overall_score,
+                        estimated_value: hdr.estimated_value.map(|v| v as f64),
                         cached: true,
                         duration_ms: t0.elapsed().as_millis() as u64,
-                        report_summary: report.get("summary").cloned().unwrap_or(Value::Null),
+                        report_summary: summary_val,
                     });
                 }
             }
@@ -3290,8 +3516,7 @@ impl HomeScanRunner for OpenEstateScanRunner {
                 .and_then(|v| v.as_str())
                 .unwrap_or(&item.slug)
                 .to_string();
-            let html = render_report_html_with_brand(&rep, &env.brand_name(), &env.brand_domain());
-            let _ = db.put_cached_report(&c_slug, &rep, Some(&html)).await;
+            let _ = db.put_cached_report(&c_slug, &rep, None).await;
             if !c_slug.is_empty() {
                 let _ = db.record_report_refresh(&c_slug).await;
             }

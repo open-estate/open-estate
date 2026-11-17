@@ -285,12 +285,12 @@ fn public_gis_csv_and_zero_price_public_record_enrichment_works() {
         .get("url")
         .and_then(|u| u.as_str())
         .unwrap_or("")
-        .contains("sccassessor.org")));
+        .contains("santaclaracounty.telleronline.net")));
     assert!(portals.iter().any(|p| p
         .get("url")
         .and_then(|u| u.as_str())
         .unwrap_or("")
-        .contains("clerkrecorder.sccgov.org")));
+        .contains("clerkrecorder.santaclaracounty.gov")));
 
     // Off-market public-record row with blank PRICE still populates interior & lot specs
     let geo_204 = json!({
@@ -375,23 +375,42 @@ fn data_point_anchor_builder_encodes_values_and_strips_pii_and_forbidden_tokens(
         assert_eq!(clean, "https://www.sccassessor.org/");
     }
 
-    // Builds non-PII single-parcel ArcGIS `f=html` query URL
+    // Builds interactive Campbell parcel viewer URL (never disabled ArcGIS `f=html` or bogus `#:~:text=`)
     let arc = build_arcgis_parcel_html_query_url(
         "https://gis.campbellca.gov/arcgis/rest/services/Parcels/MapServer/0",
         Some("000-00-200"),
         "06085",
     )
-    .expect("Campbell single-parcel HTML query");
-    assert!(arc.contains("/query?where="));
-    assert!(arc.contains("f=html"));
-    assert!(arc.contains("USABLE_SQ_FT_LAN"));
+    .expect("Campbell single-parcel viewer");
+    assert_eq!(
+        arc,
+        "https://gis.campbellca.gov/portal/apps/experiencebuilder/experience/?id=a9b10db4e5f04070ae15c3f745443cbf"
+    );
+    assert!(!arc.contains("f=html"));
+    assert!(!arc.contains(":~:text="));
     assert!(!arc.to_ascii_lowercase().contains("owner"));
-    assert!(arc.ends_with("#:~:text=00000200"));
 }
 
 #[test]
 fn official_record_links_cover_major_us_counties_and_cities_with_deep_anchors() {
-    // 1. Campbell / Santa Clara County, CA
+    // 1. Campbell / Santa Clara County, CA (including real APN 305-50-002 format check)
+    let scc_real = resolve_official_record_links(
+        "06085",
+        "Santa Clara County",
+        "CA",
+        "Campbell",
+        Some("305-50-002"),
+        Some("236 Synthrincon Ave, Campbell, CA 95008"),
+        None,
+        None,
+    );
+    assert_eq!(
+        scc_real.assessor_url,
+        "https://santaclaracounty.telleronline.net/search/1/details?APN=305-50-002"
+    );
+    assert!(!scc_real.assessor_url.contains("sccassessor.org"));
+    assert!(!scc_real.assessor_url.contains(":~:text="));
+
     let scc = resolve_official_record_links(
         "06085",
         "Santa Clara County",
@@ -402,20 +421,25 @@ fn official_record_links_cover_major_us_counties_and_cities_with_deep_anchors() 
         None,
         None,
     );
-    assert!(scc.assessor_url.contains("sccassessor.org"));
-    assert!(scc.assessor_url.contains(":~:text=000-00-200"));
-    assert!(scc
-        .tax_collector_url
-        .contains("payments.sccgov.org/propertytax"));
-    assert!(scc.recorder_url.contains("clerkrecorder.sccgov.org"));
-    assert!(scc
-        .permit_portal_url
-        .contains("campbellca.gov/161/Building"));
-    assert!(scc
-        .gis_parcel_query_url
-        .as_deref()
-        .unwrap_or("")
-        .contains("f=html"));
+    assert_eq!(
+        scc.assessor_url,
+        "https://santaclaracounty.telleronline.net/search/1/details?APN=000-00-200"
+    );
+    assert_eq!(
+        scc.tax_collector_url,
+        "https://santaclaracounty.telleronline.net/search/1/details?APN=000-00-200"
+    );
+    assert_eq!(scc.recorder_url, "https://clerkrecorder.santaclaracounty.gov/");
+    assert_eq!(scc.permit_portal_url, "https://www.mgoconnect.org/cp?JID=187");
+    assert!(!scc.permit_portal_url.contains("/161/Building"));
+    assert_eq!(
+        scc.zoning_portal_url.as_deref(),
+        Some("https://www.campbellca.gov/166/Zoning-and-Land-Use")
+    );
+    assert_eq!(
+        scc.gis_parcel_query_url.as_deref(),
+        Some("https://gis.campbellca.gov/portal/apps/experiencebuilder/experience/?id=a9b10db4e5f04070ae15c3f745443cbf")
+    );
 
     // 2. San Francisco, CA
     let sf = resolve_official_record_links(
@@ -601,13 +625,13 @@ fn synth_reports_enrich_every_fact_and_render_anchored_cross_reference_links() {
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
                 assert!(
-                    u.starts_with("https://") && u.contains(":~:text="),
-                    "{label}: fieldSources.{required_key}.url must be https:// with exact :~:text= anchor, got: {u}"
+                    u.starts_with("https://") && !u.contains(' '),
+                    "{label}: fieldSources.{required_key}.url must be a clean https:// URL, got: {u}"
                 );
             }
         }
 
-        // Verify taxHistory, saleHistory, transfers, permits, and comps carry https:// sourceUrl with :~:text=
+        // Verify taxHistory, saleHistory, transfers, permits, and comps carry clean https:// sourceUrl without bogus homepage fragments
         for arr_ptr in [
             "/facts/taxHistory",
             "/facts/saleHistory",
@@ -619,8 +643,8 @@ fn synth_reports_enrich_every_fact_and_render_anchored_cross_reference_links() {
                 for (idx, item) in arr.iter().enumerate() {
                     let su = item.get("sourceUrl").and_then(|v| v.as_str()).unwrap_or("");
                     assert!(
-                        su.starts_with("https://") && su.contains(":~:text="),
-                        "{label}: {arr_ptr}[{idx}].sourceUrl missing https:// or :~:text= anchor: {su}"
+                        su.starts_with("https://") && !su.contains(' '),
+                        "{label}: {arr_ptr}[{idx}].sourceUrl missing clean https:// URL: {su}"
                     );
                 }
             }

@@ -15,7 +15,10 @@ use crate::ai::hoa_review::parse_hoa_documents;
 use crate::ai::packet_review::analyze_packet_documents_deterministic;
 use crate::ai::pdf::{extract_pdf_pages_from_bytes, ExtractedDocument, PageExtract};
 use crate::ai::title_review::{parse_title_report_text, redact_title_pii};
-use crate::db::{DbStore, SqlParam};
+use crate::db::{
+    extract_section_json, DbStore, ListingCoreProto, ListingPriceStatus, ReportSectionKind,
+    SqlParam,
+};
 use crate::guardrails::{
     scrub_sensitive_text, scrub_untrusted_document_lines, validate_and_scrub_property_document,
     DocumentKind,
@@ -107,6 +110,23 @@ pub fn attach_data_point_anchor(base_url: &str, text_hint: &str) -> String {
         candidate
     } else {
         trimmed_base.to_string()
+    }
+}
+
+fn attach_verified_doc_anchor(base_url: &str, text_hint: &str) -> String {
+    let trimmed_base = base_url.trim();
+    if trimmed_base.is_empty() {
+        return String::new();
+    }
+    let lower_path = trimmed_base
+        .split('?')
+        .next()
+        .unwrap_or(trimmed_base)
+        .to_ascii_lowercase();
+    if lower_path.ends_with(".pdf") || crate::shared::url_supports_text_fragment(trimmed_base) {
+        attach_data_point_anchor(trimmed_base, text_hint)
+    } else {
+        crate::shared::with_verified_data_anchor(trimmed_base, None, Some(text_hint))
     }
 }
 
@@ -656,7 +676,7 @@ fn build_verification_links(geo: &Value, facts: &Value) -> Vec<Value> {
 
     if let Some((pname, purl)) = permit_portal {
         let anchored = if !apn.is_empty() {
-            attach_data_point_anchor(purl, apn)
+            attach_verified_doc_anchor(purl, apn)
         } else {
             purl.to_string()
         };
@@ -679,7 +699,7 @@ fn build_verification_links(geo: &Value, facts: &Value) -> Vec<Value> {
         links.push(json!({
             "name": format!("{county}, {state} — Official County Recorder & Assessor Verification"),
             "category": "Recorded Deeds, Liens & Tax Roll",
-            "sourceUrl": "https://www.nacrc.org/",
+            "sourceUrl": "https://www.pria.us/",
         }));
     }
 
@@ -1306,16 +1326,16 @@ async fn discover_and_download_public_docs(
     };
     let summary = if fetched_via_api {
         format!(
-            "Fetched and PII-scrubbed {} property disclosure/inspection document(s) automatically via API — analyzed directly in Docs & AI below with no manual upload required.",
+            "Found and PII-scrubbed {} property disclosure/inspection document(s) on file — analyzed directly in Docs & AI below with no manual upload required.",
             discovered.len()
         )
     } else {
-        "Could not fetch an inspection or seller-disclosure packet via connected MLS/public APIs (in US residential transactions, Home Inspection, Section 1/2 WDO/Termite, TDS/SPQ, and Preliminary Title packets are normally gated inside broker-only MLS portals such as Disclosures.io or Glide). You can request the report packet via your buyer's agent and upload it only when needed — or if you don't have an agent yet, we can recommend one.".to_string()
+        "Pre-sale inspection and seller disclosure packets are typically shared through the listing agent rather than posted via public APIs (in US residential transactions, Home Inspection, Section 1/2 WDO/Termite, TDS/SPQ, and Preliminary Title packets are normally shared inside broker portals such as Disclosures.io or Glide). Upload your packet below or ask your buyer's agent to request it — if you don't have an agent yet, we can recommend one.".to_string()
     };
     let agent_hint = if fetched_via_api {
-        "Fetched automatically via API — we only ask you to upload documents when an inspection, title, or HOA packet cannot be retrieved via API.".to_string()
+        "Found on file and analyzed automatically — you only need to upload files if you receive newer supplemental reports.".to_string()
     } else {
-        "We only ask you to upload inspection reports or disclosures when we cannot fetch them via API. Ask your buyer's agent to pull the listing's disclosure/inspection packet (Disclosures.io / Glide / MLS supplements) — if you don't have an agent yet, or if no pre-inspection exists and you need a local home inspector, we can recommend one.".to_string()
+        "Upload your disclosure or inspection packet below, or ask your buyer's agent to request the listing's packet (Disclosures.io / Glide / listing supplements) — if you don't have an agent yet, or if no pre-inspection exists and you need a local home inspector, we can recommend one.".to_string()
     };
 
     let mut sources_checked = vec![
@@ -1355,6 +1375,111 @@ async fn discover_and_download_public_docs(
 
 // ------------------------- 2. Past Reports & Prior Artifacts (`pastReports`) -------------------------
 
+const NARROW_LISTING_CORE_COLS: &str = "listing_sk, external_id, report_slug, zip, state_code, county_fips, city, street, address, lat, lon, status, property_category, price, list_price, sold_price, estimated_value, price_per_sqft, hoa_monthly, all_in_monthly, beds, baths, sqft, lot_sqft, year_built, stories, days_on_market, listed_epoch_day, sold_epoch_day, school_score, school_grade, walk_score, safety_score, overall_score, electric_rate_kwh, max_download_mbps, tag_bits, known_bits, first_seen_ts, last_seen_ts, status_changed_ts, price_changed_ts";
+
+struct NarrowListingHistoryItem {
+    status: String,
+    price: Option<i64>,
+    days_on_market: Option<i64>,
+    listed_date: Option<String>,
+    sold_date: Option<String>,
+    first_seen_at: String,
+    last_seen_at: String,
+    price_changed_at: Option<String>,
+    url: Option<String>,
+}
+
+async fn load_narrow_listing_history_item(
+    db: &DbStore,
+    core: ListingCoreProto,
+    ps_opt: Option<ListingPriceStatus>,
+) -> NarrowListingHistoryItem {
+    let eng_opt = db
+        .get_listing_engagement(core.listing_sk)
+        .await
+        .ok()
+        .flatten();
+    let status = ps_opt
+        .as_ref()
+        .map(|ps| ps.status_label.clone())
+        .unwrap_or_else(|| crate::db::proto::listing_status_from_code(core.status).to_string());
+    let price = ps_opt.as_ref().and_then(|ps| ps.price).or(core.price);
+    let price_changed_ts = ps_opt
+        .as_ref()
+        .and_then(|ps| ps.price_changed_ts)
+        .or(core.price_changed_ts);
+
+    NarrowListingHistoryItem {
+        status,
+        price,
+        days_on_market: core.days_on_market.map(i64::from),
+        listed_date: crate::db::proto::epoch_day_to_date_str(core.listed_epoch_day),
+        sold_date: crate::db::proto::epoch_day_to_date_str(core.sold_epoch_day),
+        first_seen_at: crate::db::proto::unix_ts_to_iso(core.first_seen_ts),
+        last_seen_at: crate::db::proto::unix_ts_to_iso(core.last_seen_ts),
+        price_changed_at: price_changed_ts.map(crate::db::proto::unix_ts_to_iso),
+        url: eng_opt.and_then(|(e, _)| e.listing_url),
+    }
+}
+
+async fn fetch_narrow_parcel_listing_history(
+    db: &DbStore,
+    slug: &str,
+    zip: &str,
+    street_line: &str,
+) -> Vec<NarrowListingHistoryItem> {
+    if slug.is_empty() {
+        return Vec::new();
+    }
+
+    let mut out = Vec::with_capacity(5);
+    let mut seen_sks = HashSet::new();
+
+    if let Some(sk) = db.resolve_listing_sk(slug).await.ok().flatten() {
+        let (ps_res, core_res) = tokio::join!(db.get_listing_price_status(sk), db.get_listing_core(sk));
+        if let Some(core) = core_res.ok().flatten() {
+            seen_sks.insert(sk);
+            out.push(load_narrow_listing_history_item(db, core, ps_res.ok().flatten()).await);
+        }
+    }
+
+    if !zip.is_empty() && street_line.len() >= 4 && out.len() < 5 {
+        let prefix_end = {
+            let mut idx = street_line.len().min(18);
+            while idx > 0 && !street_line.is_char_boundary(idx) {
+                idx -= 1;
+            }
+            idx
+        };
+        let like_pat = format!("{}%", &street_line[..prefix_end]);
+        let sql = format!(
+            "SELECT {NARROW_LISTING_CORE_COLS} FROM listings WHERE zip = ? AND address LIKE ? ORDER BY last_seen_ts DESC LIMIT 5"
+        );
+        let extra_cores = db
+            .search_listing_cores(
+                &sql,
+                &[SqlParam::from(zip), SqlParam::from(like_pat.as_str())],
+            )
+            .await
+            .unwrap_or_default();
+        for core in extra_cores {
+            if out.len() >= 5 {
+                break;
+            }
+            if seen_sks.insert(core.listing_sk) {
+                let ps_opt = db
+                    .get_listing_price_status(core.listing_sk)
+                    .await
+                    .ok()
+                    .flatten();
+                out.push(load_narrow_listing_history_item(db, core, ps_opt).await);
+            }
+        }
+    }
+
+    out
+}
+
 async fn research_past_reports(
     db: &DbStore,
     geo: &Value,
@@ -1379,53 +1504,16 @@ async fn research_past_reports(
         .trim()
         .to_string();
 
-    let cached_fut = db.get_cached_report(slug);
-    let listings_fut = async {
-        if !slug.is_empty() && !zip.is_empty() && street_line.len() >= 4 {
-            let like_pat = format!("{}%", &street_line[..street_line.len().min(18)]);
-            db.fetch_listings_sql(
-                "SELECT * FROM listings WHERE report_slug = ? OR (zip = ? AND address LIKE ?) ORDER BY last_seen_at DESC LIMIT 6",
-                &[
-                    SqlParam::from(slug),
-                    SqlParam::from(zip),
-                    SqlParam::from(like_pat.as_str()),
-                ],
-            )
-            .await
-            .unwrap_or_default()
-        } else if !slug.is_empty() {
-            db.fetch_listings_sql(
-                "SELECT * FROM listings WHERE report_slug = ? ORDER BY last_seen_at DESC LIMIT 6",
-                &[SqlParam::from(slug)],
-            )
-            .await
-            .unwrap_or_default()
+    let hdr_fut = async {
+        if slug.is_empty() {
+            None
         } else {
-            Vec::new()
+            db.get_report_header(slug).await.ok().flatten()
         }
     };
+    let listings_fut = fetch_narrow_parcel_listing_history(db, slug, zip, &street_line);
 
-    let (cached_res, listing_rows) = tokio::join!(cached_fut, listings_fut);
-
-    let mut prior_rep_opt: Option<(Value, String)> = cached_res
-        .ok()
-        .flatten()
-        .map(|r| (r.report, r.updated_at));
-
-    // Also check local `reports/<slug>/report.json` on disk if DB had none
-    if prior_rep_opt.is_none() && !slug.is_empty() && !slug.contains('/') && !slug.contains("..") {
-        let disk_path = Path::new("reports").join(slug).join("report.json");
-        if disk_path.exists() {
-            if let Ok(raw) = tokio::fs::read_to_string(&disk_path).await {
-                if let Ok(parsed) = serde_json::from_str::<Value>(&raw) {
-                    let ga = val_str(parsed.pointer("/meta/generatedAt"))
-                        .unwrap_or("disk_snapshot")
-                        .to_string();
-                    prior_rep_opt = Some((parsed, ga));
-                }
-            }
-        }
-    }
+    let (hdr_opt, listing_rows) = tokio::join!(hdr_fut, listings_fut);
 
     let mut changes_detected: Vec<String> = Vec::new();
     let mut prior_val_usd: Option<i64> = None;
@@ -1434,26 +1522,115 @@ async fn research_past_reports(
     let mut prior_score: Option<f64> = None;
     let mut prior_verdict: Option<String> = None;
     let mut prior_reviews_available: Vec<String> = Vec::new();
+    let mut had_prior_report = false;
 
-    if let Some((ref prev, ref updated_at)) = prior_rep_opt {
-        prior_generated_at = val_str(prev.pointer("/meta/generatedAt"))
-            .map(String::from)
-            .or_else(|| (!updated_at.is_empty()).then(|| updated_at.clone()));
-        prior_val_usd = val_i64(
-            prev.pointer("/modules/valuation/data/estimate/value")
-                .or_else(|| prev.pointer("/valuation/estimate/value")),
-        );
-        prior_list_usd = val_i64(
-            prev.pointer("/facts/listPrice")
-                .or_else(|| prev.pointer("/facts/mlsListing/listPrice")),
-        );
-        prior_score = val_f64(prev.pointer("/summary/overallScore"));
-        prior_verdict = val_str(
-            prev.pointer("/narrative/executiveVerdict/headline")
-                .or_else(|| prev.pointer("/summary/verdict")),
-        )
-        .map(String::from);
+    if let Some(hdr) = hdr_opt {
+        had_prior_report = true;
+        let ts = if hdr.generated_ts > 0 {
+            hdr.generated_ts
+        } else {
+            hdr.updated_ts
+        };
+        prior_generated_at = (ts > 0).then(|| crate::db::proto::unix_ts_to_iso(ts));
+        prior_val_usd = hdr.estimated_value;
+        prior_list_usd = hdr.list_price;
+        prior_score = hdr.overall_score;
+        prior_verdict = hdr.ai_headline.or(hdr.verdict);
 
+        // Only read narrow Facts section (~1 KB) if header lacked top-level list_price
+        // (e.g. stored solely under `/facts/mlsListing/listPrice`).
+        if prior_list_usd.is_none()
+            && (hdr.section_mask & (1_i32 << (ReportSectionKind::ReportSectionFacts as u32))) != 0
+        {
+            if let Some(sec_env) = db
+                .get_report_section(slug, ReportSectionKind::ReportSectionFacts)
+                .await
+                .ok()
+                .flatten()
+            {
+                if let Ok(sec_json) = extract_section_json(&sec_env) {
+                    prior_list_usd = val_i64(
+                        sec_json
+                            .pointer("/root/facts/listPrice")
+                            .or_else(|| sec_json.pointer("/root/facts/mlsListing/listPrice"))
+                            .or_else(|| sec_json.pointer("/modules/facts/data/listPrice"))
+                            .or_else(|| {
+                                sec_json.pointer("/modules/facts/data/mlsListing/listPrice")
+                            }),
+                    );
+                }
+            }
+        }
+
+        // `section_mask` tells immediately (~0 extra queries for 99%+ of reports!) whether
+        // HOA/packet/repair review artifacts exist on the cached report.
+        if (hdr.section_mask & (1_i32 << (ReportSectionKind::ReportSectionDocReviews as u32))) != 0
+        {
+            if let Some(doc_env) = db
+                .get_report_section(slug, ReportSectionKind::ReportSectionDocReviews)
+                .await
+                .ok()
+                .flatten()
+            {
+                if let Ok(doc_json) = extract_section_json(&doc_env) {
+                    let root_view = doc_json.get("root").unwrap_or(&doc_json);
+                    for (key, label) in [
+                        ("hoaReview", "HOA Disclosure Review"),
+                        ("packetReview", "Multi-Document Disclosure Packet Review"),
+                        ("repairAddendum", "Repair-Credit Addendum"),
+                    ] {
+                        if root_view.get(key).map(Value::is_object).unwrap_or(false) {
+                            prior_reviews_available.push(label.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    } else if !slug.is_empty() && !slug.contains('/') && !slug.contains("..") {
+        // Fallback: check local `reports/<slug>/report.json` on disk if DB had none.
+        let disk_path = Path::new("reports").join(slug).join("report.json");
+        if disk_path.exists() {
+            if let Ok(raw) = tokio::fs::read_to_string(&disk_path).await {
+                if let Ok(prev) = serde_json::from_str::<Value>(&raw) {
+                    had_prior_report = true;
+                    prior_generated_at = Some(
+                        val_str(prev.pointer("/meta/generatedAt"))
+                            .unwrap_or("disk_snapshot")
+                            .to_string(),
+                    );
+                    prior_val_usd = val_i64(
+                        prev.pointer("/modules/valuation/data/estimate/value")
+                            .or_else(|| prev.pointer("/valuation/estimate/value")),
+                    );
+                    prior_list_usd = val_i64(
+                        prev.pointer("/facts/listPrice")
+                            .or_else(|| prev.pointer("/facts/mlsListing/listPrice")),
+                    );
+                    prior_score = val_f64(
+                        prev.pointer("/summary/scores/overall")
+                            .or_else(|| prev.pointer("/summary/overallScore")),
+                    );
+                    prior_verdict = val_str(
+                        prev.pointer("/narrative/executiveVerdict/headline")
+                            .or_else(|| prev.pointer("/ai/verdict/headline"))
+                            .or_else(|| prev.pointer("/summary/verdict")),
+                    )
+                    .map(String::from);
+                    for (key, label) in [
+                        ("hoaReview", "HOA Disclosure Review"),
+                        ("packetReview", "Multi-Document Disclosure Packet Review"),
+                        ("repairAddendum", "Repair-Credit Addendum"),
+                    ] {
+                        if prev.get(key).map(Value::is_object).unwrap_or(false) {
+                            prior_reviews_available.push(label.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if had_prior_report {
         if let (Some(prev_lp), Some(curr_lp)) = (prior_list_usd, current_list_price) {
             let diff = curr_lp - prev_lp;
             if diff.abs() >= 500 {
@@ -1470,15 +1647,6 @@ async fn research_past_reports(
                         diff, prev_lp, curr_lp
                     ));
                 }
-            }
-        }
-        for (key, label) in [
-            ("hoaReview", "HOA Disclosure Review"),
-            ("packetReview", "Multi-Document Disclosure Packet Review"),
-            ("repairAddendum", "Repair-Credit Addendum"),
-        ] {
-            if prev.get(key).map(|v| v.is_object()).unwrap_or(false) {
-                prior_reviews_available.push(label.to_string());
             }
         }
     }
@@ -1500,7 +1668,7 @@ async fn research_past_reports(
             .filter(|u| u.starts_with("https://"))
             .map(|u| {
                 if let Some(p) = row.price {
-                    attach_data_point_anchor(u, &p.to_string())
+                    attach_verified_doc_anchor(u, &p.to_string())
                 } else {
                     u.to_string()
                 }
@@ -1518,7 +1686,7 @@ async fn research_past_reports(
         }));
     }
 
-    let found_prior = prior_rep_opt.is_some() || !listing_snapshots.is_empty();
+    let found_prior = had_prior_report || !listing_snapshots.is_empty();
     let summary = if let Some(ref ga) = prior_generated_at {
         format!(
             "Prior Open Estate report snapshot found from {ga}{}{}.",
@@ -1542,7 +1710,7 @@ async fn research_past_reports(
 
     json!({
         "foundPriorSnapshot": found_prior,
-        "priorReportCount": usize::from(prior_rep_opt.is_some()),
+        "priorReportCount": usize::from(had_prior_report),
         "priorGeneratedAt": prior_generated_at,
         "priorEstimatedValueUsd": prior_val_usd,
         "priorListPriceUsd": prior_list_usd,
@@ -1725,7 +1893,7 @@ async fn query_municipal_open_data(
                     "jobValueUsd": val_f64(r.get("estimated_cost").or_else(|| r.get("revised_cost"))).map(|c| c.round() as i64),
                     "description": desc,
                     "sourceName": "San Francisco DBI Building Permits (DataSF i98e-djp9)",
-                    "sourceUrl": attach_data_point_anchor(&deep, pnum),
+                    "sourceUrl": attach_verified_doc_anchor(&deep, pnum),
                 }));
             }
         }
@@ -1747,7 +1915,7 @@ async fn query_municipal_open_data(
                     "category": val_str(r.get("nov_category_description")).unwrap_or("DBI Complaint / Violation"),
                     "description": desc,
                     "sourceName": "San Francisco DBI Complaints & NOVs (DataSF gm2e-bten)",
-                    "sourceUrl": attach_data_point_anchor(&deep, cnum),
+                    "sourceUrl": attach_verified_doc_anchor(&deep, cnum),
                 }));
             }
         }
@@ -1803,7 +1971,7 @@ async fn query_municipal_open_data(
                     "jobValueUsd": val_f64(r.get("valuation")).map(|c| c.round() as i64),
                     "description": desc,
                     "sourceName": "Los Angeles LADBS Building Permits (yv23-pmwf)",
-                    "sourceUrl": attach_data_point_anchor(&deep, pnum),
+                    "sourceUrl": attach_verified_doc_anchor(&deep, pnum),
                 }));
             }
         }
@@ -1825,7 +1993,7 @@ async fn query_municipal_open_data(
                     "category": "LAHD / LADBS Code Enforcement",
                     "description": desc,
                     "sourceName": "Los Angeles Code Enforcement Open Data (u82d-eh7z)",
-                    "sourceUrl": attach_data_point_anchor(&deep, cnum),
+                    "sourceUrl": attach_verified_doc_anchor(&deep, cnum),
                 }));
             }
         }
@@ -1882,7 +2050,7 @@ async fn query_municipal_open_data(
                     "jobValueUsd": val_f64(r.get("PERMITVALUATION")).map(|c| c.round() as i64),
                     "description": desc,
                     "sourceName": "City of San Jose Open Data — Building Permits",
-                    "sourceUrl": attach_data_point_anchor("https://sjpermits.org/permits/general/combinedquery.asp", pnum),
+                    "sourceUrl": "https://sjpermits.org/permits/general/combinedquery.asp",
                 }));
             }
         }
@@ -1909,7 +2077,7 @@ async fn query_municipal_open_data(
                     "category": "San Jose Code Enforcement",
                     "description": desc,
                     "sourceName": "City of San Jose Open Data — Code Enforcement",
-                    "sourceUrl": attach_data_point_anchor("https://data.sanjoseca.gov/dataset/code-enforcement-cases", cnum),
+                    "sourceUrl": "https://data.sanjoseca.gov/",
                 }));
             }
         }
@@ -1964,7 +2132,7 @@ async fn query_municipal_open_data(
                     "jobValueUsd": val_f64(r.get("reported_cost")).map(|c| c.round() as i64),
                     "description": desc,
                     "sourceName": "City of Chicago Building Permits (ydr8-5enu)",
-                    "sourceUrl": attach_data_point_anchor(&deep, pnum),
+                    "sourceUrl": attach_verified_doc_anchor(&deep, pnum),
                 }));
             }
         }
@@ -1987,7 +2155,7 @@ async fn query_municipal_open_data(
                     "category": val_str(r.get("department_bureau")).unwrap_or("Department of Buildings"),
                     "description": desc,
                     "sourceName": "City of Chicago Building Violations (22u3-xenr)",
-                    "sourceUrl": attach_data_point_anchor(&deep, cnum),
+                    "sourceUrl": attach_verified_doc_anchor(&deep, cnum),
                 }));
             }
         }
@@ -2030,14 +2198,11 @@ async fn query_municipal_open_data(
                     .or_else(|| r.get("link"))
                     .and_then(|v| v.as_str())
                     .filter(|u| u.starts_with("https://"))
-                    .map(|u| attach_data_point_anchor(u, pnum))
+                    .map(|u| attach_verified_doc_anchor(u, pnum))
                     .unwrap_or_else(|| {
-                        attach_data_point_anchor(
-                            &format!(
-                                "https://data.seattle.gov/resource/76t5-zqzr.json?permitnum={}",
-                                encode_w3c_text_fragment(pnum)
-                            ),
-                            pnum,
+                        format!(
+                            "https://data.seattle.gov/resource/76t5-zqzr.json?permitnum={}",
+                            encode_w3c_text_fragment(pnum)
                         )
                     });
                 permits.push(json!({
@@ -2065,14 +2230,11 @@ async fn query_municipal_open_data(
                     .or_else(|| r.get("link"))
                     .and_then(|v| v.as_str())
                     .filter(|u| u.starts_with("https://"))
-                    .map(|u| attach_data_point_anchor(u, cnum))
+                    .map(|u| attach_verified_doc_anchor(u, cnum))
                     .unwrap_or_else(|| {
-                        attach_data_point_anchor(
-                            &format!(
-                                "https://data.seattle.gov/resource/ez4a-iug7.json?recordnum={}",
-                                encode_w3c_text_fragment(cnum)
-                            ),
-                            cnum,
+                        format!(
+                            "https://data.seattle.gov/resource/ez4a-iug7.json?recordnum={}",
+                            encode_w3c_text_fragment(cnum)
                         )
                     });
                 violations.push(json!({
@@ -2147,7 +2309,7 @@ async fn query_municipal_open_data(
                     "jobValueUsd": Value::Null,
                     "description": desc,
                     "sourceName": "NYC DOB Permit Issuance (NYC Open Data ipu4-2q9a)",
-                    "sourceUrl": attach_data_point_anchor(&deep, pnum),
+                    "sourceUrl": attach_verified_doc_anchor(&deep, pnum),
                 }));
             }
         }
@@ -2170,7 +2332,7 @@ async fn query_municipal_open_data(
                     "category": val_str(r.get("violation_type_code")).unwrap_or("DOB Violation"),
                     "description": desc,
                     "sourceName": "NYC DOB Violations (NYC Open Data 3h2n-5cm9)",
-                    "sourceUrl": attach_data_point_anchor(&deep, cnum),
+                    "sourceUrl": attach_verified_doc_anchor(&deep, cnum),
                 }));
             }
         }
@@ -2219,7 +2381,7 @@ async fn query_municipal_open_data(
                     "jobValueUsd": Value::Null,
                     "description": desc,
                     "sourceName": "Philadelphia L&I Permits (OpenDataPhilly)",
-                    "sourceUrl": attach_data_point_anchor(&atlas_base, pnum),
+                    "sourceUrl": attach_verified_doc_anchor(&atlas_base, pnum),
                 }));
             }
         }
@@ -2236,7 +2398,7 @@ async fn query_municipal_open_data(
                     "category": "Philadelphia L&I Code Enforcement",
                     "description": desc,
                     "sourceName": "Philadelphia L&I Violations (OpenDataPhilly)",
-                    "sourceUrl": attach_data_point_anchor(&atlas_base, cnum),
+                    "sourceUrl": attach_verified_doc_anchor(&atlas_base, cnum),
                 }));
             }
         }
@@ -2282,14 +2444,11 @@ async fn query_municipal_open_data(
                     .or_else(|| r.get("link"))
                     .and_then(|v| v.as_str())
                     .filter(|u| u.starts_with("https://"))
-                    .map(|u| attach_data_point_anchor(u, pnum))
+                    .map(|u| attach_verified_doc_anchor(u, pnum))
                     .unwrap_or_else(|| {
-                        attach_data_point_anchor(
-                            &format!(
-                                "https://data.austintexas.gov/resource/3syk-w9eu.json?permit_number={}",
-                                encode_w3c_text_fragment(pnum)
-                            ),
-                            pnum,
+                        format!(
+                            "https://data.austintexas.gov/resource/3syk-w9eu.json?permit_number={}",
+                            encode_w3c_text_fragment(pnum)
                         )
                     });
                 permits.push(json!({
@@ -2324,7 +2483,7 @@ async fn query_municipal_open_data(
                     "category": "Austin Code Department",
                     "description": desc,
                     "sourceName": "City of Austin Code Violations (xwdj-i9he)",
-                    "sourceUrl": attach_data_point_anchor(&deep, cnum),
+                    "sourceUrl": attach_verified_doc_anchor(&deep, cnum),
                 }));
             }
         }
@@ -2369,7 +2528,7 @@ async fn query_municipal_open_data(
                     "jobValueUsd": val_f64(r.get("total_cost_of_construction")).map(|c| c.round() as i64),
                     "description": desc,
                     "sourceName": "Cambridge Open Data Building Permits (9qm7-wbdc)",
-                    "sourceUrl": attach_data_point_anchor(&deep, pnum),
+                    "sourceUrl": attach_verified_doc_anchor(&deep, pnum),
                 }));
             }
             if !permits.is_empty() {
@@ -2410,7 +2569,7 @@ async fn query_municipal_open_data(
                     "jobValueUsd": val_f64(r.get("declared_valuation")).map(|c| c.round() as i64),
                     "description": desc,
                     "sourceName": "Analyze Boston — Approved Building Permits",
-                    "sourceUrl": attach_data_point_anchor("https://data.boston.gov/dataset/approved-building-permits", pnum),
+                    "sourceUrl": "https://data.boston.gov/dataset/approved-building-permits",
                 }));
             }
             if !permits.is_empty() {
@@ -2565,7 +2724,7 @@ async fn research_permits_and_violations_inner(
                     "isParentLot": is_parent,
                     "finaled": p.get("finaled").and_then(|v| v.as_bool()),
                     "sourceName": val_str(p.get("sourceName").or_else(|| p.get("source"))).unwrap_or("Public Building Permit Record"),
-                    "sourceUrl": attach_data_point_anchor(raw_url, pnum),
+                    "sourceUrl": attach_verified_doc_anchor(raw_url, pnum),
                 });
                 if let Some(kw) = p.get("solarKw").and_then(|v| v.as_f64()) {
                     rec["solarKw"] = json!(kw);
@@ -2640,7 +2799,7 @@ async fn research_permits_and_violations_inner(
             );
             let raw_url = val_str(v.get("sourceUrl").or_else(|| v.get("url")))
                 .filter(|u| u.starts_with("https://"))
-                .unwrap_or("https://www.nacrc.org/");
+                .unwrap_or("https://www.pria.us/");
             open_violations.push(json!({
                 "caseNumber": cnum,
                 "status": val_str(v.get("status")).unwrap_or("Recorded"),
@@ -2648,7 +2807,7 @@ async fn research_permits_and_violations_inner(
                 "category": val_str(v.get("category")).unwrap_or("Code Enforcement"),
                 "description": desc,
                 "sourceName": val_str(v.get("sourceName").or_else(|| v.get("source"))).unwrap_or("Municipal Code Enforcement Record"),
-                "sourceUrl": attach_data_point_anchor(raw_url, cnum),
+                "sourceUrl": attach_verified_doc_anchor(raw_url, cnum),
             }));
         }
     }
@@ -2807,7 +2966,7 @@ fn synthesize_hoa_issues(
             "title": format!("{state} {months}-Month Super-Priority HOA Lien State ({statute})"),
             "detail": val_str(sp.get("notice")).unwrap_or("Unpaid HOA assessments carry statutory super-priority ahead of first mortgages; require a binding Seller-Paid Estoppel / Resale Certificate confirming $0.00 balance."),
             "sourceName": format!("{state} Statutory HOA Lien Priority ({statute})"),
-            "sourceUrl": "https://www.ulc.org/committees/community-chicklet?communityKey=f7dce832-89d3-4449-9a04-b08d6c4b0e0b",
+            "sourceUrl": "https://www.uniformlaws.org/committees/community-home?CommunityKey=11b5b920-66d5-451d-a4d2-8a42b6211145",
         }));
     }
 
@@ -2820,7 +2979,7 @@ fn synthesize_hoa_issues(
                 "title": format!("Critically Underfunded HOA Reserves ({pf:.1}% Funded)"),
                 "detail": "Reserve balance below the 30% critical threshold substantially elevates the probability of near-term lump-sum special assessments or sharp monthly dues increases.",
                 "sourceName": "Community Associations Institute — Reserve Study Standards",
-                "sourceUrl": "https://www.caionline.org/Advocacy/Priorities/ReserveStudies/Pages/default.aspx",
+                "sourceUrl": "https://www.caionline.org/",
             }));
         }
     }

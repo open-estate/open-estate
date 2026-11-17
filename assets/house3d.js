@@ -210,14 +210,19 @@
         axisDeg: (dominantAxis(ring) * 180) / Math.PI,
       });
     };
-    var subj = (houseFrame && locRing(dia.subject)) || llRing(house.footprint);
-    pushB(subj, 'subject', null, +house.heightM, isNum(+house.levels) && +house.levels >= 1 ? +house.levels : stories);
     var lot = (houseFrame && locRing(dia.lot)) || llRing(house.lotPolygon) || llRing(facts.parcelPolygon) || llRing(facts.buildingRegister && facts.buildingRegister.parcelPolygon);
-    (Array.isArray(house.additionalStructures) ? house.additionalStructures : []).forEach(function (st) {
-      pushB(llRing(st && st.footprint), 'accessory', st && st.label);
-    });
+    var offLot = Boolean(lot) && house.onLot === false;
+    var subj = (houseFrame && locRing(dia.subject)) || llRing(house.footprint);
+    pushB(subj, offLot ? 'neighbor' : 'subject', null, +house.heightM, isNum(+house.levels) && +house.levels >= 1 ? +house.levels : stories);
+    if (!offLot) {
+      (Array.isArray(house.additionalStructures) ? house.additionalStructures : []).forEach(function (st) {
+        pushB(llRing(st && st.footprint), 'accessory', st && st.label);
+      });
+    }
     if (houseFrame) {
-      (Array.isArray(dia.additional) ? dia.additional : []).forEach(function (r) { pushB(locRing(r), 'accessory'); });
+      if (!offLot) {
+        (Array.isArray(dia.additional) ? dia.additional : []).forEach(function (r) { pushB(locRing(r), 'accessory'); });
+      }
       (Array.isArray(dia.buildings) ? dia.buildings : []).forEach(function (r) {
         var ring = locRing(r);
         if (!ring) return;

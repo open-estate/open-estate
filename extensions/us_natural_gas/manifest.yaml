@@ -33,6 +33,7 @@ cache_ttl_secs: 604800
 source_attribution:
   name: "State PUC & US EIA Published Residential Natural Gas Tariffs"
   url: "https://www.eia.gov/dnav/ng/ng_pri_sum_a_epg0_prs_dmcf_m.htm"
+  reference_url_template: "https://www.eia.gov/dnav/ng/ng_pri_sum_a_epg0_prs_dmcf_m.htm"
 tariff_catalog:
   gas_rules:
     - id: fl_heat_pump
@@ -62,7 +63,7 @@ tariff_catalog:
       rate_schedule: "Residential Gas Schedule G-1"
       rate_per_therm_usd: 1.95
       monthly_base_fee_usd: 14.20
-      tariff_url: "https://www.cityofpaloalto.org/Departments/Utilities"
+      tariff_url: "https://www.paloalto.gov/Departments/Utilities"
       rate_source: "City of Palo Alto Utilities Gas Schedule G-1"
 
     - id: sdge_gas
@@ -86,7 +87,7 @@ tariff_catalog:
       rate_schedule: "Residential Gas Service GR"
       rate_per_therm_usd: 1.92
       monthly_base_fee_usd: 5.00
-      tariff_url: "https://www.socalgas.com/pay-bill/understanding-your-bill/gas-rates"
+      tariff_url: "https://www.socalgas.com/billing-payment/understanding-my-bill"
       rate_source: "SoCalGas CPUC Residential Schedule GR"
 
     - id: pge_gas
@@ -133,7 +134,7 @@ tariff_catalog:
       rate_schedule: "Mid-Tex Residential Gas R"
       rate_per_therm_usd: 1.48
       monthly_base_fee_usd: 22.25
-      tariff_url: "https://www.atmosenergy.com/account-center/rates-and-tariffs"
+      tariff_url: "https://www.atmosenergy.com/utility-operationsrates/utility-operations/"
       rate_source: "EIA & Published Utility Gas Tariff"
 
     - id: pse_gas_wa
@@ -153,7 +154,7 @@ tariff_catalog:
       rate_schedule: "Residential Rate Schedule 2"
       rate_per_therm_usd: 1.49
       monthly_base_fee_usd: 10.00
-      tariff_url: "https://www.nwnatural.com/about-us/rates-and-regulations"
+      tariff_url: "https://www.nwnatural.com/about-us/rates-and-regulations/billing-rates"
       rate_source: "EIA & Published Utility Gas Tariff"
 
     - id: coned_natgrid_ny
@@ -213,7 +214,7 @@ tariff_catalog:
       rate_schedule: "Single-Family Residential G-5"
       rate_per_therm_usd: 1.68
       monthly_base_fee_usd: 13.70
-      tariff_url: "https://www.swgas.com/en/residential-rates"
+      tariff_url: "https://www.swgas.com/en/california-rates-and-regulation"
       rate_source: "EIA & Published Utility Gas Tariff"
 
     - id: atlanta_gas_light_ga
@@ -223,7 +224,7 @@ tariff_catalog:
       rate_schedule: "Published Marketer Fixed Therm Rate"
       rate_per_therm_usd: 1.65
       monthly_base_fee_usd: 18.00
-      tariff_url: "https://psc.ga.gov/utilities/natural-gas/marketer-pricing-chart/"
+      tariff_url: "https://psc.ga.gov/utilities/natural-gas/marketers-pricing-index/"
       rate_source: "EIA & Published Utility Gas Tariff"
 
     - id: us_gas_regional_default

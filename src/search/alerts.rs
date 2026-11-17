@@ -1,7 +1,12 @@
 // Area alert subscriptions, `minijinja` + `html_escape` email rendering, background Cron ZIP sync loop,
 // LLM match verification, deduplicated SMTP dispatch, and `/api/listings` + `/api/watched-zips` queries.
 
-use crate::db::{format_listing_row, DbStore, ListingRow, SqlParam, SubscriptionRow};
+use crate::db::{
+    compress_bytes_zstd_dict, decompress_bytes_zstd_any, deterministic_sk, extract_section_json,
+    format_listing_row, proto, DbStore, FeatureTag, ListingFullView, ListingRow, ReportHeaderProto,
+    ReportSectionKind, SqlParam, SubscriptionCoreProto, SubscriptionDigestItemProto,
+    SubscriptionNotificationProto, SubscriptionRow,
+};
 use crate::modules::commute::{LatLon, RoutingClient, RoutingConfig};
 use crate::scoring::catalog::{Dimension, Feature, Lang, MatchBand, PropertyKind, Screen};
 use crate::scoring::engine::{rank_with, CommuteMatrix, NoticeCode, RankOptions, ScoredHome};
@@ -11,9 +16,9 @@ use crate::scoring::presets::PRESETS;
 use crate::scoring::profile::Profile;
 use crate::search::mailer::{send_smtp_email, smtp_status_json, EmailRequest};
 use crate::search::matcher::{
-    clean_untrusted_text, compile_filters_to_sql, fmt_clean_num, format_int_commas,
-    parse_requirements_to_query, rank_candidates_with_llm, score_listing_deterministic,
-    SearchFilters, SearchValidationError, CURRENT_FILTER_SCHEMA_VERSION,
+    clean_untrusted_text, fmt_clean_num, format_int_commas, parse_requirements_to_query,
+    rank_candidates_with_llm, score_listing_deterministic, search_listings_narrow, SearchFilters,
+    SearchValidationError, CURRENT_FILTER_SCHEMA_VERSION,
 };
 pub use crate::search::matcher::{
     fair_housing_audit, fair_housing_audit_reports, poison_report_with_demographics,
@@ -26,22 +31,18 @@ use crate::search::sync::{
     LiveZipListingProvider,
 };
 use crate::shared::{
-    format_brand_wordmark_styled_html, now_iso, now_unix_ms, EnvConfig, HttpClient,
+    format_brand_wordmark_styled_html, now_iso, now_unix_ms, now_unix_secs, EnvConfig, HttpClient,
 };
 use crate::web::i18n::{bcp47_code, resolve_lang_str, t, t_args, t_brand, t_brand_args};
 use anyhow::Result;
 use html_escape::encode_safe;
-use minijinja::{context, Environment};
+use minijinja::{context, AutoEscape, Environment};
 use once_cell::sync::Lazy;
 use regex::Regex;
-use sea_query::{
-    Alias, Asterisk, Condition, Expr, ExprTrait, MysqlQueryBuilder, Order, Query,
-    SqliteQueryBuilder,
-};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::future::Future;
 use std::path::Path;
 use unic_langid::LanguageIdentifier;
@@ -128,54 +129,90 @@ fn generate_unsubscribe_token() -> String {
 }
 
 async fn refresh_watched_zip_subscriber_counts(db: &DbStore, extra_zips: &[String]) -> Result<()> {
-    let active_subs = db
-        .fetch_subscriptions_sql("SELECT * FROM subscriptions WHERE active = 1", &[])
+    db.ensure_schema().await?;
+    let zip_counts = db
+        .fetch_all_mapped_raw(
+            "SELECT sz.zip AS zip, COUNT(*) AS cnt \
+             FROM subscription_zips sz \
+             JOIN subscriptions s ON s.subscription_sk = sz.subscription_sk \
+             WHERE s.active = 1 \
+             GROUP BY sz.zip",
+            &[],
+            |r| {
+                (
+                    r.opt_str("zip").unwrap_or_default(),
+                    r.opt_i64("cnt").unwrap_or(0),
+                )
+            },
+        )
         .await?;
-    let mut count_map: HashMap<String, i64> = HashMap::new();
-    for sub in &active_subs {
-        if let Ok(arr) = serde_json::from_str::<Vec<String>>(&sub.zips_json) {
-            for z in arr {
-                *count_map.entry(z).or_insert(0) += 1;
-            }
+
+    let mut count_map: HashMap<String, i64> = HashMap::with_capacity(zip_counts.len());
+    for (z, cnt) in zip_counts {
+        if !z.is_empty() {
+            count_map.insert(z, cnt);
         }
     }
 
-    let mut all_zips: BTreeSet<String> = extra_zips.iter().cloned().collect();
+    let existing_watched = db
+        .fetch_all_mapped_raw(
+            "SELECT zip, active FROM watched_zips",
+            &[],
+            |r| {
+                (
+                    r.opt_str("zip").unwrap_or_default(),
+                    r.opt_i64("active").unwrap_or(1),
+                )
+            },
+        )
+        .await?;
+    let existing_map: HashMap<String, i64> = existing_watched
+        .into_iter()
+        .filter(|(z, _)| !z.is_empty())
+        .collect();
+
+    let mut all_zips: BTreeSet<String> = extra_zips
+        .iter()
+        .map(|z| z.trim().to_string())
+        .filter(|z| !z.is_empty())
+        .collect();
     for k in count_map.keys() {
         all_zips.insert(k.clone());
     }
+    for (k, _) in &existing_map {
+        if !count_map.contains_key(k) {
+            all_zips.insert(k.clone());
+        }
+    }
 
-    let now = now_iso();
+    let now_ts = now_unix_secs();
     for z in all_zips {
         let sub_cnt = *count_map.get(&z).unwrap_or(&0);
-        if let Some(existing) = db.get_watched_zip(&z).await? {
-            let active = if sub_cnt > 0 { 1_i64 } else { existing.active };
-            db.execute_params(
+        if let Some(&prev_active) = existing_map.get(&z) {
+            let active = if sub_cnt > 0 { 1_i64 } else { prev_active };
+            db.execute_params_raw(
                 "UPDATE watched_zips SET subscriber_count = ?, active = ? WHERE zip = ?",
-                &[sub_cnt.into(), active.into(), z.as_str().into()],
+                &[
+                    SqlParam::I64(sub_cnt),
+                    SqlParam::I64(active),
+                    SqlParam::from(z.as_str()),
+                ],
             )
             .await?;
         } else {
-            db.upsert_row(
+            db.upsert_row_raw(
                 "watched_zips",
                 &[
-                    ("zip", z.into()),
-                    ("city", SqlParam::Null),
-                    ("state", SqlParam::Null),
-                    ("lat", SqlParam::Null),
-                    ("lon", SqlParam::Null),
-                    ("active", 1_i64.into()),
-                    ("subscriber_count", sub_cnt.into()),
-                    ("sync_interval_min", 15_i64.into()),
-                    ("last_synced_at", SqlParam::Null),
-                    ("last_sync_status", Some("queued").into()),
-                    ("last_new_count", 0_i64.into()),
-                    ("last_sold_count", 0_i64.into()),
-                    ("total_active_listings", 0_i64.into()),
-                    ("total_sold_listings", 0_i64.into()),
-                    ("sources_used", SqlParam::Null),
-                    ("last_error", SqlParam::Null),
-                    ("created_at", now.clone().into()),
+                    ("zip", SqlParam::from(z.as_str())),
+                    ("active", SqlParam::I64(1)),
+                    ("subscriber_count", SqlParam::I64(sub_cnt)),
+                    ("sync_interval_min", SqlParam::I64(15)),
+                    ("last_sync_status", SqlParam::I64(0)),
+                    ("last_new_count", SqlParam::I64(0)),
+                    ("last_sold_count", SqlParam::I64(0)),
+                    ("total_active_listings", SqlParam::I64(0)),
+                    ("total_sold_listings", SqlParam::I64(0)),
+                    ("created_ts", SqlParam::I64(now_ts)),
                 ],
                 &["zip"],
             )
@@ -286,19 +323,52 @@ const MANAGE_LINK_HTML_TPL: &str = r#"<!doctype html><html lang="{{ html_lang }}
   </div>
 </body></html>"#;
 
+static ALERT_EMAIL_JINJA_ENV: Lazy<Environment<'static>> = Lazy::new(|| {
+    let mut env = Environment::new();
+    env.set_auto_escape_callback(|name| {
+        if name.ends_with(".html") {
+            AutoEscape::Html
+        } else {
+            minijinja::default_auto_escape_callback(name)
+        }
+    });
+    env.add_template("match_alert.html", MATCH_ALERT_HTML_TPL)
+        .unwrap();
+    env.add_template("welcome_confirm.html", WELCOME_CONFIRM_HTML_TPL)
+        .unwrap();
+    env.add_template("manage_link.html", MANAGE_LINK_HTML_TPL)
+        .unwrap();
+    env
+});
+
+fn resolve_origin_and_brand(
+    base_origin: &str,
+    brand_name: &str,
+    brand_domain: &str,
+) -> (String, String, String) {
+    let eff_brand = if brand_name.trim().is_empty() {
+        "Open Estate".to_string()
+    } else {
+        brand_name.trim().to_string()
+    };
+    let eff_domain = if brand_domain.trim().is_empty() {
+        "open-estate.local".to_string()
+    } else {
+        brand_domain.trim().to_string()
+    };
+    let origin = if base_origin.trim().is_empty() {
+        format!("https://{eff_domain}")
+    } else {
+        base_origin.trim().trim_end_matches('/').to_string()
+    };
+    (origin, eff_brand, eff_domain)
+}
+
 pub fn normalize_frequency(raw: &str) -> &'static str {
     match raw.trim().to_ascii_lowercase().as_str() {
         "daily" | "day" => "daily",
         "weekly" | "week" => "weekly",
         _ => "instant",
-    }
-}
-
-fn frequency_interval_secs(freq: &str) -> i64 {
-    match normalize_frequency(freq) {
-        "daily" => 86_400,
-        "weekly" => 604_800,
-        _ => 0,
     }
 }
 
@@ -323,7 +393,7 @@ fn valid_http_photo_url(raw: Option<String>) -> Option<String> {
     }
 }
 
-fn safe_html_url_val(raw_url: &str) -> minijinja::Value {
+pub(crate) fn safe_html_url_val(raw_url: &str) -> minijinja::Value {
     let escaped = raw_url
         .replace('&', "&amp;")
         .replace('"', "&quot;")
@@ -403,6 +473,146 @@ pub fn build_match_alert_email_with_brand(
 }
 
 #[allow(clippy::too_many_arguments)]
+pub fn build_welcome_confirm_email_with_brand(
+    subscriber_name: Option<&str>,
+    zips: &[String],
+    frequency: &str,
+    base_origin: &str,
+    unsubscribe_token: &str,
+    lang: &str,
+    brand_name: &str,
+    brand_domain: &str,
+) -> AlertEmailPayload {
+    let (origin, eff_brand, _eff_domain) =
+        resolve_origin_and_brand(base_origin, brand_name, brand_domain);
+    let encoded_tok = urlencoding::encode(unsubscribe_token);
+    let unsub_url = format!("{origin}/api/subscriptions/unsubscribe?token={encoded_tok}");
+    let manage_url = format!("{origin}/alerts?token={encoded_tok}");
+    let zips_str = zips.join(", ");
+    let lang_id = resolve_lang_str(lang);
+
+    let welcome_subject =
+        t_brand_args(&lang_id, "email-welcome-subject", &eff_brand, &[("zips", &zips_str)]);
+    let welcome_heading = t_brand(&lang_id, "email-welcome-heading", &eff_brand);
+    let welcome_intro =
+        t_brand_args(&lang_id, "email-welcome-intro", &eff_brand, &[("zips", &zips_str)]);
+    let welcome_watching =
+        t_args(&lang_id, "email-welcome-watching", &[("zips", &zips_str)]);
+    let manage_cta = t(&lang_id, "email-alert-manage-cta");
+    let unsub_cta = t(&lang_id, "email-welcome-unsub");
+    let zips_label = t(&lang_id, "email-welcome-zips-label");
+    let cadence_label_title = t(&lang_id, "email-welcome-cadence-label");
+    let cadence_pill = cadence_label_for_lang(&lang_id, frequency);
+    let greeting = match subscriber_name.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(nm) => t_args(&lang_id, "email-alert-greeting-named", &[("name", nm)]),
+        None => t(&lang_id, "email-alert-greeting-anon"),
+    };
+
+    let text_body = [
+        greeting,
+        String::new(),
+        welcome_intro,
+        format!("{zips_label}: {zips_str}"),
+        format!("{cadence_label_title}: {cadence_pill}"),
+        String::new(),
+        format!("{manage_cta}: {manage_url}"),
+        format!("{unsub_cta}: {unsub_url}"),
+    ]
+    .join("\n");
+
+    let brand_wordmark = format_brand_wordmark_styled_html(&eff_brand, Some("color:#0f766e"));
+    let html_body = ALERT_EMAIL_JINJA_ENV
+        .get_template("welcome_confirm.html")
+        .and_then(|t_tpl| {
+            t_tpl.render(context! {
+                html_lang => bcp47_code(&lang_id),
+                brand_wordmark => &brand_wordmark,
+                welcome_heading => &welcome_heading,
+                welcome_watching => &welcome_watching,
+                zips_label => &zips_label,
+                zip_chips => zips.to_vec(),
+                cadence_label_title => &cadence_label_title,
+                cadence_pill => &cadence_pill,
+                manage_url => safe_html_url_val(&manage_url),
+                manage_cta_label => &manage_cta,
+                unsub_url => safe_html_url_val(&unsub_url),
+                unsub_cta_label => &unsub_cta,
+            })
+        })
+        .unwrap_or_else(|_| {
+            format!(
+                "<p>{}</p><p><a href=\"{}\">{}</a></p>",
+                encode_safe(&welcome_watching),
+                encode_safe(&unsub_url),
+                encode_safe(&unsub_cta),
+            )
+        });
+
+    AlertEmailPayload {
+        subject: welcome_subject,
+        text: text_body,
+        html: html_body,
+        unsubscribe_url: unsub_url,
+    }
+}
+
+pub fn build_manage_link_email_with_brand(
+    base_origin: &str,
+    manage_token: &str,
+    lang: &str,
+    brand_name: &str,
+    brand_domain: &str,
+) -> AlertEmailPayload {
+    let (origin, eff_brand, _eff_domain) =
+        resolve_origin_and_brand(base_origin, brand_name, brand_domain);
+    let manage_url = format!("{origin}/alerts?manage={}", urlencoding::encode(manage_token));
+
+    let lang_id = resolve_lang_str(lang);
+    let subject = t_brand(&lang_id, "email-manage-subject", &eff_brand);
+    let heading = t_brand(&lang_id, "email-manage-heading", &eff_brand);
+    let intro = t(&lang_id, "email-manage-intro");
+    let cta_label = t(&lang_id, "email-manage-cta");
+
+    let text_body = [
+        heading.clone(),
+        String::new(),
+        intro.clone(),
+        String::new(),
+        format!("{cta_label}: {manage_url}"),
+    ]
+    .join("\n");
+
+    let brand_wordmark = format_brand_wordmark_styled_html(&eff_brand, Some("color:#0f766e"));
+    let html_body = ALERT_EMAIL_JINJA_ENV
+        .get_template("manage_link.html")
+        .and_then(|tpl| {
+            tpl.render(context! {
+                html_lang => bcp47_code(&lang_id),
+                brand_wordmark => &brand_wordmark,
+                heading => &heading,
+                intro => &intro,
+                manage_url => safe_html_url_val(&manage_url),
+                cta_label => &cta_label,
+            })
+        })
+        .unwrap_or_else(|_| {
+            format!(
+                "<p>{}</p><p><a href=\"{}\">{}</a></p>",
+                encode_safe(&intro),
+                encode_safe(&manage_url),
+                encode_safe(&cta_label),
+            )
+        });
+
+    AlertEmailPayload {
+        subject,
+        text: text_body,
+        html: html_body,
+        unsubscribe_url: String::new(),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn render_home_digest_email(
     subscriber_name: Option<&str>,
     requirements_text: &str,
@@ -417,23 +627,10 @@ fn render_home_digest_email(
     heading_override: Option<&str>,
     frequency: Option<&str>,
 ) -> AlertEmailPayload {
-    let eff_brand = if brand_name.trim().is_empty() {
-        "Open Estate"
-    } else {
-        brand_name.trim()
-    };
-    let eff_domain = if brand_domain.trim().is_empty() {
-        "open-estate.local"
-    } else {
-        brand_domain.trim()
-    };
-    let default_base = format!("https://{eff_domain}");
+    let (origin, eff_brand_owned, _eff_domain) =
+        resolve_origin_and_brand(base_origin, brand_name, brand_domain);
+    let eff_brand = eff_brand_owned.as_str();
     let lang = resolve_lang_str(lang);
-    let origin = if base_origin.trim().is_empty() {
-        default_base.as_str()
-    } else {
-        base_origin.trim().trim_end_matches('/')
-    };
     let encoded_tok = urlencoding::encode(unsubscribe_token);
     let unsub_url = format!("{origin}/api/subscriptions/unsubscribe?token={encoded_tok}");
     let manage_url = format!("{origin}/alerts?token={encoded_tok}");
@@ -671,13 +868,11 @@ fn render_home_digest_email(
     text_lines.push(format!("{manage_cta}: {manage_url}"));
     text_lines.push(format!("{unsub_cta}: {unsub_url}"));
 
-    // Render HTML safely via `minijinja` `.html` auto-escaping template
-    let mut mj = Environment::new();
-    let _ = mj.add_template("match_alert.html", MATCH_ALERT_HTML_TPL);
+    // Render HTML safely via pre-compiled `minijinja` `.html` auto-escaping template
     let brand_wordmark = format_brand_wordmark_styled_html(eff_brand, Some("color:#0f766e"));
     let manage_url_val = safe_html_url_val(&manage_url);
     let unsub_url_val = safe_html_url_val(&unsub_url);
-    let html = mj
+    let html = ALERT_EMAIL_JINJA_ENV
         .get_template("match_alert.html")
         .and_then(|t_tpl| {
             t_tpl.render(context! {
@@ -908,35 +1103,29 @@ pub async fn create_subscription_with_profile_and_provider(
     }
     let parsed_filters_json = serde_json::to_string(&filters_val)?;
 
-    db.insert_ignore_row(
-        "subscriptions",
-        &[
-            ("id", id.clone().into()),
-            ("email", clean_email.clone().into()),
-            ("name", clean_name.clone().into()),
-            ("zips_json", zips_json.into()),
-            ("cities_json", cities_json.into()),
-            ("requirements_text", parsed.sanitized_query.clone().into()),
-            ("parsed_filters_json", parsed_filters_json.clone().into()),
-            ("notify_on_new", req.notify_on_new.into()),
-            ("notify_on_sold", req.notify_on_sold.into()),
-            ("active", 1_i64.into()),
-            ("unsubscribe_token", token.clone().into()),
-            ("last_notified_at", SqlParam::Null),
-            ("match_count", 0_i64.into()),
-            (
-                "filter_schema_version",
-                CURRENT_FILTER_SCHEMA_VERSION.into(),
-            ),
-            ("plan_tier", SqlParam::Null),
-            ("filters_refreshed_at", Some(now.clone()).into()),
-            ("frequency", frequency.into()),
-            ("digest_pending_json", SqlParam::Null),
-            ("created_at", now.clone().into()),
-            ("updated_at", now.clone().into()),
-        ],
-    )
-    .await?;
+    let new_sub_row = SubscriptionRow {
+        id: id.clone(),
+        email: clean_email.clone(),
+        name: clean_name.clone(),
+        zips_json,
+        cities_json: Some(cities_json),
+        requirements_text: parsed.sanitized_query.clone(),
+        parsed_filters_json: parsed_filters_json.clone(),
+        notify_on_new: i64::from(req.notify_on_new),
+        notify_on_sold: i64::from(req.notify_on_sold),
+        active: 1,
+        unsubscribe_token: token.clone(),
+        last_notified_at: None,
+        match_count: 0,
+        filter_schema_version: CURRENT_FILTER_SCHEMA_VERSION,
+        plan_tier: None,
+        filters_refreshed_at: Some(now.clone()),
+        frequency: frequency.to_string(),
+        digest_pending_json: None,
+        created_at: now.clone(),
+        updated_at: now.clone(),
+    };
+    db.upsert_subscription_normalized(&new_sub_row).await?;
 
     refresh_watched_zip_subscriber_counts(db, &final_zips).await?;
 
@@ -991,23 +1180,15 @@ pub async fn create_subscription_with_profile_and_provider(
     let welcome_delivery = if req.send_welcome_email && env.smtp_configured() {
         let brand_name = env.brand_name();
         let brand_dom = env.brand_domain();
-        let default_origin = format!("https://{brand_dom}");
-        let origin = if req.base_origin.trim().is_empty() {
-            default_origin.as_str()
-        } else {
-            req.base_origin.trim().trim_end_matches('/')
-        };
-        let encoded_tok = urlencoding::encode(&token);
-        let unsub_url = format!("{origin}/api/subscriptions/unsubscribe?token={encoded_tok}");
-        let manage_url = format!("{origin}/alerts?token={encoded_tok}");
-        let zips_str = final_zips.join(", ");
         let lang_code = sub_lang.code();
-        let lang_id = resolve_lang_str(lang_code);
 
-        let welcome_subject =
-            t_brand_args(&lang_id, "email-welcome-subject", &brand_name, &[("zips", &zips_str)]);
-
-        let email_req = if !initial_matches.is_empty() {
+        let payload = if !initial_matches.is_empty() {
+            let (origin, eff_brand, _eff_domain) =
+                resolve_origin_and_brand(&req.base_origin, &brand_name, &brand_dom);
+            let zips_str = final_zips.join(", ");
+            let lang_id = resolve_lang_str(lang_code);
+            let welcome_subject =
+                t_brand_args(&lang_id, "email-welcome-subject", &eff_brand, &[("zips", &zips_str)]);
             let homes_heading = t_args(
                 &lang_id,
                 "email-welcome-homes-heading",
@@ -1016,12 +1197,12 @@ pub async fn create_subscription_with_profile_and_provider(
                     ("zips", &zips_str),
                 ],
             );
-            let payload = render_home_digest_email(
+            render_home_digest_email(
                 clean_name.as_deref(),
                 &parsed.sanitized_query,
                 &final_zips,
                 &initial_matches,
-                origin,
+                &origin,
                 &token,
                 lang_code,
                 &brand_name,
@@ -1029,82 +1210,27 @@ pub async fn create_subscription_with_profile_and_provider(
                 Some(&welcome_subject),
                 Some(&homes_heading),
                 Some(frequency),
-            );
-            EmailRequest {
-                to: vec![clean_email.clone()],
-                subject: payload.subject,
-                text: Some(payload.text),
-                html: Some(payload.html),
-                reply_to: None,
-                unsubscribe_url: Some(payload.unsubscribe_url),
-            }
+            )
         } else {
-            let welcome_heading = t_brand(&lang_id, "email-welcome-heading", &brand_name);
-            let welcome_intro =
-                t_brand_args(&lang_id, "email-welcome-intro", &brand_name, &[("zips", &zips_str)]);
-            let welcome_watching =
-                t_args(&lang_id, "email-welcome-watching", &[("zips", &zips_str)]);
-            let manage_cta = t(&lang_id, "email-alert-manage-cta");
-            let unsub_cta = t(&lang_id, "email-welcome-unsub");
-            let zips_label = t(&lang_id, "email-welcome-zips-label");
-            let cadence_label_title = t(&lang_id, "email-welcome-cadence-label");
-            let cadence_pill = cadence_label_for_lang(&lang_id, frequency);
-            let greeting = match clean_name.as_deref() {
-                Some(nm) => t_args(&lang_id, "email-alert-greeting-named", &[("name", nm)]),
-                None => t(&lang_id, "email-alert-greeting-anon"),
-            };
+            build_welcome_confirm_email_with_brand(
+                clean_name.as_deref(),
+                &final_zips,
+                frequency,
+                &req.base_origin,
+                &token,
+                lang_code,
+                &brand_name,
+                &brand_dom,
+            )
+        };
 
-            let text_body = [
-                greeting,
-                String::new(),
-                welcome_intro,
-                format!("{zips_label}: {zips_str}"),
-                format!("{cadence_label_title}: {cadence_pill}"),
-                String::new(),
-                format!("{manage_cta}: {manage_url}"),
-                format!("{unsub_cta}: {unsub_url}"),
-            ]
-            .join("\n");
-
-            let mut mj = Environment::new();
-            let _ = mj.add_template("welcome_confirm.html", WELCOME_CONFIRM_HTML_TPL);
-            let brand_wordmark =
-                format_brand_wordmark_styled_html(&brand_name, Some("color:#0f766e"));
-            let html_body = mj
-                .get_template("welcome_confirm.html")
-                .and_then(|t_tpl| {
-                    t_tpl.render(context! {
-                        html_lang => bcp47_code(&lang_id),
-                        brand_wordmark => &brand_wordmark,
-                        welcome_heading => &welcome_heading,
-                        welcome_watching => &welcome_watching,
-                        zips_label => &zips_label,
-                        zip_chips => &final_zips,
-                        cadence_label_title => &cadence_label_title,
-                        cadence_pill => &cadence_pill,
-                        manage_url => safe_html_url_val(&manage_url),
-                        manage_cta_label => &manage_cta,
-                        unsub_url => safe_html_url_val(&unsub_url),
-                        unsub_cta_label => &unsub_cta,
-                    })
-                })
-                .unwrap_or_else(|_| {
-                    format!(
-                        "<p>{}</p><p><a href=\"{}\">{}</a></p>",
-                        encode_safe(&welcome_watching),
-                        encode_safe(&unsub_url),
-                        encode_safe(&unsub_cta),
-                    )
-                });
-
-            EmailRequest {
-                to: vec![clean_email.clone()],
-                subject: welcome_subject,
-                text: Some(text_body),
-                html: Some(html_body),
-                reply_to: None,
-                unsubscribe_url: Some(unsub_url),
-            }
+        let email_req = EmailRequest {
+            to: vec![clean_email.clone()],
+            subject: payload.subject,
+            text: Some(payload.text),
+            html: Some(payload.html),
+            reply_to: None,
+            unsubscribe_url: Some(payload.unsubscribe_url),
         };
 
         match send_smtp_email(env, &email_req).await {
@@ -1243,59 +1369,20 @@ pub async fn create_and_send_manage_link(
 
     let brand_name = env.brand_name();
     let brand_dom = env.brand_domain();
-    let default_origin = format!("https://{brand_dom}");
-    let origin = if base_origin.trim().is_empty() {
-        default_origin.as_str()
-    } else {
-        base_origin.trim().trim_end_matches('/')
-    };
-    let manage_url = format!("{origin}/alerts?manage={}", urlencoding::encode(&manage_token));
-
-    let lang_id = resolve_lang_str(lang);
-    let subject = t_brand(&lang_id, "email-manage-subject", &brand_name);
-    let heading = t_brand(&lang_id, "email-manage-heading", &brand_name);
-    let intro = t(&lang_id, "email-manage-intro");
-    let cta_label = t(&lang_id, "email-manage-cta");
-
-    let text_body = [
-        heading.clone(),
-        String::new(),
-        intro.clone(),
-        String::new(),
-        format!("{cta_label}: {manage_url}"),
-    ]
-    .join("\n");
-
-    let mut mj = Environment::new();
-    let _ = mj.add_template("manage_link.html", MANAGE_LINK_HTML_TPL);
-    let brand_wordmark = format_brand_wordmark_styled_html(&brand_name, Some("color:#0f766e"));
-    let html_body = mj
-        .get_template("manage_link.html")
-        .and_then(|tpl| {
-            tpl.render(context! {
-                html_lang => bcp47_code(&lang_id),
-                brand_wordmark => &brand_wordmark,
-                heading => &heading,
-                intro => &intro,
-                manage_url => safe_html_url_val(&manage_url),
-                cta_label => &cta_label,
-            })
-        })
-        .unwrap_or_else(|_| {
-            format!(
-                "<p>{}</p><p><a href=\"{}\">{}</a></p>",
-                encode_safe(&intro),
-                encode_safe(&manage_url),
-                encode_safe(&cta_label),
-            )
-        });
+    let email_payload = build_manage_link_email_with_brand(
+        base_origin,
+        &manage_token,
+        lang,
+        &brand_name,
+        &brand_dom,
+    );
 
     if env.smtp_configured() {
         let email_req = EmailRequest {
             to: vec![clean_email],
-            subject,
-            text: Some(text_body),
-            html: Some(html_body),
+            subject: email_payload.subject,
+            text: Some(email_payload.text),
+            html: Some(email_payload.html),
             reply_to: None,
             unsubscribe_url: None,
         };
@@ -1410,13 +1497,14 @@ async fn check_free_active_alert_quota(
     if !email_norm.contains('@') {
         return Ok(None);
     }
-    let existing = db
-        .fetch_subscriptions_sql(
-            "SELECT * FROM subscriptions WHERE active = 1 AND LOWER(email) = LOWER(?)",
-            &[email_norm.into()],
+    let active_count = db
+        .fetch_scalar_i64(
+            "SELECT COUNT(*) AS cnt FROM subscriptions WHERE active = 1 AND LOWER(email) = LOWER(?)",
+            &[SqlParam::from(email_norm.as_str())],
+            "cnt",
         )
-        .await?;
-    let active_count = existing.len() as u32;
+        .await?
+        .max(0) as u32;
     if active_count >= max_free_alerts {
         let upgrade_url = env
             .get("UPGRADE_URL")
@@ -1543,40 +1631,29 @@ async fn apply_subscription_patch(
         sub.digest_pending_json.clone()
     };
 
-    db.execute_params(
-        "UPDATE subscriptions
-         SET name = ?,
-             zips_json = ?,
-             cities_json = ?,
-             requirements_text = ?,
-             parsed_filters_json = ?,
-             notify_on_new = ?,
-             notify_on_sold = ?,
-             active = ?,
-             frequency = ?,
-             digest_pending_json = ?,
-             filter_schema_version = ?,
-             filters_refreshed_at = ?,
-             updated_at = ?
-         WHERE id = ?",
-        &[
-            next_name.into(),
-            next_zips_json.into(),
-            next_cities_json.into(),
-            next_requirements.into(),
-            next_filters_json.into(),
-            next_notify_new.into(),
-            next_notify_sold.into(),
-            next_active.into(),
-            next_frequency.into(),
-            next_digest_pending.into(),
-            next_schema_version.into(),
-            next_refreshed_at.into(),
-            now.into(),
-            sub.id.as_str().into(),
-        ],
-    )
-    .await?;
+    let updated_sub = SubscriptionRow {
+        id: sub.id.clone(),
+        email: sub.email.clone(),
+        name: next_name,
+        zips_json: next_zips_json,
+        cities_json: Some(next_cities_json),
+        requirements_text: next_requirements,
+        parsed_filters_json: next_filters_json,
+        notify_on_new: i64::from(next_notify_new),
+        notify_on_sold: i64::from(next_notify_sold),
+        active: i64::from(next_active),
+        unsubscribe_token: sub.unsubscribe_token.clone(),
+        last_notified_at: sub.last_notified_at.clone(),
+        match_count: sub.match_count,
+        filter_schema_version: next_schema_version,
+        plan_tier: sub.plan_tier.clone(),
+        filters_refreshed_at: next_refreshed_at,
+        frequency: next_frequency,
+        digest_pending_json: next_digest_pending,
+        created_at: sub.created_at.clone(),
+        updated_at: now,
+    };
+    db.upsert_subscription_normalized(&updated_sub).await?;
 
     let mut touched_zips = old_zips;
     for z in &next_zips {
@@ -1817,12 +1894,7 @@ pub async fn unsubscribe_by_token(db: &DbStore, raw_token: &str) -> Result<Value
         return Ok(json!({ "ok": false, "found": false }));
     };
 
-    let now = now_iso();
-    db.execute_params(
-        "UPDATE subscriptions SET active = 0, updated_at = ? WHERE id = ?",
-        &[now.into(), row.id.as_str().into()],
-    )
-    .await?;
+    db.set_subscription_active(&row.id, false).await?;
 
     let zips: Vec<String> = serde_json::from_str(&row.zips_json).unwrap_or_default();
     refresh_watched_zip_subscriber_counts(db, &zips).await?;
@@ -2154,12 +2226,18 @@ fn listing_matches_structured_criteria(l: &ListingRow, f: &SearchFilters) -> boo
         }
     }
     if !f.required_tags.is_empty() {
+        let (l_tag_bits, _, _) = proto::compute_listing_tag_bits(l);
         let tags_lc = l.tags_json.as_deref().unwrap_or("").to_ascii_lowercase();
         let feat_lc = l.features_text.as_deref().unwrap_or("").to_ascii_lowercase();
         for tag in &f.required_tags {
             let clean = tag.trim().to_ascii_lowercase().replace(' ', "_");
             if clean.is_empty() {
                 continue;
+            }
+            if let Some(ft) = proto::feature_tag_from_slug(&clean) {
+                if (l_tag_bits & proto::feature_tag_bit(ft)) != 0 {
+                    continue;
+                }
             }
             let words = clean.replace('_', " ");
             if !tags_lc.contains(&clean) && !feat_lc.contains(&words) {
@@ -2208,38 +2286,347 @@ fn merge_digest_items(
     merged
 }
 
-fn parse_rfc3339_or_sqlite_utc(raw: &str) -> Option<chrono::DateTime<chrono::Utc>> {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(trimmed) {
-        return Some(dt.with_timezone(&chrono::Utc));
-    }
-    if let Ok(ndt) = chrono::NaiveDateTime::parse_from_str(trimmed, "%Y-%m-%d %H:%M:%S") {
-        return Some(chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(
-            ndt,
-            chrono::Utc,
-        ));
-    }
-    None
-}
-
-fn is_subscription_digest_due(sub: &SubscriptionRow, now_dt: chrono::DateTime<chrono::Utc>) -> bool {
-    let interval = frequency_interval_secs(&sub.frequency);
+fn is_subscription_digest_due_ts(
+    freq_code: i32,
+    last_notified_ts: Option<i64>,
+    created_ts: i64,
+    now_ts: i64,
+) -> bool {
+    let interval = match freq_code {
+        2 => 86_400_i64,
+        3 => 604_800_i64,
+        _ => 0_i64,
+    };
     if interval <= 0 {
         return true;
     }
-    let anchor = sub
-        .last_notified_at
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .unwrap_or(sub.created_at.as_str());
-    let Some(anchor_dt) = parse_rfc3339_or_sqlite_utc(anchor) else {
+    let anchor_ts = last_notified_ts.unwrap_or(created_ts);
+    if anchor_ts <= 0 {
         return true;
+    }
+    now_ts.saturating_sub(anchor_ts) >= interval
+}
+
+/// Reconstructs `(SearchFilters, Option<Profile>, is_explicit_profile, Lang)` directly from
+/// a normalized `SubscriptionCoreProto` with zero JSON round-tripping on standard rows.
+fn search_filters_and_profile_from_proto(
+    core: &SubscriptionCoreProto,
+) -> (SearchFilters, Option<Profile>, bool, Lang) {
+    let mut statuses = Vec::new();
+    if (core.status_mask & 1) != 0 {
+        statuses.push("for_sale".to_string());
+    }
+    if (core.status_mask & 2) != 0 {
+        statuses.push("pending".to_string());
+    }
+    if (core.status_mask & 4) != 0 {
+        statuses.push("sold".to_string());
+    }
+    if (core.status_mask & 8) != 0 {
+        statuses.push("off_market".to_string());
+    }
+    if statuses.is_empty() {
+        statuses.push("for_sale".to_string());
+    }
+
+    let mut prop_types = Vec::new();
+    for code in 1..=6 {
+        if (core.property_cat_mask & (1 << code)) != 0 {
+            if let Some(lbl) = proto::property_category_from_code(code) {
+                prop_types.push(lbl.to_string());
+            }
+        }
+    }
+
+    let mut must_have_keywords = Vec::new();
+    let mut nice_to_have_keywords = Vec::new();
+    let mut deal_breakers = Vec::new();
+    let mut internet_carriers = Vec::new();
+    let mut electric_carriers = Vec::new();
+    let mut states = Vec::new();
+    let mut flags: HashSet<&str> = HashSet::new();
+    let mut architectural_styles = Vec::new();
+    let mut required_tags = Vec::new();
+
+    for kw in &core.keywords {
+        match kw.term_kind {
+            1 => must_have_keywords.push(kw.term_value.clone()),
+            2 => nice_to_have_keywords.push(kw.term_value.clone()),
+            3 => deal_breakers.push(kw.term_value.clone()),
+            4 => internet_carriers.push(kw.term_value.clone()),
+            5 => electric_carriers.push(kw.term_value.clone()),
+            6 => {
+                flags.insert(kw.term_value.as_str());
+            }
+            7 => states.push(kw.term_value.clone()),
+            8 => architectural_styles.push(kw.term_value.clone()),
+            9 => required_tags.push(kw.term_value.clone()),
+            _ => {}
+        }
+    }
+
+    let filters = SearchFilters {
+        on_topic: !flags.contains("off_topic"),
+        intent_summary: core
+            .intent_summary
+            .clone()
+            .unwrap_or_else(|| "Parsed criteria".to_string()),
+        schema_version: Some(core.filter_schema_version as i64),
+        zips: core.zips.clone(),
+        cities: core.cities.clone(),
+        states,
+        statuses,
+        min_price: core.min_price,
+        max_price: core.max_price,
+        min_beds: core.min_beds,
+        max_beds: core.max_beds,
+        min_baths: core.min_baths,
+        min_sqft: core.min_sqft.map(i64::from),
+        max_sqft: core.max_sqft.map(i64::from),
+        min_lot_sqft: core.min_lot_sqft.map(i64::from),
+        min_year_built: core.min_year_built.map(i64::from),
+        max_year_built: core.max_year_built.map(i64::from),
+        stories: core.stories.map(i64::from),
+        property_types: prop_types,
+        max_hoa_monthly: core.max_hoa_monthly.map(i64::from),
+        min_school_score: core.min_school_score,
+        min_school_grade: proto::school_grade_from_code(core.min_school_grade),
+        must_have_keywords,
+        nice_to_have_keywords,
+        deal_breakers,
+        fair_housing_notice: core.fair_housing_notice.clone(),
+        exclude_high_flood_risk: flags.contains("exclude_high_flood_risk")
+            || (core.excluded_tag_bits & proto::feature_tag_bit(FeatureTag::InSfhaFlood)) != 0,
+        exclude_high_wildfire_risk: flags.contains("exclude_high_wildfire_risk")
+            || (core.excluded_tag_bits & proto::feature_tag_bit(FeatureTag::HighWildfire)) != 0,
+        fiber_only: flags.contains("fiber_only")
+            || (core.required_tag_bits & proto::feature_tag_bit(FeatureTag::FiberAvailable)) != 0,
+        high_speed_internet_only: flags.contains("high_speed_internet_only"),
+        min_download_mbps: core.min_download_mbps.map(i64::from),
+        internet_carriers,
+        electric_carriers,
+        municipal_electric_only: flags.contains("municipal_electric_only")
+            || (core.required_tag_bits & proto::feature_tag_bit(FeatureTag::MunicipalElectric))
+                != 0,
+        max_electric_rate_kwh: core.max_electric_rate_kwh,
+        municipal_water_only: flags.contains("municipal_water_only"),
+        municipal_sewer_only: flags.contains("municipal_sewer_only"),
+        max_monthly_utilities: core.max_monthly_utilities.map(i64::from),
+        max_all_in_monthly: core.max_all_in_monthly.map(i64::from),
+        exclude_special_tax: flags.contains("exclude_special_tax")
+            || (core.excluded_tag_bits & proto::feature_tag_bit(FeatureTag::HasSpecialTax)) != 0,
+        has_solar: flags.contains("has_solar")
+            || (core.required_tag_bits & proto::feature_tag_bit(FeatureTag::Solar)) != 0,
+        has_ev_charger: flags.contains("has_ev_charger")
+            || (core.required_tag_bits & proto::feature_tag_bit(FeatureTag::EvCharger)) != 0,
+        has_heat_pump: flags.contains("has_heat_pump")
+            || (core.required_tag_bits & proto::feature_tag_bit(FeatureTag::HeatPump)) != 0,
+        has_adu: flags.contains("has_adu")
+            || (core.required_tag_bits & proto::feature_tag_bit(FeatureTag::Adu)) != 0,
+        adu_feasible: flags.contains("adu_feasible")
+            || (core.required_tag_bits & proto::feature_tag_bit(FeatureTag::AduFeasible)) != 0,
+        has_pool: flags.contains("has_pool")
+            || (core.required_tag_bits & proto::feature_tag_bit(FeatureTag::Pool)) != 0,
+        min_garage_spaces: core.min_garage_spaces,
+        architectural_styles,
+        min_safety_score: core.min_safety_score,
+        has_hardwood_floors: flags.contains("has_hardwood_floors")
+            || (core.required_tag_bits & proto::feature_tag_bit(FeatureTag::HardwoodFloors)) != 0,
+        has_updated_kitchen: flags.contains("has_updated_kitchen")
+            || (core.required_tag_bits & proto::feature_tag_bit(FeatureTag::UpdatedKitchen)) != 0,
+        remodeled_only: flags.contains("remodeled_only")
+            || (core.required_tag_bits & proto::feature_tag_bit(FeatureTag::Remodeled)) != 0,
+        quiet_street_only: flags.contains("quiet_street_only")
+            || (core.required_tag_bits & proto::feature_tag_bit(FeatureTag::QuietStreet)) != 0,
+        max_noise_db: core.max_noise_db,
+        max_seismic_pga: core.max_seismic_pga,
+        required_tags,
+        sort_by: core
+            .sort_by
+            .clone()
+            .unwrap_or_else(|| "best_match".to_string()),
     };
-    now_dt.signed_duration_since(anchor_dt).num_seconds() >= interval
+
+    let lang = match core.lang_code {
+        2 => Lang::parse("zh-CN"),
+        3 => Lang::parse("es"),
+        _ => Lang::En,
+    };
+
+    if core.has_explicit_profile {
+        if let Some(ref up) = core.profile {
+            let prof = proto::buyer_profile_from_proto(up);
+            return (filters, Some(prof), true, lang);
+        }
+    }
+
+    let req_trim = core.requirements_text.trim();
+    if req_trim.starts_with('{') {
+        if let Ok(rv) = serde_json::from_str::<Value>(req_trim) {
+            let inner = rv
+                .get("profileJson")
+                .or_else(|| rv.get("profile_json"))
+                .or_else(|| rv.get("profile"))
+                .unwrap_or(&rv);
+            if let Some(p) = parse_profile_value(inner) {
+                return (filters, Some(p), true, lang);
+            }
+        }
+    }
+
+    let fallback = profile_from_search_filters(&filters);
+    (filters, fallback, false, lang)
+}
+
+fn enrich_factors_from_report_header(hf: &mut HomeFactors, hdr: &ReportHeaderProto) {
+    if hf.cost.monthly_total.is_none() {
+        if let Some(mt) = hdr.all_in_monthly.filter(|&m| m > 0) {
+            hf.cost.monthly_total = Some(Factor::new(
+                mt as f64,
+                "Open Estate cached report header",
+                Grade::Report,
+            ));
+        }
+    }
+    if hf.cost.price.is_none() {
+        if let Some(ev) = hdr.estimated_value.or(hdr.list_price).filter(|&p| p > 0) {
+            hf.cost.price = Some(Factor::new(
+                ev as f64,
+                "Open Estate cached report header",
+                Grade::Report,
+            ));
+        }
+    }
+}
+
+/// Batches `listing_sk` resolution + typed `get_home_factors_by_sk_batch` + narrow
+/// `get_report_headers_batch` fallback across all candidate listings (ZERO N+1 `get_cached_report`).
+async fn prefetch_factors_for_listings(
+    db: &DbStore,
+    listings: &[&ListingRow],
+) -> Result<(HashMap<String, i64>, HashMap<String, HomeFactors>)> {
+    if listings.is_empty() {
+        return Ok((HashMap::new(), HashMap::new()));
+    }
+
+    let mut seen_ids = HashSet::with_capacity(listings.len());
+    let mut unique_listings: Vec<&ListingRow> = Vec::with_capacity(listings.len());
+    for &l in listings {
+        let id = l.id.trim();
+        if !id.is_empty() && seen_ids.insert(id.to_string()) {
+            unique_listings.push(l);
+        }
+    }
+    if unique_listings.is_empty() {
+        return Ok((HashMap::new(), HashMap::new()));
+    }
+
+    let mut sk_by_id: HashMap<String, i64> = HashMap::with_capacity(unique_listings.len());
+    let ext_ids: Vec<&str> = unique_listings.iter().map(|l| l.id.trim()).collect();
+    for chunk in ext_ids.chunks(200) {
+        let ph = vec!["?"; chunk.len()].join(", ");
+        let sql = format!(
+            "SELECT external_id, listing_sk FROM listings WHERE external_id IN ({ph})"
+        );
+        let params: Vec<SqlParam> = chunk.iter().map(|&id| SqlParam::from(id)).collect();
+        let pairs = db
+            .fetch_all_mapped_raw(&sql, &params, |r| {
+                (
+                    r.opt_str("external_id").unwrap_or_default(),
+                    r.opt_i64("listing_sk").unwrap_or(0),
+                )
+            })
+            .await
+            .unwrap_or_default();
+        for (ext, sk) in pairs {
+            if !ext.is_empty() && sk > 0 {
+                sk_by_id.insert(ext, sk);
+            }
+        }
+    }
+
+    let mut all_sks: Vec<i64> = Vec::with_capacity(unique_listings.len());
+    for l in &unique_listings {
+        let sk = *sk_by_id
+            .entry(l.id.clone())
+            .or_insert_with(|| deterministic_sk(l.id.trim()));
+        if sk > 0 {
+            all_sks.push(sk);
+        }
+    }
+
+    let sk_factors = db
+        .get_home_factors_by_sk_batch(&all_sks)
+        .await
+        .unwrap_or_default();
+
+    let mut missing_slugs: Vec<String> = Vec::new();
+    let mut seen_slugs: HashSet<String> = HashSet::new();
+    for l in &unique_listings {
+        let sk = sk_by_id.get(&l.id).copied().unwrap_or(0);
+        if !sk_factors.contains_key(&sk) {
+            if let Some(slug) = l
+                .report_slug
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                if seen_slugs.insert(slug.to_string()) {
+                    missing_slugs.push(slug.to_string());
+                }
+            }
+        }
+    }
+
+    let headers_by_slug = if missing_slugs.is_empty() {
+        HashMap::new()
+    } else {
+        db.get_report_headers_batch(&missing_slugs)
+            .await
+            .unwrap_or_default()
+    };
+
+    let factors_sec_bit = 1_i32 << (ReportSectionKind::ReportSectionFactors as u32);
+    let mut factors_by_id: HashMap<String, HomeFactors> =
+        HashMap::with_capacity(unique_listings.len());
+
+    for l in unique_listings {
+        let sk = sk_by_id.get(&l.id).copied().unwrap_or(0);
+        let mut hf = if let Some(cached) = sk_factors.get(&sk) {
+            cached.clone()
+        } else if let Some(hdr) = l
+            .report_slug
+            .as_deref()
+            .map(str::trim)
+            .and_then(|s| headers_by_slug.get(s))
+        {
+            let mut from_sec: Option<HomeFactors> = None;
+            if (hdr.section_mask & factors_sec_bit) != 0 {
+                if let Ok(Some(sec_env)) = db
+                    .get_report_section(&hdr.slug, ReportSectionKind::ReportSectionFactors)
+                    .await
+                {
+                    if let Ok(val) = extract_section_json(&sec_env) {
+                        from_sec = serde_json::from_value::<HomeFactors>(val).ok();
+                    }
+                }
+            }
+            if let Some(parsed_hf) = from_sec {
+                parsed_hf
+            } else {
+                let mut fallback_hf = home_factors_from_listing(l);
+                enrich_factors_from_report_header(&mut fallback_hf, hdr);
+                fallback_hf
+            }
+        } else {
+            home_factors_from_listing(l)
+        };
+
+        apply_listing_price_override(&mut hf, l);
+        factors_by_id.insert(l.id.clone(), hf);
+    }
+
+    Ok((sk_by_id, factors_by_id))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2250,6 +2637,7 @@ async fn score_listing_events_for_subscription(
     sub_id: &str,
     sub_requirements: &str,
     sub_zips: &[String],
+    sub_cities: &[String],
     filters: &SearchFilters,
     notify_on_new: bool,
     notify_on_sold: bool,
@@ -2258,12 +2646,23 @@ async fn score_listing_events_for_subscription(
     lang: Lang,
     events: &[ListingChangeEvent],
     skip_event_key_dedup: bool,
+    already_sent_keys: Option<&HashSet<String>>,
+    prefetched_factors: Option<&HashMap<String, HomeFactors>>,
     allow_llm_explain: bool,
 ) -> Result<(Vec<AlertMatchedItem>, bool)> {
     let mut eligible: Vec<(&ListingChangeEvent, String)> = Vec::new();
     for ch in events {
         let l = &ch.listing;
-        if !sub_zips.contains(&l.zip) {
+        let zip_match = sub_zips.contains(&l.zip);
+        let city_match = !sub_cities.is_empty()
+            && l.city
+                .as_deref()
+                .map(|c| {
+                    let cn = c.trim();
+                    sub_cities.iter().any(|sc| sc.eq_ignore_ascii_case(cn))
+                })
+                .unwrap_or(false);
+        if !zip_match && !city_match {
             continue;
         }
         let is_sold_ev = ch.event_type == "sold" || l.status == "sold";
@@ -2281,8 +2680,15 @@ async fn score_listing_events_for_subscription(
             l.status,
             l.price.unwrap_or(0)
         );
-        if !skip_event_key_dedup && db.has_notification_event_key(&event_key).await? {
-            continue;
+        if !skip_event_key_dedup {
+            let exists = if let Some(sent_set) = already_sent_keys {
+                sent_set.contains(&event_key)
+            } else {
+                db.has_notification_event_key(&event_key).await?
+            };
+            if exists {
+                continue;
+            }
         }
 
         if !is_explicit_profile && !listing_matches_structured_criteria(l, filters) {
@@ -2311,11 +2717,14 @@ async fn score_listing_events_for_subscription(
     let mut used_profile_scoring = false;
 
     if let Some(profile) = profile_opt {
-        let eligible_ids: Vec<String> = eligible.iter().map(|(ch, _)| ch.listing.id.clone()).collect();
-        let cached_factors = db
-            .get_listing_factors_batch(&eligible_ids)
-            .await
-            .unwrap_or_default();
+        let owned_factors_map = if prefetched_factors.is_none() {
+            let refs: Vec<&ListingRow> = eligible.iter().map(|(ch, _)| &ch.listing).collect();
+            let (_, fmap) = prefetch_factors_for_listings(db, &refs).await?;
+            Some(fmap)
+        } else {
+            None
+        };
+        let factor_lookup = prefetched_factors.or(owned_factors_map.as_ref());
 
         let mut factors_vec = Vec::with_capacity(eligible.len());
         let mut by_id: HashMap<String, (&ListingChangeEvent, String)> =
@@ -2324,18 +2733,9 @@ async fn score_listing_events_for_subscription(
 
         for (ch, event_key) in &eligible {
             let l = &ch.listing;
-            let mut hf = if let Some(lf_row) = cached_factors.get(&l.id) {
-                serde_json::from_str::<HomeFactors>(&lf_row.factors_json)
-                    .unwrap_or_else(|_| home_factors_from_listing(l))
-            } else if let Some(ref slug) = l.report_slug {
-                if let Ok(Some(rec)) = db.get_cached_report(slug).await {
-                    HomeFactors::from_report(&rec.report)
-                } else {
-                    home_factors_from_listing(l)
-                }
-            } else {
-                home_factors_from_listing(l)
-            };
+            let mut hf = factor_lookup
+                .and_then(|m| m.get(&l.id).cloned())
+                .unwrap_or_else(|| home_factors_from_listing(l));
             apply_listing_price_override(&mut hf, l);
             if let (Some(la), Some(lo)) = (l.lat, l.lon) {
                 let pt = LatLon::new(la, lo);
@@ -2653,10 +3053,7 @@ async fn query_matching_listings_for_subscription(
         f
     };
 
-    let compiled = compile_filters_to_sql(&sql_filters, db.dialect(), false, Some(&statuses), 100);
-    let rows = db
-        .fetch_listings_sql(&compiled.sql, &compiled.params)
-        .await?;
+    let (_, rows) = search_listings_narrow(db, &sql_filters, false, Some(&statuses), 100).await?;
     if rows.is_empty() {
         return Ok(Vec::new());
     }
@@ -2690,6 +3087,7 @@ async fn query_matching_listings_for_subscription(
         sub_id,
         "",
         sub_zips,
+        &[],
         filters,
         notify_on_new,
         notify_on_sold,
@@ -2698,6 +3096,8 @@ async fn query_matching_listings_for_subscription(
         lang,
         &events,
         true,
+        None,
+        None,
         false,
     )
     .await?;
@@ -2705,33 +3105,25 @@ async fn query_matching_listings_for_subscription(
     Ok(items)
 }
 
-async fn dispatch_subscription_alert_email(
-    db: &DbStore,
+async fn render_and_deliver_subscription_email(
     env: &EnvConfig,
-    sub: &SubscriptionRow,
+    core: &SubscriptionCoreProto,
+    lang: Lang,
     matched_items: &[AlertMatchedItem],
     base_origin: &str,
-) -> Result<(String, Option<String>, bool, usize)> {
-    let sub_zips: Vec<String> = serde_json::from_str(&sub.zips_json).unwrap_or_default();
-    let filters: SearchFilters =
-        serde_json::from_str(&sub.parsed_filters_json).unwrap_or_default();
-    let (_, _, lang) = extract_subscription_profile(
-        &sub.parsed_filters_json,
-        &sub.requirements_text,
-        &filters,
-    );
-    let freq = normalize_frequency(&sub.frequency);
+) -> (String, Option<String>, bool, String) {
+    let freq = proto::subscription_freq_from_code(core.frequency);
     let freq_opt = if freq == "instant" { None } else { Some(freq) };
 
     let brand_name = env.brand_name();
     let brand_dom = env.brand_domain();
     let email_payload = render_home_digest_email(
-        sub.name.as_deref(),
-        &sub.requirements_text,
-        &sub_zips,
+        core.subscriber_name.as_deref(),
+        &core.requirements_text,
+        &core.zips,
         matched_items,
         base_origin,
-        &sub.unsubscribe_token,
+        &core.unsubscribe_token,
         lang.code(),
         &brand_name,
         &brand_dom,
@@ -2745,7 +3137,7 @@ async fn dispatch_subscription_alert_email(
     let mut email_sent = false;
     if env.smtp_configured() {
         let mail_req = EmailRequest {
-            to: vec![sub.email.clone()],
+            to: vec![core.email.clone()],
             subject: email_payload.subject.clone(),
             text: Some(email_payload.text.clone()),
             html: Some(email_payload.html.clone()),
@@ -2764,49 +3156,49 @@ async fn dispatch_subscription_alert_email(
         }
     }
 
-    let now = now_iso();
     let subj_short: String = email_payload.subject.chars().take(250).collect();
-    let mut recorded = 0_usize;
+    (delivery_status, delivery_error, email_sent, subj_short)
+}
+
+fn build_notification_protos_for_items(
+    core: &SubscriptionCoreProto,
+    matched_items: &[AlertMatchedItem],
+    sk_by_id: &HashMap<String, i64>,
+    subj_short: &str,
+    delivery_status: &str,
+    delivery_error: Option<&str>,
+    sent_ts: i64,
+    out: &mut Vec<SubscriptionNotificationProto>,
+) {
+    let deliv_code = proto::delivery_status_to_code(delivery_status);
+    let err_str = delivery_error.map(ToOwned::to_owned);
     for item in matched_items {
         let lid = str_from_val(item.listing.get("id")).unwrap_or_default();
-        db.insert_ignore_row(
-            "subscription_notifications",
-            &[
-                ("id", Uuid::new_v4().to_string().into()),
-                ("subscription_id", sub.id.clone().into()),
-                ("listing_id", lid.into()),
-                ("event_key", item.event_key.clone().into()),
-                ("email_to", sub.email.clone().into()),
-                ("subject", subj_short.clone().into()),
-                ("match_score", item.match_score.into()),
-                ("match_reason", Some(item.why_it_matches.clone()).into()),
-                ("delivery_status", delivery_status.clone().into()),
-                ("delivery_error", delivery_error.clone().into()),
-                ("sent_at", now.clone().into()),
-            ],
-        )
-        .await?;
-        recorded += 1;
+        let lsk = sk_by_id
+            .get(&lid)
+            .copied()
+            .unwrap_or_else(|| deterministic_sk(&lid));
+        let pub_id = Uuid::new_v4().to_string();
+        let notif_sk = deterministic_sk(&pub_id);
+        let reason_short: String = item.why_it_matches.chars().take(512).collect();
+        out.push(SubscriptionNotificationProto {
+            notification_sk: notif_sk,
+            public_id: pub_id,
+            subscription_sk: core.subscription_sk,
+            subscription_public_id: core.public_id.clone(),
+            listing_sk: lsk,
+            listing_external_id: lid,
+            email_to: core.email.clone(),
+            subject: subj_short.to_string(),
+            event_kind: proto::listing_event_to_code(&item.event_type),
+            event_key: item.event_key.chars().take(200).collect(),
+            match_score: Some(item.match_score as i32),
+            match_reason: Some(reason_short),
+            delivery_status: deliv_code,
+            delivery_error: err_str.clone(),
+            sent_ts,
+        });
     }
-
-    let next_match_cnt = sub.match_count + (matched_items.len() as i64);
-    db.execute_params(
-        "UPDATE subscriptions
-         SET last_notified_at = ?,
-             match_count = ?,
-             digest_pending_json = NULL,
-             updated_at = ?
-         WHERE id = ?",
-        &[
-            now.clone().into(),
-            next_match_cnt.into(),
-            now.into(),
-            sub.id.as_str().into(),
-        ],
-    )
-    .await?;
-
-    Ok((delivery_status, delivery_error, email_sent, recorded))
 }
 
 pub async fn evaluate_alerts_for_listings(
@@ -2827,10 +3219,9 @@ pub async fn evaluate_alerts_for_listings(
         }));
     }
 
-    let active_subs = db
-        .fetch_subscriptions_sql("SELECT * FROM subscriptions WHERE active = 1", &[])
-        .await?;
-    if active_subs.is_empty() {
+    // Q4_subs_scan: indexed SQL join over `subscription_zips` + `subscription_cities` + scalar bounds
+    let candidates = db.match_subscriptions_for_events(changed_listings).await?;
+    if candidates.is_empty() {
         return Ok(json!({
             "subscriptionsChecked": 0,
             "notificationsTriggered": 0,
@@ -2840,37 +3231,88 @@ pub async fn evaluate_alerts_for_listings(
         }));
     }
 
+    // Q4_fanout step 1: batch-dedup all candidate `event_key`s in ONE SQL query
+    let mut all_candidate_keys: Vec<String> = Vec::new();
+    let mut seen_cand_keys: HashSet<String> = HashSet::new();
+    let mut matched_id_set_all: HashSet<String> = HashSet::new();
+
+    for cand in &candidates {
+        let sub_id = &cand.subscription.public_id;
+        let cand_ids: HashSet<&str> = cand.matched_listing_ids.iter().map(String::as_str).collect();
+        for ev in changed_listings {
+            if cand_ids.contains(ev.listing.id.as_str()) {
+                matched_id_set_all.insert(ev.listing.id.clone());
+                let ek = format!(
+                    "{}:{}:{}:{}",
+                    sub_id,
+                    ev.listing.id,
+                    ev.listing.status,
+                    ev.listing.price.unwrap_or(0)
+                );
+                if seen_cand_keys.insert(ek.clone()) {
+                    all_candidate_keys.push(ek);
+                }
+            }
+        }
+    }
+
+    let already_sent = db
+        .filter_existing_notification_event_keys(&all_candidate_keys)
+        .await?;
+
+    // Q4_fanout step 2: batch-prefetch typed `HomeFactors` + `ReportHeaderProto` ONCE across all candidate listings
+    let candidate_listing_refs: Vec<&ListingRow> = changed_listings
+        .iter()
+        .filter(|ev| matched_id_set_all.contains(&ev.listing.id))
+        .map(|ev| &ev.listing)
+        .collect();
+    let (sk_by_id, prefetched_factors) =
+        prefetch_factors_for_listings(db, &candidate_listing_refs).await?;
+
     let mut notifications_triggered = 0_usize;
     let mut emails_sent = 0_usize;
     let mut queued_digests = 0_usize;
     let mut details = Vec::new();
-    let now_dt = chrono::Utc::now();
+    let now_ts = now_unix_secs();
 
-    for sub in &active_subs {
-        let sub_zips: Vec<String> = serde_json::from_str(&sub.zips_json).unwrap_or_default();
-        let filters: SearchFilters =
-            serde_json::from_str(&sub.parsed_filters_json).unwrap_or_default();
-        let (profile_opt, is_explicit_profile, lang) = extract_subscription_profile(
-            &sub.parsed_filters_json,
-            &sub.requirements_text,
-            &filters,
-        );
+    let mut all_notif_rows: Vec<SubscriptionNotificationProto> = Vec::new();
+    let mut flushed_digest_sks: Vec<i64> = Vec::new();
+    let mut notified_updates_by_delta: HashMap<i64, Vec<i64>> = HashMap::new();
+    let mut digest_updated_sks: Vec<i64> = Vec::new();
+
+    for cand in &candidates {
+        let core = &cand.subscription;
+        let (filters, profile_opt, is_explicit_profile, lang) =
+            search_filters_and_profile_from_proto(core);
+
+        let cand_ids: HashSet<&str> = cand.matched_listing_ids.iter().map(String::as_str).collect();
+        let sub_events: Vec<ListingChangeEvent> = changed_listings
+            .iter()
+            .filter(|ev| cand_ids.contains(ev.listing.id.as_str()))
+            .cloned()
+            .collect();
+        if sub_events.is_empty() {
+            continue;
+        }
 
         let (matched_items, used_profile_scoring) = score_listing_events_for_subscription(
             db,
             http,
             env,
-            &sub.id,
-            &sub.requirements_text,
-            &sub_zips,
+            &core.public_id,
+            &core.requirements_text,
+            &core.zips,
+            &core.cities,
             &filters,
-            sub.notify_on_new != 0,
-            sub.notify_on_sold != 0,
+            core.notify_on_new,
+            core.notify_on_sold,
             profile_opt.as_ref(),
             is_explicit_profile,
             lang,
-            changed_listings,
+            &sub_events,
             false,
+            Some(&already_sent),
+            Some(&prefetched_factors),
             true,
         )
         .await?;
@@ -2879,17 +3321,62 @@ pub async fn evaluate_alerts_for_listings(
             continue;
         }
 
-        let freq = normalize_frequency(&sub.frequency);
-        let merged = merge_digest_items(sub.digest_pending_json.as_deref(), matched_items);
+        let freq = proto::subscription_freq_from_code(core.frequency);
+        let had_pending = cand
+            .subscription_row
+            .digest_pending_json
+            .as_deref()
+            .map(|s| {
+                let t = s.trim();
+                !t.is_empty() && t != "[]"
+            })
+            .unwrap_or(false);
+        let merged = merge_digest_items(
+            cand.subscription_row.digest_pending_json.as_deref(),
+            matched_items,
+        );
 
-        if freq != "instant" && !is_subscription_digest_due(sub, now_dt) {
-            let pending_json = serde_json::to_string(&merged)?;
-            let now = now_iso();
-            db.execute_params(
-                "UPDATE subscriptions SET digest_pending_json = ?, updated_at = ? WHERE id = ?",
-                &[pending_json.into(), now.into(), sub.id.as_str().into()],
+        if freq != "instant"
+            && !is_subscription_digest_due_ts(
+                core.frequency,
+                core.last_notified_ts,
+                core.created_ts,
+                now_ts,
             )
-            .await?;
+        {
+            let mut digest_protos = Vec::with_capacity(merged.len());
+            for m in &merged {
+                let ext_id = str_from_val(m.listing.get("id"))
+                    .unwrap_or_else(|| "unknown".to_string())
+                    .chars()
+                    .take(180)
+                    .collect::<String>();
+                let lsk = sk_by_id
+                    .get(&ext_id)
+                    .copied()
+                    .unwrap_or_else(|| deterministic_sk(&ext_id));
+                let snap_zstd = compress_bytes_zstd_dict(&serde_json::to_vec(&m.listing)?)?;
+                digest_protos.push(SubscriptionDigestItemProto {
+                    subscription_sk: core.subscription_sk,
+                    listing_sk: lsk,
+                    listing_external_id: ext_id,
+                    event_kind: proto::listing_event_to_code(&m.event_type),
+                    old_price: m.old_price,
+                    event_key: m.event_key.chars().take(200).collect(),
+                    match_score: m.match_score as i32,
+                    match_tier: m.match_tier.chars().take(32).collect(),
+                    why_it_matches: m.why_it_matches.chars().take(512).collect(),
+                    tradeoffs: m
+                        .tradeoffs
+                        .as_ref()
+                        .map(|s| s.chars().take(255).collect::<String>()),
+                    queued_ts: now_ts,
+                    listing_snapshot_zstd: snap_zstd,
+                });
+            }
+            db.upsert_digest_queue_items(core.subscription_sk, &digest_protos)
+                .await?;
+            digest_updated_sks.push(core.subscription_sk);
             queued_digests += 1;
 
             let matched_scores: Vec<i64> = merged.iter().map(|m| m.match_score).collect();
@@ -2898,8 +3385,8 @@ pub async fn evaluate_alerts_for_listings(
                 .filter_map(|m| str_from_val(m.listing.get("id")))
                 .collect();
             details.push(json!({
-                "subscriptionId": sub.id,
-                "email": sub.email,
+                "subscriptionId": core.public_id,
+                "email": core.email,
                 "frequency": freq,
                 "matchedCount": merged.len(),
                 "queuedCount": merged.len(),
@@ -2913,12 +3400,31 @@ pub async fn evaluate_alerts_for_listings(
             continue;
         }
 
-        let (delivery_status, delivery_error, sent_ok, recorded) =
-            dispatch_subscription_alert_email(db, env, sub, &merged, base_origin).await?;
+        let (delivery_status, delivery_error, sent_ok, subj_short) =
+            render_and_deliver_subscription_email(env, core, lang, &merged, base_origin).await;
         if sent_ok {
             emails_sent += 1;
         }
+        let recorded = merged.len();
         notifications_triggered += recorded;
+
+        build_notification_protos_for_items(
+            core,
+            &merged,
+            &sk_by_id,
+            &subj_short,
+            &delivery_status,
+            delivery_error.as_deref(),
+            now_ts,
+            &mut all_notif_rows,
+        );
+        if had_pending {
+            flushed_digest_sks.push(core.subscription_sk);
+        }
+        notified_updates_by_delta
+            .entry(recorded as i64)
+            .or_default()
+            .push(core.subscription_sk);
 
         let matched_scores: Vec<i64> = merged.iter().map(|m| m.match_score).collect();
         let matched_ids: Vec<String> = merged
@@ -2926,8 +3432,8 @@ pub async fn evaluate_alerts_for_listings(
             .filter_map(|m| str_from_val(m.listing.get("id")))
             .collect();
         details.push(json!({
-            "subscriptionId": sub.id,
-            "email": sub.email,
+            "subscriptionId": core.public_id,
+            "email": core.email,
             "frequency": freq,
             "matchedCount": merged.len(),
             "topMatchScore": matched_scores.first().copied(),
@@ -2939,8 +3445,51 @@ pub async fn evaluate_alerts_for_listings(
         }));
     }
 
+    // Q4_fanout step 3: persist notifications & subscription state updates in batched multi-row SQL
+    if !all_notif_rows.is_empty() {
+        db.insert_subscription_notifications_batch(&all_notif_rows)
+            .await?;
+    }
+    for chunk in flushed_digest_sks.chunks(200) {
+        let ph = vec!["?"; chunk.len()].join(", ");
+        let sql =
+            format!("DELETE FROM subscription_digest_queue WHERE subscription_sk IN ({ph})");
+        let params: Vec<SqlParam> = chunk.iter().copied().map(SqlParam::I64).collect();
+        db.execute_params_raw(&sql, &params).await?;
+    }
+    for (delta, sks) in notified_updates_by_delta {
+        for chunk in sks.chunks(200) {
+            let ph = vec!["?"; chunk.len()].join(", ");
+            let sql = format!(
+                "UPDATE subscriptions
+                 SET last_notified_ts = ?,
+                     match_count = match_count + ?,
+                     updated_ts = ?
+                 WHERE subscription_sk IN ({ph})"
+            );
+            let mut params = Vec::with_capacity(3 + chunk.len());
+            params.push(SqlParam::I64(now_ts));
+            params.push(SqlParam::I64(delta));
+            params.push(SqlParam::I64(now_ts));
+            for &sk in chunk {
+                params.push(SqlParam::I64(sk));
+            }
+            db.execute_params_raw(&sql, &params).await?;
+        }
+    }
+    for chunk in digest_updated_sks.chunks(200) {
+        let ph = vec!["?"; chunk.len()].join(", ");
+        let sql = format!("UPDATE subscriptions SET updated_ts = ? WHERE subscription_sk IN ({ph})");
+        let mut params = Vec::with_capacity(1 + chunk.len());
+        params.push(SqlParam::I64(now_ts));
+        for &sk in chunk {
+            params.push(SqlParam::I64(sk));
+        }
+        db.execute_params_raw(&sql, &params).await?;
+    }
+
     Ok(json!({
-        "subscriptionsChecked": active_subs.len(),
+        "subscriptionsChecked": candidates.len(),
         "notificationsTriggered": notifications_triggered,
         "emailsSent": emails_sent,
         "queuedDigests": queued_digests,
@@ -2954,13 +3503,17 @@ pub async fn flush_due_subscription_digests(
     base_origin: &str,
 ) -> Result<Value> {
     db.ensure_schema().await?;
-    let queued_subs = db
-        .fetch_subscriptions_sql(
-            "SELECT * FROM subscriptions WHERE active = 1 AND digest_pending_json IS NOT NULL AND digest_pending_json != '' AND digest_pending_json != '[]'",
+    let checked_cnt = db
+        .fetch_scalar_i64(
+            "SELECT COUNT(DISTINCT dq.subscription_sk) AS cnt
+             FROM subscription_digest_queue dq
+             JOIN subscriptions s ON s.subscription_sk = dq.subscription_sk
+             WHERE s.active = 1",
             &[],
+            "cnt",
         )
-        .await?;
-    if queued_subs.is_empty() {
+        .await? as usize;
+    if checked_cnt == 0 {
         return Ok(json!({
             "ok": true,
             "checked": 0,
@@ -2971,54 +3524,179 @@ pub async fn flush_due_subscription_digests(
         }));
     }
 
-    let now_dt = chrono::Utc::now();
+    let now_ts = now_unix_secs();
+    let popped = db.pop_due_digest_queues(now_ts).await?;
+    if popped.is_empty() {
+        return Ok(json!({
+            "ok": true,
+            "checked": checked_cnt,
+            "flushedSubscriptions": 0,
+            "notificationsTriggered": 0,
+            "emailsSent": 0,
+            "details": [],
+        }));
+    }
+
+    let mut ready_queues: Vec<(SubscriptionCoreProto, Vec<SubscriptionDigestItemProto>)> =
+        Vec::new();
+    for (core, dq_items) in popped {
+        if !is_subscription_digest_due_ts(
+            core.frequency,
+            core.last_notified_ts,
+            core.created_ts,
+            now_ts,
+        ) {
+            if !dq_items.is_empty() {
+                db.upsert_digest_queue_items(core.subscription_sk, &dq_items)
+                    .await?;
+            }
+            continue;
+        }
+        ready_queues.push((core, dq_items));
+    }
+
+    if ready_queues.is_empty() {
+        return Ok(json!({
+            "ok": true,
+            "checked": checked_cnt,
+            "flushedSubscriptions": 0,
+            "notificationsTriggered": 0,
+            "emailsSent": 0,
+            "details": [],
+        }));
+    }
+
+    let mut all_keys: Vec<String> = Vec::new();
+    let mut seen_keys: HashSet<String> = HashSet::new();
+    for (_, dq_items) in &ready_queues {
+        for it in dq_items {
+            if !it.event_key.is_empty() && seen_keys.insert(it.event_key.clone()) {
+                all_keys.push(it.event_key.clone());
+            }
+        }
+    }
+    let already_sent = db.filter_existing_notification_event_keys(&all_keys).await?;
+
     let mut flushed_subs = 0_usize;
     let mut notifications_triggered = 0_usize;
     let mut emails_sent = 0_usize;
     let mut details = Vec::new();
+    let mut all_notif_rows: Vec<SubscriptionNotificationProto> = Vec::new();
+    let mut notified_updates_by_delta: HashMap<i64, Vec<i64>> = HashMap::new();
+    let mut empty_updated_sks: Vec<i64> = Vec::new();
 
-    for sub in &queued_subs {
-        if !is_subscription_digest_due(sub, now_dt) {
-            continue;
-        }
-        let pending = parse_pending_digest_items(sub.digest_pending_json.as_deref());
-        let mut unsent: Vec<AlertMatchedItem> = Vec::with_capacity(pending.len());
-        for item in pending {
-            if !db.has_notification_event_key(&item.event_key).await? {
-                unsent.push(item);
+    for (core, dq_items) in &ready_queues {
+        let mut unsent: Vec<AlertMatchedItem> = Vec::with_capacity(dq_items.len());
+        let mut sk_by_id: HashMap<String, i64> = HashMap::with_capacity(dq_items.len());
+        for it in dq_items {
+            if already_sent.contains(&it.event_key) {
+                continue;
             }
+            if !it.listing_external_id.is_empty() && it.listing_sk > 0 {
+                sk_by_id.insert(it.listing_external_id.clone(), it.listing_sk);
+            }
+            let listing_val = if !it.listing_snapshot_zstd.is_empty() {
+                decompress_bytes_zstd_any(&it.listing_snapshot_zstd)
+                    .ok()
+                    .and_then(|raw| serde_json::from_slice::<Value>(&raw).ok())
+                    .unwrap_or_else(|| json!({ "id": it.listing_external_id }))
+            } else {
+                json!({ "id": it.listing_external_id })
+            };
+            unsent.push(AlertMatchedItem {
+                event_type: proto::listing_event_from_code(it.event_kind).to_string(),
+                old_price: it.old_price,
+                event_key: it.event_key.clone(),
+                listing: listing_val,
+                match_score: it.match_score as i64,
+                match_tier: it.match_tier.clone(),
+                why_it_matches: it.why_it_matches.clone(),
+                tradeoffs: it.tradeoffs.clone(),
+            });
         }
+
         if unsent.is_empty() {
-            let now = now_iso();
-            db.execute_params(
-                "UPDATE subscriptions SET digest_pending_json = NULL, updated_at = ? WHERE id = ?",
-                &[now.into(), sub.id.as_str().into()],
-            )
-            .await?;
+            empty_updated_sks.push(core.subscription_sk);
             continue;
         }
 
-        let (delivery_status, delivery_error, sent_ok, recorded) =
-            dispatch_subscription_alert_email(db, env, sub, &unsent, base_origin).await?;
+        let lang = match core.lang_code {
+            2 => Lang::parse("zh-CN"),
+            3 => Lang::parse("es"),
+            _ => Lang::En,
+        };
+        let (delivery_status, delivery_error, sent_ok, subj_short) =
+            render_and_deliver_subscription_email(env, core, lang, &unsent, base_origin).await;
         flushed_subs += 1;
         if sent_ok {
             emails_sent += 1;
         }
+        let recorded = unsent.len();
         notifications_triggered += recorded;
 
+        build_notification_protos_for_items(
+            core,
+            &unsent,
+            &sk_by_id,
+            &subj_short,
+            &delivery_status,
+            delivery_error.as_deref(),
+            now_ts,
+            &mut all_notif_rows,
+        );
+        notified_updates_by_delta
+            .entry(recorded as i64)
+            .or_default()
+            .push(core.subscription_sk);
+
         details.push(json!({
-            "subscriptionId": sub.id,
-            "email": sub.email,
-            "frequency": normalize_frequency(&sub.frequency),
+            "subscriptionId": core.public_id,
+            "email": core.email,
+            "frequency": proto::subscription_freq_from_code(core.frequency),
             "matchedCount": unsent.len(),
             "deliveryStatus": delivery_status,
             "deliveryError": delivery_error,
         }));
     }
 
+    if !all_notif_rows.is_empty() {
+        db.insert_subscription_notifications_batch(&all_notif_rows)
+            .await?;
+    }
+    for (delta, sks) in notified_updates_by_delta {
+        for chunk in sks.chunks(200) {
+            let ph = vec!["?"; chunk.len()].join(", ");
+            let sql = format!(
+                "UPDATE subscriptions
+                 SET last_notified_ts = ?,
+                     match_count = match_count + ?,
+                     updated_ts = ?
+                 WHERE subscription_sk IN ({ph})"
+            );
+            let mut params = Vec::with_capacity(3 + chunk.len());
+            params.push(SqlParam::I64(now_ts));
+            params.push(SqlParam::I64(delta));
+            params.push(SqlParam::I64(now_ts));
+            for &sk in chunk {
+                params.push(SqlParam::I64(sk));
+            }
+            db.execute_params_raw(&sql, &params).await?;
+        }
+    }
+    for chunk in empty_updated_sks.chunks(200) {
+        let ph = vec!["?"; chunk.len()].join(", ");
+        let sql = format!("UPDATE subscriptions SET updated_ts = ? WHERE subscription_sk IN ({ph})");
+        let mut params = Vec::with_capacity(1 + chunk.len());
+        params.push(SqlParam::I64(now_ts));
+        for &sk in chunk {
+            params.push(SqlParam::I64(sk));
+        }
+        db.execute_params_raw(&sql, &params).await?;
+    }
+
     Ok(json!({
         "ok": true,
-        "checked": queued_subs.len(),
+        "checked": checked_cnt,
         "flushedSubscriptions": flushed_subs,
         "notificationsTriggered": notifications_triggered,
         "emailsSent": emails_sent,
@@ -3090,10 +3768,10 @@ pub async fn ingest_listings(
             touched_zips.push(item.zip.clone());
         }
     }
+    let now_ts = now_unix_secs();
     for z in touched_zips {
         let (act, sld) = db.count_listings_by_status_for_zip(&z).await?;
         let ex = db.get_watched_zip(&z).await?;
-        let now = now_iso();
         let city = ex
             .as_ref()
             .and_then(|w| w.city.clone())
@@ -3101,40 +3779,49 @@ pub async fn ingest_listings(
         let state = ex
             .as_ref()
             .and_then(|w| w.state.clone())
-            .or_else(|| incoming.iter().find(|i| i.zip == z).and_then(|i| i.state.clone()));
+            .or_else(|| incoming.iter().find(|i| i.zip == z).and_then(|i| i.state.clone()))
+            .map(|s| s.trim().to_ascii_uppercase())
+            .filter(|s| !s.is_empty());
+        let created_ts = ex
+            .as_ref()
+            .and_then(|w| proto::iso_to_unix_ts(&w.created_at))
+            .unwrap_or(now_ts);
 
-        db.upsert_row(
+        db.upsert_row_raw(
             "watched_zips",
             &[
-                ("zip", z.into()),
-                ("city", city.into()),
-                ("state", state.into()),
-                ("lat", ex.as_ref().and_then(|w| w.lat).into()),
-                ("lon", ex.as_ref().and_then(|w| w.lon).into()),
-                ("active", 1_i64.into()),
+                ("zip", SqlParam::from(z.as_str())),
+                ("city", SqlParam::from(city.as_deref())),
+                ("state_code", SqlParam::from(state.as_deref())),
+                ("lat", SqlParam::from(ex.as_ref().and_then(|w| w.lat))),
+                ("lon", SqlParam::from(ex.as_ref().and_then(|w| w.lon))),
+                ("active", SqlParam::I64(1)),
                 (
                     "subscriber_count",
-                    ex.as_ref().map(|w| w.subscriber_count).unwrap_or(0).into(),
+                    SqlParam::I64(ex.as_ref().map(|w| w.subscriber_count).unwrap_or(0)),
                 ),
                 (
                     "sync_interval_min",
-                    ex.as_ref().map(|w| w.sync_interval_min).unwrap_or(15).into(),
+                    SqlParam::I64(ex.as_ref().map(|w| w.sync_interval_min).unwrap_or(15)),
                 ),
-                ("last_synced_at", Some(now.clone()).into()),
-                ("last_sync_status", Some("ok").into()),
-                ("last_new_count", (batch_res.new_listings.len() as i64).into()),
-                ("last_sold_count", (batch_res.sold_listings.len() as i64).into()),
-                ("total_active_listings", act.into()),
-                ("total_sold_listings", sld.into()),
-                ("sources_used", Some("Direct CSV/API Ingest").into()),
-                ("last_error", SqlParam::Null),
+                ("last_synced_ts", SqlParam::I64(now_ts)),
                 (
-                    "created_at",
-                    ex.map(|w| w.created_at)
-                        .filter(|s| !s.is_empty())
-                        .unwrap_or(now)
-                        .into(),
+                    "last_sync_status",
+                    SqlParam::I64(proto::watched_sync_status_to_code(Some("ok")) as i64),
                 ),
+                (
+                    "last_new_count",
+                    SqlParam::I64(batch_res.new_listings.len() as i64),
+                ),
+                (
+                    "last_sold_count",
+                    SqlParam::I64(batch_res.sold_listings.len() as i64),
+                ),
+                ("total_active_listings", SqlParam::I64(act)),
+                ("total_sold_listings", SqlParam::I64(sld)),
+                ("sources_used", SqlParam::from("Direct CSV/API Ingest")),
+                ("last_error", SqlParam::Null),
+                ("created_ts", SqlParam::I64(created_ts)),
             ],
             &["zip"],
         )
@@ -3246,26 +3933,19 @@ pub async fn retranslate_stale_subscriptions(
                     }
                 }
                 let next_json = serde_json::to_string(&next_val)?;
-                let cities_json = serde_json::to_string(&parsed.filters.cities)?;
+                let cities_json = if parsed.filters.cities.is_empty() {
+                    None
+                } else {
+                    Some(serde_json::to_string(&parsed.filters.cities)?)
+                };
                 let now = now_iso();
-                db.execute_params(
-                    "UPDATE subscriptions
-                     SET parsed_filters_json = ?,
-                         cities_json = ?,
-                         filter_schema_version = ?,
-                         filters_refreshed_at = ?,
-                         updated_at = ?
-                     WHERE id = ?",
-                    &[
-                        next_json.into(),
-                        cities_json.into(),
-                        CURRENT_FILTER_SCHEMA_VERSION.into(),
-                        Some(now.clone()).into(),
-                        now.into(),
-                        sub.id.as_str().into(),
-                    ],
-                )
-                .await?;
+                let mut updated = sub.clone();
+                updated.parsed_filters_json = next_json;
+                updated.cities_json = cities_json;
+                updated.filter_schema_version = CURRENT_FILTER_SCHEMA_VERSION;
+                updated.filters_refreshed_at = Some(now.clone());
+                updated.updated_at = now;
+                db.upsert_subscription_normalized(&updated).await?;
                 retranslated += 1;
             }
             Err(e) => {
@@ -3291,15 +3971,18 @@ pub fn spawn_event_retranslate_check(db: DbStore, http: HttpClient, env: EnvConf
             tracing::warn!(error = %e, "spawn_event_retranslate_check ensure_schema warning");
             return;
         }
-        let stale_cnt = db
-            .fetch_subscriptions_sql(
-                "SELECT * FROM subscriptions WHERE active = 1 AND filter_schema_version < ? LIMIT 1",
-                &[CURRENT_FILTER_SCHEMA_VERSION.into()],
+        let has_stale = db
+            .fetch_optional_mapped(
+                "SELECT subscription_sk FROM subscriptions WHERE active = 1 AND filter_schema_version < ? LIMIT 1",
+                &[SqlParam::I64(CURRENT_FILTER_SCHEMA_VERSION)],
+                |r| r.opt_i64("subscription_sk"),
             )
             .await
-            .map(|v| v.len())
-            .unwrap_or(0);
-        if stale_cnt > 0 {
+            .ok()
+            .flatten()
+            .flatten()
+            .is_some();
+        if has_stale {
             if let Err(e) = retranslate_stale_subscriptions(&db, &http, &env, 50).await {
                 tracing::warn!(error = %e, "Event-based subscription retranslation warning");
             }
@@ -3510,59 +4193,73 @@ pub async fn query_listings(
     limit: usize,
 ) -> Result<Value> {
     db.ensure_schema().await?;
-    let (sql, params) = {
-        let mut query = Query::select();
-        query.column(Asterisk).from(Alias::new("listings"));
+    let mut clauses: Vec<String> = Vec::new();
+    let mut params: Vec<SqlParam> = Vec::new();
 
-        let mut cond = Condition::all();
-        let mut has_cond = false;
+    if let Some(z) = zip.map(str::trim).filter(|s| !s.is_empty()) {
+        if z.len() != 5 || !z.chars().all(|c| c.is_ascii_digit()) {
+            return Err(SearchValidationError::new(
+                "INVALID_ZIP",
+                "zip must be a 5-digit US ZIP code.",
+                400,
+            )
+            .into());
+        }
+        clauses.push("l.zip = ?".to_string());
+        params.push(SqlParam::Text(z.to_string()));
+    }
 
-        if let Some(z) = zip.map(str::trim).filter(|s| !s.is_empty()) {
-            if z.len() != 5 || !z.chars().all(|c| c.is_ascii_digit()) {
-                return Err(SearchValidationError::new(
-                    "INVALID_ZIP",
-                    "zip must be a 5-digit US ZIP code.",
-                    400,
-                )
-                .into());
+    if let Some(sts) = statuses {
+        let mut codes: Vec<i64> = sts
+            .iter()
+            .flat_map(|s| s.split(','))
+            .map(str::trim)
+            .filter(|s| matches!(*s, "for_sale" | "pending" | "sold" | "off_market"))
+            .map(|s| i64::from(proto::listing_status_to_code(Some(s))))
+            .collect();
+        codes.sort_unstable();
+        codes.dedup();
+        if codes.len() == 1 {
+            clauses.push("l.status = ?".to_string());
+            params.push(SqlParam::I64(codes[0]));
+        } else if !codes.is_empty() {
+            let ph = vec!["?"; codes.len()].join(", ");
+            clauses.push(format!("l.status IN ({ph})"));
+            for c in codes {
+                params.push(SqlParam::I64(c));
             }
-            cond = cond.add(Expr::col(Alias::new("zip")).eq(z.to_string()));
-            has_cond = true;
         }
+    }
 
-        if let Some(sts) = statuses {
-            let valid: Vec<String> = sts
-                .iter()
-                .flat_map(|s| s.split(','))
-                .map(str::trim)
-                .filter(|s| matches!(*s, "for_sale" | "pending" | "sold" | "off_market"))
-                .map(ToOwned::to_owned)
-                .collect();
-            if !valid.is_empty() {
-                cond = cond.add(Expr::col(Alias::new("status")).is_in(valid));
-                has_cond = true;
-            }
-        }
-
-        if has_cond {
-            query.cond_where(cond);
-        }
-
-        let safe_limit = limit.clamp(1, 100) as u64;
-        query
-            .order_by(Alias::new("status_changed_at"), Order::Desc)
-            .limit(safe_limit);
-
-        let (sql, sea_vals) = if db.dialect() == "mysql" {
-            query.build(MysqlQueryBuilder)
-        } else {
-            query.build(SqliteQueryBuilder)
-        };
-        let params: Vec<SqlParam> = sea_vals.0.into_iter().map(SqlParam::from).collect();
-        (sql, params)
+    let where_sql = if clauses.is_empty() {
+        String::new()
+    } else {
+        format!(" WHERE {}", clauses.join(" AND "))
     };
-    let rows = db.fetch_listings_sql(&sql, &params).await?;
-    let formatted: Vec<Value> = rows.iter().map(format_listing_row).collect();
+    let safe_limit = limit.clamp(1, 100) as i64;
+    params.push(SqlParam::I64(safe_limit));
+
+    let sql = format!(
+        "SELECT l.listing_sk, l.external_id, l.report_slug, l.zip, l.state_code, l.county_fips, \
+                l.city, l.street, l.address, l.lat, l.lon, l.status, l.property_category, \
+                l.price, l.list_price, l.sold_price, l.estimated_value, l.price_per_sqft, \
+                l.hoa_monthly, l.all_in_monthly, l.beds, l.baths, l.sqft, l.lot_sqft, \
+                l.year_built, l.stories, l.days_on_market, l.listed_epoch_day, l.sold_epoch_day, \
+                l.school_score, l.school_grade, l.walk_score, l.safety_score, l.overall_score, \
+                l.electric_rate_kwh, l.max_download_mbps, l.tag_bits, l.known_bits, \
+                l.first_seen_ts, l.last_seen_ts, l.status_changed_ts, l.price_changed_ts \
+         FROM listings l{where_sql} \
+         ORDER BY l.status_changed_ts DESC, l.external_id ASC \
+         LIMIT ?"
+    );
+
+    let cores = db.search_listing_cores(&sql, &params).await?;
+    let cards = db.hydrate_listing_cards(&cores).await?;
+    let formatted: Vec<Value> = cards
+        .iter()
+        .map(ListingFullView::to_listing_row)
+        .map(|r| format_listing_row(&r))
+        .collect();
 
     Ok(json!({
         "ok": true,

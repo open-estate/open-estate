@@ -550,12 +550,13 @@ async fn test_axum_post_report_slides_route_persists_and_guards() {
         .expect("report still cached");
     assert_valid_deck_schema(&stored.report["walkthroughSlides"], "instant");
     assert!(
-        stored
-            .rendered_html
-            .as_deref()
-            .map(|h| h.contains("walkthroughSlides"))
-            .unwrap_or(false),
-        "persisted HTML must embed walkthroughSlides"
+        stored.rendered_html.is_none(),
+        "rendered_html must not be persisted in DB"
+    );
+    let runtime_html = open_estate::web::render::render_report_html(&stored.report);
+    assert!(
+        runtime_html.contains("walkthroughSlides"),
+        "runtime-rendered HTML must embed walkthroughSlides"
     );
 
     let mut ai_persisted_report = stored.report.clone();

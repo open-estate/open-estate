@@ -170,14 +170,14 @@ fn test_profile(place_label: &str) -> Profile {
 async fn test_1_listing_factors_schema_heatwave_ddl_upsert_and_migrate_parity() {
     assert!(TABLE_NAMES.contains(&"listing_factors"));
     assert_eq!(mysql_ddl().len(), TABLE_NAMES.len());
-    assert_eq!(LISTING_FACTORS_COLS.len(), 16);
+    assert_eq!(LISTING_FACTORS_COLS.len(), 67);
 
     let mysql_stmt = mysql_ddl()
         .iter()
         .find(|s| s.contains("CREATE TABLE IF NOT EXISTS listing_factors"))
         .expect("MySQL DDL for listing_factors");
     assert!(mysql_stmt.contains("PRIMARY KEY"));
-    assert!(mysql_stmt.contains("LONGTEXT"));
+    assert!(!mysql_stmt.contains("LONGTEXT"));
     assert!(mysql_stmt.contains("InnoDB"));
     assert!(mysql_stmt.contains("utf8mb4_0900_ai_ci"));
     assert!(mysql_stmt.contains("idx_listing_factors_tier_updated"));
@@ -208,7 +208,7 @@ async fn test_1_listing_factors_schema_heatwave_ddl_upsert_and_migrate_parity() 
     assert!(mysql_ups.contains("AS new_row ON DUPLICATE KEY UPDATE"));
     assert!(!mysql_ups.contains("VALUES("));
     let sqlite_ups = build_listing_factors_upsert("sqlite", 2);
-    assert!(sqlite_ups.contains("ON CONFLICT(listing_id) DO UPDATE SET"));
+    assert!(sqlite_ups.contains("ON CONFLICT(listing_sk) DO UPDATE SET"));
 
     let holdout = common::synth_holdout_homes();
     let dir = TestDir::new();
@@ -240,7 +240,23 @@ async fn test_1_listing_factors_schema_heatwave_ddl_upsert_and_migrate_parity() 
         .await
         .unwrap();
     assert_eq!(got.len(), 1);
-    assert_eq!(got["sj-95118-synthalpha"], row1);
+    let got1 = &got["sj-95118-synthalpha"];
+    assert_eq!(got1.listing_id, row1.listing_id);
+    assert_eq!(got1.schema_version, row1.schema_version);
+    assert_eq!(got1.source_tier, row1.source_tier);
+    assert_eq!(got1.completeness_pct, row1.completeness_pct);
+    assert_eq!(got1.style_family, row1.style_family);
+    assert_eq!(got1.flood_zone, row1.flood_zone);
+    assert_eq!(got1.wildfire_zone, row1.wildfire_zone);
+    assert_eq!(got1.walk_score, row1.walk_score);
+    assert_eq!(got1.school_score, row1.school_score);
+    assert_eq!(got1.crime_score, row1.crime_score);
+    assert_eq!(got1.zip, row1.zip);
+    assert_eq!(got1.lat, row1.lat);
+    assert_eq!(got1.lon, row1.lon);
+    let got1_json: Value = serde_json::from_str(&got1.factors_json).unwrap();
+    assert_eq!(got1_json["id"], json!("sj-95118-synthalpha"));
+    assert_eq!(got1_json["crime"]["value"], json!(78.4));
 
     let mut row1_upgraded = row1.clone();
     row1_upgraded.source_tier = "full_report".to_string();
@@ -255,6 +271,13 @@ async fn test_1_listing_factors_schema_heatwave_ddl_upsert_and_migrate_parity() 
     src.upsert_listing_factors_batch(&[row1_upgraded.clone(), row2.clone()])
         .await
         .unwrap();
+    let src_expected = src
+        .get_listing_factors_batch(&[
+            "sj-95118-synthalpha".to_string(),
+            "camp-95008-synthbeta".to_string(),
+        ])
+        .await
+        .unwrap();
 
     let summary = migrate_database(&src, &dst).await.unwrap();
     assert_eq!(summary.tables.len(), TABLE_NAMES.len());
@@ -266,8 +289,10 @@ async fn test_1_listing_factors_schema_heatwave_ddl_upsert_and_migrate_parity() 
         ])
         .await
         .unwrap();
-    assert_eq!(migrated.get("sj-95118-synthalpha"), Some(&row1_upgraded));
-    assert_eq!(migrated.get("camp-95008-synthbeta"), Some(&row2));
+    assert_eq!(migrated, src_expected);
+    assert_eq!(migrated["sj-95118-synthalpha"].source_tier, "full_report");
+    assert_eq!(migrated["sj-95118-synthalpha"].completeness_pct, 94.1);
+    assert_eq!(migrated["camp-95008-synthbeta"].zip.as_deref(), Some("95008"));
 
     let summary2 = migrate_database(&src, &dst).await.unwrap();
     assert_eq!(summary2.tables.get("listing_factors").copied(), Some(2));

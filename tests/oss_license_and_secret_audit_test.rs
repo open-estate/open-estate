@@ -327,7 +327,10 @@ fn collect_repo_files(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
             }
             collect_repo_files(&path, out);
         } else {
-            if name_str == ".env" || (name_str.starts_with(".env.") && name_str != ".env.example") {
+            if name_str == ".git"
+                || name_str == ".env"
+                || (name_str.starts_with(".env.") && name_str != ".env.example")
+            {
                 continue;
             }
             out.push(path);
@@ -438,8 +441,20 @@ fn audit_zero_secrets_cluster_ips_and_real_street_addresses() {
     // Internal codenames/domains/handles constructed via concat! so this file contains zero raw literals
     let internal_codenames: Vec<(&str, String)> = vec![
         (
-            "private product brand",
-            concat!("deed", "buddy").to_string(),
+            "private product domain",
+            concat!("deed", "buddy.com").to_string(),
+        ),
+        (
+            "private container image",
+            concat!("deed", "buddy/private").to_string(),
+        ),
+        (
+            "private cloud crate",
+            concat!("deed", "buddy-cloud").to_string(),
+        ),
+        (
+            "private k8s secret",
+            concat!("deed", "buddy-dockerhub").to_string(),
         ),
         ("private author handle", concat!("eva", "wu").to_string()),
         ("private infra handle", concat!("kube", "b").to_string()),

@@ -1,9 +1,10 @@
 // Production Axum HTTP Server, Edge DDoS/Guardrail Middleware & Detached Continuation Router for Open Estate.
 
 use crate::ai::{
-    analyze_disclosure_packet, analyze_hoa_documents, analyze_inspection_with_prompt,
-    analyze_title_report, ask_property_question_with_config, generate_repair_addendum,
-    translate_report, AskPromptConfig, RepairAddendumInput, UploadedDocInput,
+    analyze_disclosure_packet, analyze_hoa_documents,
+    analyze_inspection_with_prompt, analyze_title_report,
+    ask_property_question_for_role_with_config, generate_repair_addendum, translate_report,
+    AskPromptConfig, RepairAddendumInput, UploadedDocInput,
 };
 use crate::cre::{
     analyze_cre_documents, analyze_cre_trade_area, analyze_location_business_profit,
@@ -12,7 +13,16 @@ use crate::cre::{
     fetch_osm_plaza_pois, CreAssetClass, CreUnderwritingOverrides, LandFarmEvalOptions,
     StoreEvalRequest,
 };
-use crate::db::{format_listing_row, school_grade_to_min_score, CachedReportRecord, DbStore, ListingRow};
+use crate::db::{
+    extract_section_json, format_listing_row, make_report_section_envelope,
+    proto::{
+        build_search_filter_tag_masks, feature_tag_bit, feature_tag_from_slug,
+        listing_status_to_code, property_category_to_code, FeatureTag,
+    },
+    school_grade_to_min_score, sql_bit_is_set_expr, sql_bitmask_all_set_expr,
+    sql_bitmask_none_set_expr, CachedReportRecord, DbStore,
+    ReportSectionEnvelopeProto, ReportSectionKind, SqlParam,
+};
 use crate::guardrails::{
     apply_security_headers, enforce_allowed_body_keys, enforce_request_envelope_sanity,
     is_automated_scraper_ua, is_direct_llm_route, validate_slug_param, validate_street_address_input,
@@ -46,7 +56,8 @@ use crate::search::{
 pub use crate::web::orchestrator::recompute_report_access;
 
 use crate::shared::{
-    format_brand_wordmark_html, haversine_m, is_truthy_flag, slugify, EnvConfig, HttpClient,
+    format_brand_wordmark_html, haversine_m, is_truthy_flag, now_unix_secs, round_n, slugify,
+    EnvConfig, HttpClient,
 };
 use crate::web::{
     alerts_ui::render_alerts_manager_html,
@@ -56,6 +67,11 @@ use crate::web::{
         raw_query_has_share_or_api_key, report_ai_pending, spawn_static_export_if_configured,
         static_mirror_config_from_env, DEFAULT_REPORT_STATIC_MAX_FILES,
         DEFAULT_REPORT_STATIC_MAX_MB,
+    },
+    copilot_api::{
+        handle_copilot_comps_post, handle_copilot_disclosures_get, handle_copilot_disclosures_post,
+        handle_copilot_lookup_post, handle_copilot_offer_get, handle_copilot_offer_post,
+        resolve_copilot_disclosure_ttl_secs,
     },
     // [feat/chrome-extension]
     deal_room::{
@@ -69,8 +85,8 @@ use crate::web::{
     // [/feat/chrome-extension]
     favicon::{APPLE_TOUCH_ICON_PNG, FAVICON_ICO, FAVICON_SVG},
     hooks::{
-        authorize_cached_report, inject_script_before_body_end, AreaForsaleListing,
-        NoopExtensionHooks, ServerExtensionHooks,
+        authorize_cached_report, authorize_narrow_report, inject_script_before_body_end,
+        AreaForsaleListing, NoopExtensionHooks, ServerExtensionHooks,
     },
     house3d_api::handle_house3d_get,
     i18n::{resolve_lang, t, t_brand},
@@ -97,7 +113,7 @@ use crate::web::{
     render::{
         apply_runtime_module_filter, localize_i18n_json_for_brand,
         localize_report_value_for_brand, normalize_stored_report, render_report_html_with_brand,
-        I18NEXT_JS, I18N_EN_JSON, I18N_ES_JSON, I18N_ZH_JSON,
+        BUYER_COPILOT_JS, I18NEXT_JS, I18N_EN_JSON, I18N_ES_JSON, I18N_ZH_JSON,
     },
     ui::{
         render_home_html_with_options, render_job_html_with_brand,
@@ -548,8 +564,20 @@ impl AppState {
     }
 
     pub fn with_extension_hooks(mut self, hooks: Arc<dyn ServerExtensionHooks>) -> Self {
+        let extra_pkgs = hooks.extra_extension_packages();
         let extra_adapters = hooks.extra_extension_adapters();
         self.hooks = hooks;
+        for (manifest_yaml, openapi_yaml) in extra_pkgs {
+            if let Err(err) = self
+                .extension_hub
+                .register_hook_package(manifest_yaml, openapi_yaml)
+            {
+                tracing::warn!(
+                    error = %err,
+                    "Failed to register extra_extension_packages YAML manifest"
+                );
+            }
+        }
         if !extra_adapters.is_empty() {
             self.extension_hub.register_hook_adapters(extra_adapters);
         }
@@ -564,6 +592,14 @@ impl AppState {
         mut self,
         hub: Arc<crate::extensions::ExtensionHub>,
     ) -> Self {
+        for (manifest_yaml, openapi_yaml) in self.hooks.extra_extension_packages() {
+            if let Err(err) = hub.register_hook_package(manifest_yaml, openapi_yaml) {
+                tracing::warn!(
+                    error = %err,
+                    "Failed to register extra_extension_packages YAML manifest on isolated hub"
+                );
+            }
+        }
         let extra_adapters = self.hooks.extra_extension_adapters();
         if !extra_adapters.is_empty() {
             hub.register_hook_adapters(extra_adapters);
@@ -758,10 +794,20 @@ pub fn build_router(state: AppState) -> Router {
             get(handle_apple_touch_icon),
         )
         .route("/vendor/i18next.min.js", get(handle_vendor_i18next))
+        .route("/vendor/fflate.min.js", get(handle_vendor_fflate))
+        .route("/vendor/pdf.min.mjs", get(handle_vendor_pdfjs))
+        .route("/vendor/pdf.worker.min.mjs", get(handle_vendor_pdfjs_worker))
+        .route("/vendor/pdf_viewer.min.css", get(handle_vendor_pdfjs_css))
+        .route("/vendor/buyer_copilot.js", get(handle_vendor_buyer_copilot))
+        .route("/vendor/pdf_studio.js", get(handle_vendor_pdf_studio))
         .route("/api/i18n/:lang", get(handle_i18n_bundle))
         .route("/healthz", get(handle_probe))
         .route("/readyz", get(handle_probe))
         .route("/api/health", get(handle_api_health))
+        .route(
+            "/redirect",
+            get(crate::web::redirect::handle_reference_redirect),
+        )
         .route(
             "/ops",
             get(crate::web::ops_dashboard::handle_ops_dashboard_page),
@@ -769,6 +815,10 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/api/ops/telemetry",
             get(crate::web::ops_dashboard::handle_ops_telemetry_json),
+        )
+        .route(
+            "/api/ops/telemetry/redirects",
+            get(crate::web::redirect::handle_ops_redirect_telemetry_json),
         )
         .route("/api/geo/ip", get(crate::web::ip_geo::handle_ip_geo))
         .route("/api/area/forsale", get(handle_area_forsale))
@@ -784,7 +834,14 @@ pub fn build_router(state: AppState) -> Router {
         .route("/", get(handle_home))
         .route("/match", get(handle_home))
         .route("/shop", get(handle_home))
+        .route("/assistant", get(handle_home))
         .route("/alerts", get(handle_alerts_page))
+        .route("/api/copilot/lookup", post(handle_copilot_lookup_post))
+        .route("/api/copilot/comps", post(handle_copilot_comps_post))
+        .route(
+            "/api/copilot/offer",
+            get(handle_copilot_offer_get).post(handle_copilot_offer_post),
+        )
         // [feat/chrome-extension]
         .route("/deal-room", get(handle_deal_room_html))
         .route(
@@ -949,6 +1006,10 @@ pub fn build_router(state: AppState) -> Router {
             get(handle_packet_review_get).post(handle_packet_review_post),
         )
         .route(
+            "/api/copilot/disclosures",
+            get(handle_copilot_disclosures_get).post(handle_copilot_disclosures_post),
+        )
+        .route(
             "/api/repair-addendum",
             get(handle_repair_addendum_get).post(handle_repair_addendum_post),
         )
@@ -1109,6 +1170,23 @@ pub fn spawn_startup_background_tasks(state: &AppState, default_port: u16) {
                 tracing::warn!(error = %e, "Non-fatal warning purging incomplete cached reports");
             }
         }
+        let startup_copilot_ttl = resolve_copilot_disclosure_ttl_secs(&state_seed.env);
+        match state_seed
+            .db
+            .purge_expired_copilot_disclosures(startup_copilot_ttl)
+            .await
+        {
+            Ok(n) if n > 0 => {
+                tracing::info!(
+                    purged_copilot_disclosures = n,
+                    "Purged expired copilot disclosure rows on startup"
+                );
+            }
+            Ok(_) => {}
+            Err(e) => {
+                tracing::warn!(error = %e, "Non-fatal warning purging expired copilot disclosures");
+            }
+        }
         if state_seed.reports_dir.is_dir() {
             match seed_reports_from_dir(&state_seed.db, &state_seed.reports_dir).await {
                 Ok(n) if n > 0 => {
@@ -1124,6 +1202,7 @@ pub fn spawn_startup_background_tasks(state: &AppState, default_port: u16) {
                 }
             }
         }
+        let _ = backfill_missing_shopping_facets(&state_seed.db).await;
         if run_mode != RunMode::Scanner {
             let resumed = state_seed
                 .job_mgr
@@ -1140,6 +1219,35 @@ pub fn spawn_startup_background_tasks(state: &AppState, default_port: u16) {
             }
         }
     });
+
+    // Periodic TTL retention cleanup for private & shared copilot disclosure summaries
+    // (purges expired rows older than `COPILOT_DISCLOSURE_TTL_DAYS`, default 30 days, while preserving `admin_audit_log`).
+    let cleanup_interval_secs = state
+        .env
+        .get("COPILOT_CLEANUP_INTERVAL_SECS")
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .unwrap_or(3600);
+    if cleanup_interval_secs > 0 {
+        let cleanup_db = state.db.clone();
+        let cleanup_env = state.env.clone();
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(Duration::from_secs(cleanup_interval_secs.max(60)));
+            // First tick completes immediately; startup cleanup already ran above.
+            ticker.tick().await;
+            loop {
+                ticker.tick().await;
+                let ttl_secs = resolve_copilot_disclosure_ttl_secs(&cleanup_env);
+                if let Ok(purged) = cleanup_db.purge_expired_copilot_disclosures(ttl_secs).await {
+                    if purged > 0 {
+                        tracing::info!(
+                            purged_copilot_disclosures = purged,
+                            "Background TTL retention cleanup purged expired copilot disclosures"
+                        );
+                    }
+                }
+            }
+        });
+    }
 
     // Event-driven schema migration check: only translates active subscriptions whose
     // `filter_schema_version < CURRENT_FILTER_SCHEMA_VERSION` (runs in `all` or `scanner` mode).
@@ -1158,6 +1266,12 @@ pub fn spawn_startup_background_tasks(state: &AppState, default_port: u16) {
     crate::lazy::register_lazy_scheduled_jobs();
     crate::extensions::shared_cache::register_shared_cache_scheduled_jobs();
     register_watched_zips_sync_scheduler_handler();
+
+    if !state.env.email_monitor_enabled() {
+        tracing::info!(
+            "Background ZIP/email alert monitor disabled by default (set ENABLE_EMAIL_MONITOR=true to enable)"
+        );
+    }
 
     let sched_state = state.clone();
     let sched_default_origin = state
@@ -1357,13 +1471,11 @@ fn hold_permit_until_job_done(
                     if static_mirror_config_from_env(&state.env).is_some()
                         && !report_ai_pending(&rec.report)
                     {
-                        let html = rec.rendered_html.unwrap_or_else(|| {
-                            render_report_html_with_brand(
-                                &rec.report,
-                                &state.env.brand_name(),
-                                &state.env.brand_domain(),
-                            )
-                        });
+                        let html = render_report_html_with_brand(
+                            &rec.report,
+                            &state.env.brand_name(),
+                            &state.env.brand_domain(),
+                        );
                         spawn_static_export_if_configured(&state.env, &rec.slug, &rec.report, html);
                     }
                 }
@@ -1717,11 +1829,6 @@ pub(crate) async fn get_cached_or_disk_report(
                     &rec.report,
                 )
                 .await;
-            rec.rendered_html = Some(render_report_html_with_brand(
-                &rec.report,
-                &state.env.brand_name(),
-                &state.env.brand_domain(),
-            ));
         }
         return Some(rec);
     }
@@ -1737,16 +1844,7 @@ pub(crate) async fn get_cached_or_disk_report(
                         )
                         .await;
                 }
-                let html_path = state.reports_dir.join(&clean).join("index.html");
-                let html = match tokio::fs::read_to_string(&html_path).await {
-                    Ok(h) if !h.trim().is_empty() => h,
-                    _ => render_report_html_with_brand(
-                        &rep,
-                        &state.env.brand_name(),
-                        &state.env.brand_domain(),
-                    ),
-                };
-                let _ = state.db.put_cached_report(&clean, &rep, Some(&html)).await;
+                let _ = state.db.put_cached_report(&clean, &rep, None).await;
                 let mut rec = state.db.get_cached_report(&clean).await.ok().flatten()?;
                 normalize_stored_report(&mut rec.report);
                 if rec.report.get("agentRecommendations").is_none() {
@@ -1799,13 +1897,11 @@ pub(crate) fn maybe_resume_ai_in_bg(state: &AppState, slug: &str, report: &Value
                 }
                 if let Some(rec) = get_cached_or_disk_report(&st, &slug_owned).await {
                     if !report_ai_pending(&rec.report) {
-                        let html = rec.rendered_html.unwrap_or_else(|| {
-                            render_report_html_with_brand(
-                                &rec.report,
-                                &st.env.brand_name(),
-                                &st.env.brand_domain(),
-                            )
-                        });
+                        let html = render_report_html_with_brand(
+                            &rec.report,
+                            &st.env.brand_name(),
+                            &st.env.brand_domain(),
+                        );
                         spawn_static_export_if_configured(&st.env, &rec.slug, &rec.report, html);
                     }
                 }
@@ -1891,18 +1987,65 @@ struct LangQuery {
     lang: Option<String>,
 }
 
-async fn handle_vendor_i18next() -> Response {
-    let mut resp = (StatusCode::OK, I18NEXT_JS).into_response();
+fn static_vendor_response(body: &'static str, content_type: &'static str, max_age_secs: u32) -> Response {
+    let mut resp = (StatusCode::OK, body).into_response();
     resp.headers_mut().insert(
         header::CONTENT_TYPE,
-        HeaderValue::from_static("application/javascript; charset=utf-8"),
+        HeaderValue::from_static(content_type),
     );
-    resp.headers_mut().insert(
-        header::CACHE_CONTROL,
-        HeaderValue::from_static("public, max-age=86400"),
-    );
+    if let Ok(cc) = HeaderValue::from_str(&format!("public, max-age={max_age_secs}")) {
+        resp.headers_mut().insert(header::CACHE_CONTROL, cc);
+    }
     apply_security_headers(resp.headers_mut());
     resp
+}
+
+async fn handle_vendor_i18next() -> Response {
+    static_vendor_response(I18NEXT_JS, "application/javascript; charset=utf-8", 86400)
+}
+
+async fn handle_vendor_fflate() -> Response {
+    static_vendor_response(
+        crate::web::render::FFLATE_MIN_JS,
+        "application/javascript; charset=utf-8",
+        86400,
+    )
+}
+
+async fn handle_vendor_pdfjs() -> Response {
+    static_vendor_response(
+        crate::web::render::PDFJS_MIN_MJS,
+        "application/javascript; charset=utf-8",
+        86400,
+    )
+}
+
+async fn handle_vendor_pdfjs_worker() -> Response {
+    static_vendor_response(
+        crate::web::render::PDFJS_WORKER_MIN_MJS,
+        "application/javascript; charset=utf-8",
+        86400,
+    )
+}
+
+async fn handle_vendor_pdfjs_css() -> Response {
+    static_vendor_response(
+        crate::web::render::PDFJS_VIEWER_MIN_CSS,
+        "text/css; charset=utf-8",
+        86400,
+    )
+}
+
+async fn handle_vendor_buyer_copilot() -> Response {
+    static_vendor_response(BUYER_COPILOT_JS, "application/javascript; charset=utf-8", 3600)
+}
+
+async fn handle_vendor_pdf_studio() -> Response {
+    static_vendor_response(
+        crate::web::render::PDF_STUDIO_JS,
+        "application/javascript; charset=utf-8",
+        3600,
+    )
 }
 
 async fn handle_i18n_bundle(
@@ -2149,11 +2292,11 @@ fn listing_row_to_area_forsale(v: &Value, fallback_zip: &str) -> Option<AreaFors
     // Skip stale snapshots harvested from historical property reports (e.g. off-market homes
     // or commercial properties analyzed earlier) — keep direct API/CSV-ingested & connector listings.
     if src_low == "open estate report"
-        || src_low == "openestate report"
+        || crate::shared::has_retired_brand(&src_low)
         || src_low.ends_with(" report")
         || src_low.contains("nearby active")
         || src_low.contains("sold comp")
-        || (has_report_slug && (src_low == "openestate" || src_low == "open estate"))
+        || (has_report_slug && src_low == "open estate")
     {
         return None;
     }
@@ -3221,9 +3364,11 @@ async fn ensure_report_parcel_outlines(state: &AppState, slug: &str, report: &mu
             _ => false,
         };
         if unchanged {
-            let html = render_report_html_with_brand(&work, &brand_name, &brand_domain);
-            let _ = db.put_cached_report(&slug_owned, &work, Some(&html)).await;
-            spawn_static_export_if_configured(&env_owned, &slug_owned, &work, html);
+            let _ = db.put_cached_report(&slug_owned, &work, None).await;
+            if static_mirror_config_from_env(&env_owned).is_some() {
+                let html = render_report_html_with_brand(&work, &brand_name, &brand_domain);
+                spawn_static_export_if_configured(&env_owned, &slug_owned, &work, html);
+            }
         }
         Some(work)
     });
@@ -3438,6 +3583,109 @@ async fn handle_report_json(
     resp
 }
 
+fn assemble_partial_report_from_envelopes(
+    sections: &std::collections::BTreeMap<ReportSectionKind, ReportSectionEnvelopeProto>,
+) -> Value {
+    let mut root_map = serde_json::Map::new();
+    let mut mod_map = serde_json::Map::new();
+    for (&kind, env) in sections {
+        let Ok(val) = extract_section_json(env) else {
+            continue;
+        };
+        if let Some(obj) = val.as_object() {
+            let is_wrapped = obj.contains_key("root")
+                || obj.contains_key("modules")
+                || obj.contains_key("hasModulesObj");
+            if is_wrapped {
+                if let Some(rm) = obj.get("root").and_then(Value::as_object) {
+                    for (k, v) in rm {
+                        root_map.insert(k.clone(), v.clone());
+                    }
+                }
+                if let Some(mm) = obj.get("modules").and_then(Value::as_object) {
+                    for (mk, mv) in mm {
+                        mod_map.insert(mk.clone(), mv.clone());
+                    }
+                }
+                continue;
+            }
+        }
+        match kind {
+            ReportSectionKind::ReportSectionTranslations => {
+                root_map.insert("translations".to_string(), val);
+            }
+            ReportSectionKind::ReportSectionAiAnalyst => {
+                root_map.insert("ai".to_string(), val);
+            }
+            _ => {
+                if let Some(obj) = val.as_object() {
+                    for (k, v) in obj {
+                        root_map.insert(k.clone(), v.clone());
+                    }
+                }
+            }
+        }
+    }
+    if !mod_map.is_empty() {
+        root_map.insert("modules".to_string(), Value::Object(mod_map));
+    }
+    Value::Object(root_map)
+}
+
+async fn upsert_report_translation_section(
+    db: &DbStore,
+    slug: &str,
+    norm_lang: &str,
+    tr_rec: &Value,
+) -> bool {
+    let Ok(Some(hdr)) = db.get_report_header(slug).await else {
+        return false;
+    };
+    if hdr.report_id <= 0 {
+        return false;
+    }
+    let mut tr_map = serde_json::Map::new();
+    let mut tr_mods = serde_json::Map::new();
+    let tr_bit = 1_i32 << (ReportSectionKind::ReportSectionTranslations as u32);
+    if (hdr.section_mask & tr_bit) != 0 {
+        if let Ok(Some(existing_env)) = db
+            .get_report_section(&hdr.slug, ReportSectionKind::ReportSectionTranslations)
+            .await
+        {
+            if let Ok(sec_val) = extract_section_json(&existing_env) {
+                if let Some(rm) = sec_val
+                    .pointer("/root/translations")
+                    .or_else(|| sec_val.get("translations"))
+                    .and_then(Value::as_object)
+                {
+                    tr_map = rm.clone();
+                }
+                if let Some(mm) = sec_val.get("modules").and_then(Value::as_object) {
+                    tr_mods = mm.clone();
+                }
+            }
+        }
+    }
+    tr_map.insert(norm_lang.to_string(), tr_rec.clone());
+    let tr_val = Value::Object(tr_map);
+    let mod_entries: Vec<(&str, &Value)> = tr_mods.iter().map(|(k, v)| (k.as_str(), v)).collect();
+    let Ok(sec_env) = make_report_section_envelope(
+        ReportSectionKind::ReportSectionTranslations,
+        &[("translations", &tr_val)],
+        &mod_entries,
+        now_unix_secs(),
+    ) else {
+        return false;
+    };
+    db.put_report_section(
+        hdr.report_id,
+        ReportSectionKind::ReportSectionTranslations,
+        &sec_env,
+    )
+    .await
+    .is_ok()
+}
+
 // [feat/buyer-decision-complete]
 async fn handle_buyer_diligence_get(
     State(state): State<AppState>,
@@ -3447,22 +3695,18 @@ async fn handle_buyer_diligence_get(
 ) -> ApiResult {
     let raw_q_str = raw_query.as_deref().unwrap_or("");
     let clean_slug = validate_slug_param(&slug).map_err(map_guardrail)?;
-    let rec = match authorize_cached_report(&state, &clean_slug, &headers, raw_q_str, false).await {
-        Ok(auth) => auth.record,
-        Err(resp) => return Ok(resp),
-    };
 
     let cid_opt = resolve_trusted_client_id(&state, &headers).await;
     let (saved_hoa, saved_title) = if let Some(ref cid) = cid_opt {
         let hoa = state
             .db
-            .get_client_doc_review("hoa", &rec.slug, cid)
+            .get_client_doc_review("hoa", &clean_slug, cid)
             .await
             .ok()
             .flatten();
         let title = state
             .db
-            .get_client_doc_review("title", &rec.slug, cid)
+            .get_client_doc_review("title", &clean_slug, cid)
             .await
             .ok()
             .flatten();
@@ -3470,9 +3714,89 @@ async fn handle_buyer_diligence_get(
     } else {
         (None, None)
     };
+    let has_doc_overrides = saved_hoa.is_some() || saved_title.is_some();
+
+    let private_reports = state
+        .env
+        .get("PRIVATE_REPORTS_REQUIRED")
+        .map(is_truthy_flag)
+        .unwrap_or(false);
+    if !private_reports && !has_doc_overrides && !raw_query_has_share_or_api_key(raw_q_str) {
+        if let Ok(Some(hdr)) = state.db.get_report_header(&clean_slug).await {
+            let meta_bit = 1_i32 << (ReportSectionKind::ReportSectionMeta as u32);
+            let bd_bit = 1_i32 << (ReportSectionKind::ReportSectionBuyerDiligence as u32);
+            if (hdr.section_mask & (meta_bit | bd_bit)) == (meta_bit | bd_bit) {
+                if let Ok(secs) = state
+                    .db
+                    .get_report_sections(
+                        &hdr.slug,
+                        &[
+                            ReportSectionKind::ReportSectionMeta,
+                            ReportSectionKind::ReportSectionBuyerDiligence,
+                        ],
+                    )
+                    .await
+                {
+                    let partial = assemble_partial_report_from_envelopes(&secs);
+                    let has_hp_bd = partial.get("hoaProfile").is_some_and(Value::is_object)
+                        && partial.get("buyerDiligence").is_some_and(Value::is_object);
+                    if has_hp_bd {
+                        let auth = match authorize_narrow_report(
+                            &state,
+                            &hdr.slug,
+                            Some(&hdr),
+                            partial,
+                            &headers,
+                            raw_q_str,
+                            false,
+                        )
+                        .await
+                        {
+                            Ok(a) => a,
+                            Err(resp) => return Ok(resp),
+                        };
+                        let mut partial = auth.record.report;
+                        let _ =
+                            crate::lazy::merge_ready_artifacts_into_report(&state.db, &mut partial)
+                                .await;
+                        let redaction = state
+                            .hooks
+                            .redact_report_for_viewer(
+                                &state,
+                                &headers,
+                                raw_q_str,
+                                &hdr.slug,
+                                &mut partial,
+                            )
+                            .await;
+                        let mut resp = json_response(
+                            StatusCode::OK,
+                            json!({
+                                "ok": true,
+                                "slug": hdr.slug,
+                                "hoaProfile": partial.get("hoaProfile").cloned().unwrap_or(Value::Null),
+                                "buyerDiligence": partial.get("buyerDiligence").cloned().unwrap_or(Value::Null),
+                            }),
+                        );
+                        if internal_auth_required(&state.env)
+                            || redaction.redacted
+                            || redaction.private_cache
+                        {
+                            enforce_private_no_store_headers(resp.headers_mut());
+                        }
+                        return Ok(resp);
+                    }
+                }
+            }
+        }
+    }
+
+    let rec = match authorize_cached_report(&state, &clean_slug, &headers, raw_q_str, false).await {
+        Ok(auth) => auth.record,
+        Err(resp) => return Ok(resp),
+    };
 
     let mut report_view = rec.report.clone();
-    let has_doc_overrides = saved_hoa.is_some() || saved_title.is_some();
     if has_doc_overrides
         || !report_view
             .get("hoaProfile")
@@ -3890,17 +4214,28 @@ async fn execute_api_report(
                     {
                         report["translations"] = json!({});
                     }
-                    report["translations"][norm_lang] = rec_val;
-                    let html = render_report_html_with_brand(
-                        &report,
-                        &state.env.brand_name(),
-                        &state.env.brand_domain(),
-                    );
-                    let _ = state
-                        .db
-                        .put_cached_report(&final_slug, &report, Some(&html))
-                        .await;
-                    spawn_static_export_if_configured(&state.env, &final_slug, &report, html);
+                    report["translations"][&norm_lang] = rec_val.clone();
+                    if !upsert_report_translation_section(
+                        &state.db,
+                        &final_slug,
+                        &norm_lang,
+                        &rec_val,
+                    )
+                    .await
+                    {
+                        let _ = state
+                            .db
+                            .put_cached_report(&final_slug, &report, None)
+                            .await;
+                    }
+                    if static_mirror_config_from_env(&state.env).is_some() {
+                        let html = render_report_html_with_brand(
+                            &report,
+                            &state.env.brand_name(),
+                            &state.env.brand_domain(),
+                        );
+                        spawn_static_export_if_configured(&state.env, &final_slug, &report, html);
+                    }
                 }
             }
         }
@@ -3983,9 +4318,41 @@ async fn handle_translate(
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
 
-    let rec = authorize_cached_report(&state, &slug, &headers, "", false)
-        .await?
-        .record;
+    // Narrow section path (`~2–6 KB` vs `409 KB`): when reports are public, check ~240 B header
+    // first, short-circuit from `ReportSectionTranslations` when a native translation is already
+    // embedded, or read ONLY the 5 narrative sections needed by `extract_translatable_payload` and
+    // persist updates via `put_report_section`.
+    let private_reports = state
+        .env
+        .get("PRIVATE_REPORTS_REQUIRED")
+        .map(is_truthy_flag)
+        .unwrap_or(false);
+    let mut hdr_opt = if !private_reports {
+        state.db.get_report_header(&slug).await.ok().flatten()
+    } else {
+        None
+    };
+    let mut preloaded_rec: Option<CachedReportRecord> = None;
+    if let Some(ref hdr) = hdr_opt {
+        authorize_narrow_report(
+            &state,
+            &hdr.slug,
+            Some(hdr),
+            json!({ "meta": { "displayAddress": hdr.display_address } }),
+            &headers,
+            "",
+            false,
+        )
+        .await?;
+    } else if preloaded_rec.is_none() {
+        let rec = authorize_cached_report(&state, &slug, &headers, "", false)
+            .await?
+            .record;
+        if !private_reports {
+            hdr_opt = state.db.get_report_header(&rec.slug).await.ok().flatten();
+        }
+        preloaded_rec = Some(rec);
+    }
 
     let ip = resolve_client_ip_from_req(&state, &headers, &extensions);
     let _ai_permit = state
@@ -3994,16 +4361,113 @@ async fn handle_translate(
         .map_err(map_guardrail)?;
 
     let llm_cache = DbLlmCache(state.db.clone());
-    let out = translate_report(
-        &state.http,
-        &state.env,
-        &rec.report,
-        &lang,
-        refresh,
-        Some(&llm_cache),
-    )
-    .await
-    .map_err(map_anyhow)?;
+    let (out, target_slug) = if let Some(ref hdr) = hdr_opt {
+        let norm_target = crate::ai::resolve_lang(&lang)
+            .map(|c| c.norm_code)
+            .unwrap_or(lang.as_str());
+        let tr_bit = 1_i32 << (ReportSectionKind::ReportSectionTranslations as u32);
+        let mut fast_out: Option<Value> = None;
+
+        if !refresh && (hdr.section_mask & tr_bit) != 0 && !hdr.display_address.trim().is_empty() {
+            if let Ok(Some(tr_env)) = state
+                .db
+                .get_report_section(&hdr.slug, ReportSectionKind::ReportSectionTranslations)
+                .await
+            {
+                if let Ok(tr_sec) = extract_section_json(&tr_env) {
+                    let tr_obj = tr_sec
+                        .pointer("/root/translations")
+                        .or_else(|| tr_sec.get("translations"))
+                        .cloned()
+                        .unwrap_or_else(|| json!({}));
+                    let has_native = tr_obj
+                        .get(norm_target)
+                        .or_else(|| (norm_target == "zh").then(|| tr_obj.get("zh-CN")).flatten())
+                        .map(|e| {
+                            e.get("native").and_then(Value::as_bool) == Some(true)
+                                && e.get("data").is_some_and(Value::is_object)
+                        })
+                        .unwrap_or(false);
+                    if has_native {
+                        let synth_rep = json!({
+                            "meta": { "displayAddress": hdr.display_address },
+                            "translations": tr_obj,
+                        });
+                        if let Ok(hit_val) = translate_report(
+                            &state.http,
+                            &state.env,
+                            &synth_rep,
+                            &lang,
+                            false,
+                            Some(&llm_cache),
+                        )
+                        .await
+                        {
+                            fast_out = Some(hit_val);
+                        }
+                    }
+                }
+            }
+        }
+
+        if let Some(hit) = fast_out {
+            (hit, hdr.slug.clone())
+        } else {
+            let narrative_kinds = [
+                ReportSectionKind::ReportSectionMeta,
+                ReportSectionKind::ReportSectionSummary,
+                ReportSectionKind::ReportSectionAiAnalyst,
+                ReportSectionKind::ReportSectionPropertyFeatures,
+                ReportSectionKind::ReportSectionTranslations,
+            ];
+            let secs = state
+                .db
+                .get_report_sections(&hdr.slug, &narrative_kinds)
+                .await
+                .map_err(map_anyhow)?;
+            let mut partial = assemble_partial_report_from_envelopes(&secs);
+            let has_addr = partial
+                .pointer("/meta/displayAddress")
+                .or_else(|| partial.pointer("/geo/displayAddress"))
+                .and_then(Value::as_str)
+                .is_some_and(|s| !s.trim().is_empty());
+            if !has_addr && !hdr.display_address.trim().is_empty() {
+                if !partial.get("meta").is_some_and(Value::is_object) {
+                    partial["meta"] = json!({});
+                }
+                partial["meta"]["displayAddress"] = json!(hdr.display_address);
+            }
+            let res = translate_report(
+                &state.http,
+                &state.env,
+                &partial,
+                &lang,
+                refresh,
+                Some(&llm_cache),
+            )
+            .await
+            .map_err(map_anyhow)?;
+            (res, hdr.slug.clone())
+        }
+    } else {
+        let rec = preloaded_rec.expect("preloaded when header missing");
+        let res = translate_report(
+            &state.http,
+            &state.env,
+            &rec.report,
+            &lang,
+            refresh,
+            Some(&llm_cache),
+        )
+        .await
+        .map_err(map_anyhow)?;
+        preloaded_rec = Some(rec);
+        let sl = preloaded_rec
+            .as_ref()
+            .map(|r| r.slug.clone())
+            .unwrap_or_else(|| slug.clone());
+        (res, sl)
+    };
 
     let was_cached = out.get("cached").and_then(|v| v.as_bool()).unwrap_or(false);
     if out.get("ok").and_then(|v| v.as_bool()) == Some(true) && !was_cached {
@@ -4013,25 +4477,46 @@ async fn handle_translate(
                 .and_then(|v| v.as_str())
                 .unwrap_or(&lang)
                 .to_string();
-            let mut updated = rec.report;
-            if !updated
-                .get("translations")
-                .map(|t| t.is_object())
-                .unwrap_or(false)
+            if !upsert_report_translation_section(&state.db, &target_slug, &norm_lang, &tr_rec)
+                .await
             {
-                updated["translations"] = json!({});
+                if let Some(mut rec) = match preloaded_rec {
+                    Some(r) => Some(r),
+                    None => authorize_cached_report(&state, &target_slug, &headers, "", false)
+                        .await
+                        .ok()
+                        .map(|a| a.record),
+                } {
+                    if !rec
+                        .report
+                        .get("translations")
+                        .map(|t| t.is_object())
+                        .unwrap_or(false)
+                    {
+                        rec.report["translations"] = json!({});
+                    }
+                    rec.report["translations"][&norm_lang] = tr_rec;
+                    let _ = state
+                        .db
+                        .put_cached_report(&rec.slug, &rec.report, None)
+                        .await;
+                }
             }
-            updated["translations"][norm_lang] = tr_rec;
-            let html = render_report_html_with_brand(
-                &updated,
-                &state.env.brand_name(),
-                &state.env.brand_domain(),
-            );
-            let _ = state
-                .db
-                .put_cached_report(&rec.slug, &updated, Some(&html))
-                .await;
-            spawn_static_export_if_configured(&state.env, &rec.slug, &updated, html);
+            if static_mirror_config_from_env(&state.env).is_some() {
+                if let Ok(Some(full_rec)) = state.db.get_cached_report(&target_slug).await {
+                    let html = render_report_html_with_brand(
+                        &full_rec.report,
+                        &state.env.brand_name(),
+                        &state.env.brand_domain(),
+                    );
+                    spawn_static_export_if_configured(
+                        &state.env,
+                        &target_slug,
+                        &full_rec.report,
+                        html,
+                    );
+                }
+            }
         }
     }
 
@@ -4047,12 +4532,14 @@ async fn handle_ask(
     let req_host = req_host_str(&headers);
     verify_same_origin(&headers, req_host, &state.env).map_err(map_guardrail)?;
     let body = parse_json_body(raw_body, 12, 2_000)?;
-    enforce_allowed_body_keys(&body, &["slug", "question", "history"]).map_err(map_guardrail)?;
+    enforce_allowed_body_keys(&body, &["slug", "question", "history", "role"])
+        .map_err(map_guardrail)?;
 
     let slug = validate_slug_param(body.get("slug").and_then(|v| v.as_str()).unwrap_or(""))
         .map_err(map_guardrail)?;
     let question = body.get("question").and_then(|v| v.as_str()).unwrap_or("");
     let history = body.get("history");
+    let role = body.get("role").and_then(|v| v.as_str());
 
     let rec = authorize_cached_report(&state, &slug, &headers, "", false)
         .await?
@@ -4062,7 +4549,7 @@ async fn handle_ask(
     let _ai_permit = state.shield.acquire_ai(&ip, "ask").map_err(map_guardrail)?;
 
     let cid_opt = resolve_trusted_client_id(&state, &headers).await;
-    let (saved_insp, saved_title) = if let Some(ref cid) = cid_opt {
+    let (saved_insp, saved_title, saved_hoa) = if let Some(ref cid) = cid_opt {
         let insp = state
             .db
             .get_client_doc_review("inspect", &rec.slug, cid)
@@ -4075,10 +4562,39 @@ async fn handle_ask(
             .await
             .ok()
             .flatten();
-        (insp, title)
+        let hoa = state
+            .db
+            .get_client_doc_review("hoa", &rec.slug, cid)
+            .await
+            .ok()
+            .flatten();
+        (insp, title, hoa)
     } else {
-        (None, None)
+        (None, None, None)
     };
+    let saved_packet = crate::web::copilot_api::resolve_disclosure_packet_for_ask(
+        &state,
+        &headers,
+        &rec.slug,
+        cid_opt.as_deref(),
+    )
+    .await;
+
+    let report_for_ask: std::borrow::Cow<'_, Value> =
+        if saved_packet.is_some() || saved_hoa.is_some() {
+            let mut cloned = rec.report.clone();
+            if let Some(obj) = cloned.as_object_mut() {
+                if let Some(pkt) = saved_packet {
+                    obj.insert("packetReview".to_string(), pkt);
+                }
+                if let Some(hoa) = saved_hoa {
+                    obj.insert("hoaReview".to_string(), hoa);
+                }
+            }
+            std::borrow::Cow::Owned(cloned)
+        } else {
+            std::borrow::Cow::Borrowed(&rec.report)
+        };
 
     let ai_prompts = state.db.load_ai_prompt_settings().await;
     let ask_prompt_cfg = AskPromptConfig {
@@ -4086,16 +4602,17 @@ async fn handle_ask(
         max_words: ai_prompts.chatbox_max_words,
     };
     let llm_cache = DbLlmCache(state.db.clone());
-    let out = ask_property_question_with_config(
+    let out = ask_property_question_for_role_with_config(
         &state.http,
         &state.env,
-        &rec.report,
+        report_for_ask.as_ref(),
         question,
         history,
         saved_insp.as_ref(),
         saved_title.as_ref(),
         Some(&llm_cache),
         &ask_prompt_cfg,
+        role,
     )
     .await
     .map_err(map_anyhow)?;
@@ -4190,6 +4707,16 @@ async fn handle_doc_review_get(
                 crate::modules::move_in_cost::enrich_packet_with_move_in_costs(d, &rep);
             }
         }
+    }
+    if doc_type == "packet" {
+        return json_response(
+            StatusCode::OK,
+            json!({
+                "ok": true,
+                "data": data,
+                "fileRetentionPolicy": crate::ai::packet_review::build_file_retention_policy(),
+            }),
+        );
     }
     json_response(StatusCode::OK, json!({ "ok": true, "data": data }))
 }
@@ -4300,7 +4827,7 @@ async fn handle_move_in_quote_post(
     ))
 }
 
-fn parse_uploaded_docs(body: &Value) -> std::result::Result<Vec<UploadedDocInput>, GuardrailError> {
+pub fn parse_uploaded_docs(body: &Value) -> std::result::Result<Vec<UploadedDocInput>, GuardrailError> {
     let Some(arr) = body.get("documents").and_then(|v| v.as_array()) else {
         return Err(GuardrailError::new(
             "INVALID_DOCUMENTS",
@@ -4530,6 +5057,7 @@ async fn handle_doc_review_post(
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(String::from);
+    drop(body);
 
     let rec = authorize_cached_report(state, &slug, headers, "", false)
         .await?
@@ -4604,6 +5132,18 @@ async fn handle_doc_review_post(
             .db
             .put_client_doc_review(doc_type, &rec.slug, &cid, &out.data, 86400 * 14)
             .await;
+    }
+
+    if doc_type == "packet" {
+        return Ok(json_response(
+            StatusCode::OK,
+            json!({
+                "ok": true,
+                "data": out.data,
+                "warnings": out.warnings,
+                "fileRetentionPolicy": crate::ai::packet_review::build_file_retention_policy(),
+            }),
+        ));
     }
 
     Ok(json_response(
@@ -5103,16 +5643,50 @@ async fn handle_cre_business_eval(
                 mdata.insert("businessProfit".into(), business_profit_val.clone());
             }
         }
-        let html = render_report_html_with_brand(
-            &rec.report,
-            &state.env.brand_name(),
-            &state.env.brand_domain(),
-        );
-        let _ = state
-            .db
-            .put_cached_report(&rec.slug, &rec.report, Some(&html))
-            .await;
-        spawn_static_export_if_configured(&state.env, &rec.slug, &rec.report, html);
+        let mut persisted_narrow = false;
+        if let Some(hdr) = state.db.get_report_header(&rec.slug).await.ok().flatten() {
+            if hdr.report_id > 0 {
+                let cre_val = rec.report["cre"].clone();
+                let m_cre_opt = rec.report.pointer("/modules/cre").cloned();
+                let mut mod_entries: Vec<(&str, &Value)> = Vec::new();
+                if let Some(ref m_cre) = m_cre_opt {
+                    mod_entries.push(("cre", m_cre));
+                }
+                if let Ok(cre_env) = make_report_section_envelope(
+                    ReportSectionKind::ReportSectionCre,
+                    &[("cre", &cre_val)],
+                    &mod_entries,
+                    now_unix_secs(),
+                ) {
+                    if state
+                        .db
+                        .put_report_section(
+                            hdr.report_id,
+                            ReportSectionKind::ReportSectionCre,
+                            &cre_env,
+                        )
+                        .await
+                        .is_ok()
+                    {
+                        persisted_narrow = true;
+                    }
+                }
+            }
+        }
+        if !persisted_narrow {
+            let _ = state
+                .db
+                .put_cached_report(&rec.slug, &rec.report, None)
+                .await;
+        }
+        if static_mirror_config_from_env(&state.env).is_some() {
+            let html = render_report_html_with_brand(
+                &rec.report,
+                &state.env.brand_name(),
+                &state.env.brand_domain(),
+            );
+            spawn_static_export_if_configured(&state.env, &rec.slug, &rec.report, html);
+        }
     }
 
     Ok(json_response(
@@ -5279,7 +5853,6 @@ async fn handle_listings(
     State(state): State<AppState>,
     Query(q): Query<ListingsQuery>,
 ) -> ApiResult {
-    let _ = backfill_missing_shopping_facets(&state.db).await;
     let statuses = q
         .status
         .as_deref()
@@ -5368,451 +5941,351 @@ fn split_shop_csv(v: Option<&str>, max_items: usize) -> Vec<String> {
     out
 }
 
-fn row_matches_shop_filters(r: &ListingRow, f: &SearchFilters, skip_group: Option<&str>) -> bool {
-    let sg = skip_group.unwrap_or("");
-    if sg != "status" && !f.statuses.is_empty() && !f.statuses.iter().any(|s| s == &r.status) {
-        return false;
-    }
-    if sg != "location" && (!f.zips.is_empty() || !f.cities.is_empty()) {
-        let zip_ok = f.zips.contains(&r.zip);
-        let city_ok = r
-            .city
-            .as_deref()
-            .map(|rc| f.cities.iter().any(|c| c.eq_ignore_ascii_case(rc)))
-            .unwrap_or(false);
-        if !zip_ok && !city_ok {
-            return false;
+const SHOP_LISTING_CORE_COLS_L: &str = "l.listing_sk, l.external_id, l.report_slug, l.zip, l.state_code, l.county_fips, l.city, l.street, l.address, l.lat, l.lon, l.status, l.property_category, l.price, l.list_price, l.sold_price, l.estimated_value, l.price_per_sqft, l.hoa_monthly, l.all_in_monthly, l.beds, l.baths, l.sqft, l.lot_sqft, l.year_built, l.stories, l.days_on_market, l.listed_epoch_day, l.sold_epoch_day, l.school_score, l.school_grade, l.walk_score, l.safety_score, l.overall_score, l.electric_rate_kwh, l.max_download_mbps, l.tag_bits, l.known_bits, l.first_seen_ts, l.last_seen_ts, l.status_changed_ts, l.price_changed_ts";
+
+fn build_shop_v3_page_and_count_sql(
+    filters: &SearchFilters,
+    dialect: &str,
+    rapid_hint: &str,
+    limit: usize,
+) -> (String, Vec<SqlParam>, String, Vec<SqlParam>) {
+    let mut clauses: Vec<String> = Vec::new();
+    let mut params: Vec<SqlParam> = Vec::new();
+
+    let status_codes: Vec<i64> = if filters.statuses.is_empty() {
+        vec![1, 2]
+    } else {
+        filters
+            .statuses
+            .iter()
+            .map(|s| listing_status_to_code(Some(s)) as i64)
+            .collect()
+    };
+    if !status_codes.is_empty() {
+        let ph = vec!["?"; status_codes.len()].join(", ");
+        for code in status_codes {
+            params.push(SqlParam::I64(code));
         }
+        clauses.push(format!("l.status IN ({ph})"));
     }
-    if sg != "location" && !f.states.is_empty() && f.zips.is_empty() {
-        let st_ok = r
-            .state
-            .as_deref()
-            .map(|rs| f.states.iter().any(|s| s.eq_ignore_ascii_case(rs)))
-            .unwrap_or(false);
-        if !st_ok {
-            return false;
+
+    if !filters.zips.is_empty() || !filters.cities.is_empty() {
+        let mut loc_or: Vec<String> = Vec::new();
+        if !filters.zips.is_empty() {
+            let ph = vec!["?"; filters.zips.len()].join(", ");
+            for z in &filters.zips {
+                params.push(SqlParam::Text(z.clone()));
+            }
+            loc_or.push(format!("l.zip IN ({ph})"));
         }
+        if !filters.cities.is_empty() {
+            let mut city_or = Vec::new();
+            for c in &filters.cities {
+                params.push(SqlParam::Text(c.to_ascii_lowercase()));
+                city_or.push("LOWER(l.city) = ?".to_string());
+            }
+            loc_or.push(format!("({})", city_or.join(" OR ")));
+        }
+        clauses.push(format!("({})", loc_or.join(" OR ")));
     }
-    if sg != "price" {
-        if let Some(min_p) = f.min_price {
-            if r.price.map(|p| p >= min_p).unwrap_or(false) == false {
-                return false;
+
+    if !filters.states.is_empty() && filters.zips.is_empty() {
+        let mut st_or = Vec::new();
+        for st in &filters.states {
+            params.push(SqlParam::Text(st.to_ascii_uppercase()));
+            st_or.push("UPPER(l.state_code) = ?".to_string());
+        }
+        clauses.push(format!("({})", st_or.join(" OR ")));
+    }
+
+    if let Some(min_p) = filters.min_price {
+        params.push(SqlParam::I64(min_p));
+        clauses.push("l.price >= ?".to_string());
+    }
+    if let Some(max_p) = filters.max_price {
+        params.push(SqlParam::I64(max_p));
+        clauses.push("l.price <= ?".to_string());
+    }
+    if let Some(min_b) = filters.min_beds {
+        params.push(SqlParam::F64(min_b.max(1.0)));
+        clauses.push("(l.beds IS NULL OR l.beds >= ?)".to_string());
+    }
+    if let Some(max_b) = filters.max_beds {
+        params.push(SqlParam::F64(max_b));
+        clauses.push("l.beds <= ?".to_string());
+    }
+    if let Some(min_ba) = filters.min_baths {
+        params.push(SqlParam::F64(min_ba.max(1.0)));
+        clauses.push("(l.baths IS NULL OR l.baths >= ?)".to_string());
+    }
+    if let Some(min_sq) = filters.min_sqft {
+        params.push(SqlParam::I64(min_sq));
+        clauses.push("(l.sqft IS NULL OR l.sqft >= ?)".to_string());
+    }
+    if let Some(max_sq) = filters.max_sqft {
+        params.push(SqlParam::I64(max_sq));
+        clauses.push("l.sqft <= ?".to_string());
+    }
+    if let Some(min_lot) = filters.min_lot_sqft {
+        params.push(SqlParam::I64(min_lot));
+        clauses.push("(l.lot_sqft IS NULL OR l.lot_sqft >= ?)".to_string());
+    }
+    if let Some(min_yr) = filters.min_year_built {
+        params.push(SqlParam::I64(min_yr));
+        clauses.push("(l.year_built IS NULL OR l.year_built >= ?)".to_string());
+    }
+    if let Some(max_yr) = filters.max_year_built {
+        params.push(SqlParam::I64(max_yr));
+        clauses.push("(l.year_built IS NULL OR l.year_built <= ?)".to_string());
+    }
+    if let Some(st) = filters.stories {
+        params.push(SqlParam::F64(st as f64));
+        clauses.push("(l.stories IS NULL OR l.stories = ?)".to_string());
+    }
+    if let Some(max_hoa) = filters.max_hoa_monthly {
+        params.push(SqlParam::I64(max_hoa));
+        clauses.push("(l.hoa_monthly IS NULL OR l.hoa_monthly <= ?)".to_string());
+    }
+    if !filters.property_types.is_empty() {
+        let mut cat_codes: Vec<i64> = Vec::new();
+        for pt in &filters.property_types {
+            let code = property_category_to_code(Some(pt)) as i64;
+            if code > 0 && !cat_codes.contains(&code) {
+                cat_codes.push(code);
             }
         }
-        if let Some(max_p) = f.max_price {
-            if r.price.map(|p| p <= max_p).unwrap_or(false) == false {
-                return false;
+        if !cat_codes.is_empty() {
+            let ph = vec!["?"; cat_codes.len()].join(", ");
+            for code in cat_codes {
+                params.push(SqlParam::I64(code));
             }
+            clauses.push(format!("l.property_category IN ({ph})"));
         }
     }
-    if sg != "monthly" {
-        if let Some(max_m) = f.max_all_in_monthly {
-            if r.all_in_monthly.map(|m| m <= max_m).unwrap_or(false) == false {
-                return false;
-            }
-        }
-        if let Some(max_u) = f.max_monthly_utilities {
-            if r.est_monthly_utilities.map(|u| u <= max_u).unwrap_or(false) == false {
-                return false;
-            }
-        }
+
+    let eff_school = filters
+        .min_school_score
+        .or_else(|| school_grade_to_min_score(filters.min_school_grade.as_deref()));
+    if let Some(sc) = eff_school {
+        let threshold = round_n(sc - 0.2, 1);
+        params.push(SqlParam::F64(threshold));
+        clauses.push("(l.school_score IS NULL OR l.school_score >= ?)".to_string());
     }
-    if sg != "beds_baths" {
-        if let Some(min_b) = f.min_beds {
-            if let Some(b) = r.beds {
-                if b < min_b {
-                    return false;
+    if let Some(min_dl) = filters.min_download_mbps {
+        params.push(SqlParam::I64(min_dl));
+        clauses.push("l.max_download_mbps >= ?".to_string());
+    }
+    if let Some(max_r) = filters.max_electric_rate_kwh {
+        params.push(SqlParam::F64(round_n(max_r, 4)));
+        clauses.push("l.electric_rate_kwh <= ?".to_string());
+    }
+    if let Some(max_m) = filters.max_all_in_monthly {
+        params.push(SqlParam::I64(max_m));
+        clauses.push("l.all_in_monthly <= ?".to_string());
+    }
+    if let Some(min_safety) = filters.min_safety_score {
+        params.push(SqlParam::F64(min_safety));
+        clauses.push("l.safety_score >= ?".to_string());
+    }
+
+    let (mut req_mask, mut excl_mask) = build_search_filter_tag_masks(
+        filters.fiber_only,
+        filters.high_speed_internet_only,
+        filters.municipal_electric_only,
+        filters.municipal_water_only,
+        filters.municipal_sewer_only,
+        filters.has_solar,
+        filters.has_ev_charger,
+        filters.has_heat_pump,
+        filters.has_adu,
+        filters.adu_feasible,
+        filters.has_pool,
+        filters.exclude_special_tax,
+        &filters.required_tags,
+    );
+    if filters.has_hardwood_floors {
+        req_mask |= feature_tag_bit(FeatureTag::HardwoodFloors);
+    }
+    if filters.has_updated_kitchen {
+        req_mask |= feature_tag_bit(FeatureTag::UpdatedKitchen);
+    }
+    if filters.remodeled_only {
+        req_mask |= feature_tag_bit(FeatureTag::Remodeled);
+    }
+    if filters.quiet_street_only {
+        req_mask |= feature_tag_bit(FeatureTag::QuietStreet);
+    }
+    if filters.exclude_high_flood_risk {
+        excl_mask |= feature_tag_bit(FeatureTag::InSfhaFlood);
+    }
+    if filters.exclude_high_wildfire_risk {
+        excl_mask |= feature_tag_bit(FeatureTag::HighWildfire);
+    }
+    if req_mask != 0 {
+        clauses.push(sql_bitmask_all_set_expr(dialect, "l.tag_bits", req_mask));
+    }
+    if excl_mask != 0 {
+        clauses.push(sql_bitmask_none_set_expr(dialect, "l.tag_bits", excl_mask));
+    }
+
+    let unmapped_tags: Vec<String> = filters
+        .required_tags
+        .iter()
+        .take(6)
+        .filter(|rt| feature_tag_from_slug(rt).is_none())
+        .map(|rt| rt.trim().to_ascii_lowercase().replace(' ', "_"))
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    let need_lu = !filters.internet_carriers.is_empty()
+        || !filters.electric_carriers.is_empty()
+        || filters.max_monthly_utilities.is_some();
+    let need_lf = filters.min_garage_spaces.is_some() || !filters.architectural_styles.is_empty();
+    let need_lh = filters.max_noise_db.is_some() || filters.max_seismic_pga.is_some();
+    let need_ld = !filters.must_have_keywords.is_empty() || !unmapped_tags.is_empty();
+
+    let mut joins = String::new();
+    if need_lu {
+        joins.push_str(" LEFT JOIN listing_utilities lu ON lu.listing_sk = l.listing_sk");
+        if !filters.internet_carriers.is_empty() {
+            let mut isp_or = Vec::new();
+            for c in filters.internet_carriers.iter().take(6) {
+                let needle = c.trim().to_ascii_lowercase();
+                if !needle.is_empty() {
+                    let pat = format!("%{needle}%");
+                    params.push(SqlParam::Text(pat.clone()));
+                    params.push(SqlParam::Text(pat));
+                    isp_or.push(
+                        "(LOWER(COALESCE(lu.internet_carriers, '')) LIKE ? OR LOWER(COALESCE(lu.fiber_carriers, '')) LIKE ?)"
+                            .to_string(),
+                    );
                 }
             }
+            if !isp_or.is_empty() {
+                clauses.push(format!("({})", isp_or.join(" OR ")));
+            }
         }
-        if let Some(min_ba) = f.min_baths {
-            if let Some(ba) = r.baths {
-                if ba < min_ba {
-                    return false;
+        if !filters.electric_carriers.is_empty() {
+            let mut elec_or = Vec::new();
+            for c in filters.electric_carriers.iter().take(6) {
+                let needle = c.trim().to_ascii_lowercase();
+                if !needle.is_empty() {
+                    params.push(SqlParam::Text(format!("%{needle}%")));
+                    elec_or.push("LOWER(COALESCE(lu.electric_carrier, '')) LIKE ?".to_string());
                 }
+            }
+            if !elec_or.is_empty() {
+                clauses.push(format!("({})", elec_or.join(" OR ")));
+            }
+        }
+        if let Some(max_u) = filters.max_monthly_utilities {
+            params.push(SqlParam::I64(max_u));
+            clauses.push("lu.est_monthly_utilities <= ?".to_string());
+        }
+    }
+
+    if need_lf {
+        joins.push_str(" LEFT JOIN listing_features lf ON lf.listing_sk = l.listing_sk");
+        if let Some(min_g) = filters.min_garage_spaces {
+            params.push(SqlParam::F64(min_g));
+            clauses.push("lf.garage_spaces >= ?".to_string());
+        }
+        if !filters.architectural_styles.is_empty() {
+            let mut st_or = Vec::new();
+            for s in filters.architectural_styles.iter().take(6) {
+                let needle = s.trim().to_ascii_lowercase();
+                if !needle.is_empty() {
+                    params.push(SqlParam::Text(format!("%{needle}%")));
+                    st_or.push("LOWER(COALESCE(lf.architectural_style, '')) LIKE ?".to_string());
+                }
+            }
+            if !st_or.is_empty() {
+                clauses.push(format!("({})", st_or.join(" OR ")));
             }
         }
     }
-    if sg != "size" {
-        if let Some(min_sq) = f.min_sqft {
-            if let Some(sq) = r.sqft {
-                if sq < min_sq {
-                    return false;
-                }
-            }
+
+    if need_lh {
+        joins.push_str(" LEFT JOIN listing_hazards lh ON lh.listing_sk = l.listing_sk");
+        if let Some(max_db) = filters.max_noise_db {
+            params.push(SqlParam::F64(max_db));
+            clauses.push("lh.noise_max_db <= ?".to_string());
         }
-        if let Some(min_lot) = f.min_lot_sqft {
-            if let Some(lot) = r.lot_sqft {
-                if lot < min_lot {
-                    return false;
-                }
+        if let Some(max_pga) = filters.max_seismic_pga {
+            params.push(SqlParam::F64(max_pga));
+            clauses.push("lh.seismic_pga <= ?".to_string());
+        }
+    }
+
+    if need_ld {
+        joins.push_str(" LEFT JOIN listing_descriptions ld ON ld.listing_sk = l.listing_sk");
+        for clean_tag in &unmapped_tags {
+            let pat_words = format!("%{}%", clean_tag.replace('_', " "));
+            params.push(SqlParam::Text(clean_tag.clone()));
+            params.push(SqlParam::Text(pat_words));
+            clauses.push(
+                "(EXISTS (SELECT 1 FROM listing_tags lt WHERE lt.listing_sk = l.listing_sk AND lt.tag_code = ?) OR LOWER(COALESCE(ld.features_text, '')) LIKE ?)"
+                    .to_string(),
+            );
+        }
+        for kw in filters.must_have_keywords.iter().take(3) {
+            let clean_kw = kw.trim();
+            if !clean_kw.is_empty() {
+                params.push(SqlParam::Text(format!("%{}%", clean_kw.to_ascii_lowercase())));
+                clauses.push("LOWER(COALESCE(ld.features_text, '')) LIKE ?".to_string());
             }
         }
     }
-    if sg != "hoa" {
-        if let Some(max_hoa) = f.max_hoa_monthly {
-            if let Some(h) = r.hoa_monthly {
-                if h > max_hoa {
-                    return false;
-                }
-            }
+
+    let where_sql = if clauses.is_empty() {
+        "1 = 1".to_string()
+    } else {
+        clauses.join(" AND ")
+    };
+
+    let order_sql = match filters.sort_by.as_str() {
+        "price_asc" => "CASE WHEN l.price IS NULL THEN 1 ELSE 0 END ASC, l.price ASC".to_string(),
+        "price_desc" => "COALESCE(l.price, 0) DESC".to_string(),
+        "monthly_asc" => {
+            "CASE WHEN l.all_in_monthly IS NULL THEN 1 ELSE 0 END ASC, l.all_in_monthly ASC, l.price ASC"
+                .to_string()
         }
-    }
-    if sg != "property_type" && !f.property_types.is_empty() {
-        let pt_ok = r
-            .property_type
-            .as_deref()
-            .map(|pt| f.property_types.iter().any(|t| t == pt))
-            .unwrap_or(false);
-        if !pt_ok {
-            return false;
+        "electric_rate_asc" => {
+            "CASE WHEN l.electric_rate_kwh IS NULL THEN 1 ELSE 0 END ASC, l.electric_rate_kwh ASC, l.price ASC"
+                .to_string()
         }
-    }
-    if sg != "school" {
-        let eff_school = f
-            .min_school_score
-            .or_else(|| school_grade_to_min_score(f.min_school_grade.as_deref()));
-        if let Some(sc) = eff_school {
-            if let Some(rsc) = r.school_score {
-                if rsc < sc - 0.2 {
-                    return false;
-                }
-            }
-        }
-    }
-    if sg != "hazards" {
-        if f.exclude_high_flood_risk {
-            if let Some(ref fz) = r.flood_zone {
-                if ["AE", "A", "AO", "AH", "VE", "V"].contains(&fz.as_str()) {
-                    return false;
-                }
-            }
-        }
-        if f.exclude_high_wildfire_risk {
-            if let Some(ref wz) = r.wildfire_zone {
-                if wz.to_ascii_lowercase().contains("high") {
-                    return false;
-                }
-            }
-        }
-        if f.exclude_special_tax && r.has_special_tax == Some(1) {
-            return false;
-        }
-    }
-    if sg != "internet" {
-        if f.fiber_only && r.fiber_available != Some(1) {
-            return false;
-        }
-        if f.high_speed_internet_only && r.high_speed_internet != Some(1) {
-            return false;
-        }
-        if let Some(min_dl) = f.min_download_mbps {
-            if r.max_download_mbps.unwrap_or(0) < min_dl {
-                return false;
-            }
-        }
-        if !f.internet_carriers.is_empty() {
-            let blob = format!(
-                "{} {}",
-                r.internet_carriers.as_deref().unwrap_or(""),
-                r.fiber_carriers.as_deref().unwrap_or("")
+        "internet_desc" => {
+            let fiber_expr =
+                sql_bit_is_set_expr(dialect, "l.tag_bits", FeatureTag::FiberAvailable as u32);
+            format!(
+                "CASE WHEN ({fiber_expr}) THEN 1 ELSE 0 END DESC, COALESCE(l.max_download_mbps, 0) DESC, l.price ASC"
             )
-            .to_ascii_lowercase();
-            if !f
-                .internet_carriers
-                .iter()
-                .any(|c| blob.contains(&c.to_ascii_lowercase()))
-            {
-                return false;
-            }
         }
-    }
-    if sg != "electric" {
-        if f.municipal_electric_only && r.electric_utility_type.as_deref() != Some("municipal") {
-            return false;
+        "newest" => "l.status_changed_ts DESC".to_string(),
+        "school_desc" => {
+            "CASE WHEN l.school_score IS NULL THEN 1 ELSE 0 END ASC, l.school_score DESC, l.price ASC"
+                .to_string()
         }
-        if let Some(max_r) = f.max_electric_rate_kwh {
-            if r.electric_rate_kwh.map(|x| x <= max_r).unwrap_or(false) == false {
-                return false;
-            }
+        "sqft_desc" => "COALESCE(l.sqft, 0) DESC".to_string(),
+        _ => {
+            "CASE l.status WHEN 1 THEN 0 WHEN 2 THEN 1 WHEN 3 THEN 2 ELSE 3 END ASC, COALESCE(l.school_score, 0) DESC, l.price ASC"
+                .to_string()
         }
-        if !f.electric_carriers.is_empty() {
-            let ec_lc = r
-                .electric_carrier
-                .as_deref()
-                .unwrap_or("")
-                .to_ascii_lowercase();
-            if !f
-                .electric_carriers
-                .iter()
-                .any(|c| ec_lc.contains(&c.to_ascii_lowercase()))
-            {
-                return false;
-            }
-        }
-    }
-    if sg != "water_sewer" {
-        if f.municipal_water_only && r.water_source_type.as_deref() != Some("municipal") {
-            return false;
-        }
-        if f.municipal_sewer_only && r.sewer_type.as_deref() != Some("municipal") {
-            return false;
-        }
-    }
-    if sg != "hardware" {
-        if f.has_solar && r.has_solar != Some(1) {
-            return false;
-        }
-        if f.has_ev_charger && r.has_ev_charger != Some(1) {
-            return false;
-        }
-        if f.has_heat_pump && r.has_heat_pump != Some(1) {
-            return false;
-        }
-        if f.has_adu && r.has_adu != Some(1) {
-            return false;
-        }
-        if f.adu_feasible && r.adu_feasible != Some(1) {
-            return false;
-        }
-        if f.has_pool && r.has_pool != Some(1) {
-            return false;
-        }
-        if let Some(min_g) = f.min_garage_spaces {
-            if r.garage_spaces.unwrap_or(0.0) < min_g {
-                return false;
-            }
-        }
-        if !f.architectural_styles.is_empty() {
-            let st_lc = r
-                .architectural_style
-                .as_deref()
-                .unwrap_or("")
-                .to_ascii_lowercase();
-            if !f
-                .architectural_styles
-                .iter()
-                .any(|s| st_lc.contains(&s.to_ascii_lowercase()))
-            {
-                return false;
-            }
-        }
-    }
-    true
-}
+    };
 
-fn compute_shop_facets(pool: &[ListingRow], f: &SearchFilters) -> Value {
-    let inet_pool: Vec<&ListingRow> = pool
-        .iter()
-        .filter(|r| row_matches_shop_filters(r, f, Some("internet")))
-        .collect();
-    let elec_pool: Vec<&ListingRow> = pool
-        .iter()
-        .filter(|r| row_matches_shop_filters(r, f, Some("electric")))
-        .collect();
-    let monthly_pool: Vec<&ListingRow> = pool
-        .iter()
-        .filter(|r| row_matches_shop_filters(r, f, Some("monthly")))
-        .collect();
-    let price_pool: Vec<&ListingRow> = pool
-        .iter()
-        .filter(|r| row_matches_shop_filters(r, f, Some("price")))
-        .collect();
-    let ptype_pool: Vec<&ListingRow> = pool
-        .iter()
-        .filter(|r| row_matches_shop_filters(r, f, Some("property_type")))
-        .collect();
-    let hoa_pool: Vec<&ListingRow> = pool
-        .iter()
-        .filter(|r| row_matches_shop_filters(r, f, Some("hoa")))
-        .collect();
-    let loc_pool: Vec<&ListingRow> = pool
-        .iter()
-        .filter(|r| row_matches_shop_filters(r, f, Some("location")))
-        .collect();
-    let base_pool: Vec<&ListingRow> = pool
-        .iter()
-        .filter(|r| row_matches_shop_filters(r, f, None))
-        .collect();
+    let cnt_sql = format!(
+        "SELECT {rapid_hint} COUNT(*) AS cnt FROM listings l{joins} WHERE {where_sql}"
+    );
+    let cnt_params = params.clone();
 
-    // Internet & Fiber Carrier counts
-    let fiber_cnt = inet_pool.iter().filter(|r| r.fiber_available == Some(1)).count();
-    let hs_cnt = inet_pool.iter().filter(|r| r.high_speed_internet == Some(1)).count();
-    let g1_cnt = inet_pool.iter().filter(|r| r.max_download_mbps.unwrap_or(0) >= 1000).count();
-    let g2_cnt = inet_pool.iter().filter(|r| r.max_download_mbps.unwrap_or(0) >= 2000).count();
-    let g5_cnt = inet_pool.iter().filter(|r| r.max_download_mbps.unwrap_or(0) >= 5000).count();
+    let safe_limit = limit.clamp(1, 120) as i64;
+    let mut page_params = params;
+    page_params.push(SqlParam::I64(safe_limit));
+    let page_sql = format!(
+        "SELECT {rapid_hint} {SHOP_LISTING_CORE_COLS_L} FROM listings l{joins} WHERE {where_sql} ORDER BY {order_sql} LIMIT ?"
+    );
 
-    let mut isp_counts: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
-    for r in &inet_pool {
-        let mut seen_row = std::collections::HashSet::new();
-        for src in [r.fiber_carriers.as_deref(), r.internet_carriers.as_deref()]
-            .into_iter()
-            .flatten()
-        {
-            for raw_c in src.split(',') {
-                let c = raw_c.trim();
-                if c.is_empty() {
-                    continue;
-                }
-                let low = c.to_ascii_lowercase();
-                let canon = if low.contains("at&t") {
-                    "AT&T Fiber"
-                } else if low.contains("sonic") {
-                    "Sonic 10G Fiber"
-                } else if low.contains("google fiber") {
-                    "Google Fiber"
-                } else if low.contains("fios") {
-                    "Verizon Fios"
-                } else if low.contains("frontier") {
-                    "Frontier Fiber"
-                } else if low.contains("quantum") {
-                    "Quantum Fiber"
-                } else if low.contains("ziply") {
-                    "Ziply Fiber"
-                } else if low.contains("xfinity") {
-                    "Xfinity (Comcast)"
-                } else if low.contains("spectrum") {
-                    "Spectrum Cable"
-                } else if low.contains("cox") {
-                    "Cox Cable"
-                } else if low.contains("starlink") {
-                    continue;
-                } else {
-                    c
-                };
-                if seen_row.insert(canon.to_string()) {
-                    *isp_counts.entry(canon.to_string()).or_insert(0) += 1;
-                }
-            }
-        }
-    }
-    let mut internet_carriers_vec: Vec<(String, usize)> = isp_counts.into_iter().collect();
-    internet_carriers_vec.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-
-    // Electric utility counts
-    let muni_elec_cnt = elec_pool
-        .iter()
-        .filter(|r| r.electric_utility_type.as_deref() == Some("municipal"))
-        .count();
-    let rate_20_cnt = elec_pool
-        .iter()
-        .filter(|r| r.electric_rate_kwh.map(|x| x <= 0.20).unwrap_or(false))
-        .count();
-    let rate_25_cnt = elec_pool
-        .iter()
-        .filter(|r| r.electric_rate_kwh.map(|x| x <= 0.25).unwrap_or(false))
-        .count();
-    let rate_35_cnt = elec_pool
-        .iter()
-        .filter(|r| r.electric_rate_kwh.map(|x| x <= 0.35).unwrap_or(false))
-        .count();
-
-    let mut elec_carrier_map: std::collections::BTreeMap<String, (usize, Option<f64>, Option<String>)> =
-        std::collections::BTreeMap::new();
-    for r in &elec_pool {
-        if let Some(ref ec) = r.electric_carrier {
-            let entry = elec_carrier_map
-                .entry(ec.clone())
-                .or_insert((0, r.electric_rate_kwh, r.electric_utility_type.clone()));
-            entry.0 += 1;
-        }
-    }
-    let mut electric_carriers_vec: Vec<_> = elec_carrier_map.into_iter().collect();
-    electric_carriers_vec.sort_by(|a, b| b.1 .0.cmp(&a.1 .0).then_with(|| a.0.cmp(&b.0)));
-
-    // Property type counts
-    let mut ptype_map: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
-    for r in &ptype_pool {
-        if let Some(ref pt) = r.property_type {
-            *ptype_map.entry(pt.clone()).or_insert(0) += 1;
-        }
-    }
-
-    // Top cities & ZIPs
-    let mut city_map: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
-    let mut zip_map: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
-    for r in &loc_pool {
-        if let Some(ref c) = r.city {
-            if !c.trim().is_empty() {
-                *city_map.entry(c.trim().to_string()).or_insert(0) += 1;
-            }
-        }
-        if !r.zip.is_empty() {
-            *zip_map.entry(r.zip.clone()).or_insert(0) += 1;
-        }
-    }
-    let mut cities_vec: Vec<_> = city_map.into_iter().collect();
-    cities_vec.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-    let mut zips_vec: Vec<_> = zip_map.into_iter().collect();
-    zips_vec.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-
-    json!({
-        "internet": {
-            "fiberAvailable": fiber_cnt,
-            "highSpeedAvailable": hs_cnt,
-            "speed1GbpsPlus": g1_cnt,
-            "speed2GbpsPlus": g2_cnt,
-            "speed5GbpsPlus": g5_cnt,
-            "carriers": internet_carriers_vec.into_iter().take(12).map(|(name, count)| json!({
-                "name": name,
-                "count": count,
-            })).collect::<Vec<_>>(),
-        },
-        "electricity": {
-            "municipalPublicPower": muni_elec_cnt,
-            "rateUnder020": rate_20_cnt,
-            "rateUnder025": rate_25_cnt,
-            "rateUnder035": rate_35_cnt,
-            "carriers": electric_carriers_vec.into_iter().take(12).map(|(name, (count, rate, utype))| json!({
-                "name": name,
-                "count": count,
-                "ratePerKwhUsd": rate,
-                "utilityType": utype,
-            })).collect::<Vec<_>>(),
-        },
-        "monthlyAllIn": {
-            "under4500": monthly_pool.iter().filter(|r| r.all_in_monthly.map(|m| m <= 4_500).unwrap_or(false)).count(),
-            "under6500": monthly_pool.iter().filter(|r| r.all_in_monthly.map(|m| m <= 6_500).unwrap_or(false)).count(),
-            "under9000": monthly_pool.iter().filter(|r| r.all_in_monthly.map(|m| m <= 9_000).unwrap_or(false)).count(),
-            "under12500": monthly_pool.iter().filter(|r| r.all_in_monthly.map(|m| m <= 12_500).unwrap_or(false)).count(),
-        },
-        "price": {
-            "under800k": price_pool.iter().filter(|r| r.price.map(|p| p <= 800_000).unwrap_or(false)).count(),
-            "under1250k": price_pool.iter().filter(|r| r.price.map(|p| p <= 1_250_000).unwrap_or(false)).count(),
-            "under1750k": price_pool.iter().filter(|r| r.price.map(|p| p <= 1_750_000).unwrap_or(false)).count(),
-            "under2500k": price_pool.iter().filter(|r| r.price.map(|p| p <= 2_500_000).unwrap_or(false)).count(),
-        },
-        "hoa": {
-            "noHoa": hoa_pool.iter().filter(|r| r.hoa_monthly.unwrap_or(0) == 0).count(),
-            "under300": hoa_pool.iter().filter(|r| r.hoa_monthly.unwrap_or(0) <= 300).count(),
-        },
-        "propertyTypes": ptype_map.into_iter().map(|(name, count)| json!({ "name": name, "count": count })).collect::<Vec<_>>(),
-        "waterSewerTax": {
-            "municipalWater": base_pool.iter().filter(|r| r.water_source_type.as_deref() == Some("municipal")).count(),
-            "municipalSewer": base_pool.iter().filter(|r| r.sewer_type.as_deref() == Some("municipal")).count(),
-            "noSpecialTax": base_pool.iter().filter(|r| r.has_special_tax.unwrap_or(0) == 0).count(),
-            "lowFloodRisk": base_pool.iter().filter(|r| {
-                r.flood_zone.as_deref().map(|fz| !["AE", "A", "AO", "AH", "VE", "V"].contains(&fz)).unwrap_or(true)
-            }).count(),
-            "lowWildfireRisk": base_pool.iter().filter(|r| {
-                r.wildfire_zone.as_deref().map(|wz| !wz.to_ascii_lowercase().contains("high")).unwrap_or(true)
-            }).count(),
-        },
-        "hardware": {
-            "solar": base_pool.iter().filter(|r| r.has_solar == Some(1)).count(),
-            "evCharger": base_pool.iter().filter(|r| r.has_ev_charger == Some(1)).count(),
-            "heatPump": base_pool.iter().filter(|r| r.has_heat_pump == Some(1)).count(),
-            "hasAdu": base_pool.iter().filter(|r| r.has_adu == Some(1)).count(),
-            "aduFeasible": base_pool.iter().filter(|r| r.adu_feasible == Some(1)).count(),
-            "pool": base_pool.iter().filter(|r| r.has_pool == Some(1)).count(),
-            "garage2Plus": base_pool.iter().filter(|r| r.garage_spaces.unwrap_or(0.0) >= 2.0).count(),
-        },
-        "locations": {
-            "cities": cities_vec.into_iter().take(12).map(|(name, count)| json!({ "name": name, "count": count })).collect::<Vec<_>>(),
-            "zips": zips_vec.into_iter().take(15).map(|(zip, count)| json!({ "zip": zip, "count": count })).collect::<Vec<_>>(),
-        }
-    })
+    (page_sql, page_params, cnt_sql, cnt_params)
 }
 
 async fn require_operator_or_cron_access(
@@ -5871,8 +6344,6 @@ async fn handle_listings_shop(
     extensions: Extensions,
     Query(qp): Query<ShopListingsQuery>,
 ) -> ApiResult {
-    let _ = backfill_missing_shopping_facets(&state.db).await;
-
     let mut filters = if let Some(ref raw_q) = qp.q.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
         let clean = validate_search_requirements(raw_q).map_err(|e| {
             json_response(
@@ -6071,33 +6542,35 @@ async fn handle_listings_shop(
 
     let limit = qp.limit.unwrap_or(48).clamp(1, 120);
     let dialect = state.db.dialect();
-    let compiled = compile_filters_to_sql(&filters, dialect, false, None, 500);
-    let matched_rows = state
+    let rapid_hint = state
         .db
-        .fetch_listings_sql(&compiled.sql, &compiled.params)
+        .rapid_query_hint_for_scan(filters.zips.len(), !filters.cities.is_empty());
+    let sql_preview = compile_filters_to_sql(&filters, dialect, false, None, limit).sql_preview;
+    let (page_sql, page_params, cnt_sql, cnt_params) =
+        build_shop_v3_page_and_count_sql(&filters, dialect, rapid_hint, limit);
+
+    let (cores, total_opt, facets) = tokio::try_join!(
+        state.db.search_listing_cores(&page_sql, &page_params),
+        state
+            .db
+            .fetch_optional_mapped(&cnt_sql, &cnt_params, |r| r.opt_i64("cnt").unwrap_or(0)),
+        state.db.compute_shop_facets_sql(&filters),
+    )
+    .map_err(map_anyhow)?;
+
+    let hydrated = state
+        .db
+        .hydrate_listing_cards(&cores)
         .await
         .map_err(map_anyhow)?;
 
-    // Fetch status-scoped catalog pool for disjunctive Amazon-style facet counts
-    let scope_filters = SearchFilters {
-        statuses: filters.statuses.clone(),
-        ..Default::default()
-    };
-    let scope_compiled = compile_filters_to_sql(&scope_filters, dialect, false, None, 500);
-    let pool_rows = state
-        .db
-        .fetch_listings_sql(&scope_compiled.sql, &scope_compiled.params)
-        .await
-        .unwrap_or_else(|_| matched_rows.clone());
-    let facets = compute_shop_facets(&pool_rows, &filters);
-
-    let total_matched = matched_rows.len();
-    let listings: Vec<Value> = matched_rows
+    let total_matched = total_opt.unwrap_or(hydrated.len() as i64).max(hydrated.len() as i64) as usize;
+    let listings: Vec<Value> = hydrated
         .iter()
-        .take(limit)
-        .map(|r| {
-            let mut item = format_listing_row(r);
-            let det = score_listing_deterministic(r, &filters);
+        .map(|view| {
+            let r = view.to_listing_row();
+            let mut item = format_listing_row(&r);
+            let det = score_listing_deterministic(&r, &filters);
             if let Some(obj) = item.as_object_mut() {
                 obj.insert("matchScore".to_string(), json!(det.match_score));
                 obj.insert("matchTier".to_string(), json!(det.match_tier));
@@ -6115,7 +6588,7 @@ async fn handle_listings_shop(
             "total": total_matched,
             "returned": listings.len(),
             "appliedFilters": filters,
-            "sqlPreview": compiled.sql_preview,
+            "sqlPreview": sql_preview,
             "facets": facets,
             "listings": listings,
         }),
@@ -6167,6 +6640,8 @@ async fn handle_listings_ingest(
     .await
     .map_err(map_anyhow)?;
 
+    let _ = backfill_missing_shopping_facets(&state.db).await;
+
     Ok(json_response(StatusCode::OK, out))
 }
 
@@ -6208,6 +6683,8 @@ async fn handle_sync(
     )
     .await
     .map_err(map_anyhow)?;
+
+    let _ = backfill_missing_shopping_facets(&state.db).await;
 
     Ok(json_response(StatusCode::OK, out))
 }
@@ -6438,7 +6915,7 @@ async fn handle_subscriptions_post(
         .get("AUTO_SYNC_ENABLED")
         .map(|s| matches!(s.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
         .unwrap_or(false);
-    if auto_sync_enabled {
+    if state.env.email_monitor_enabled() && auto_sync_enabled {
         let sub_zips: Vec<String> = out
             .pointer("/subscription/zips")
             .and_then(Value::as_array)
@@ -7130,7 +7607,47 @@ async fn handle_agent_match_recommendations_get(
     let report =
         if let Some(ref raw_slug) = q.slug.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
             let slug = validate_slug_param(raw_slug).map_err(map_guardrail)?;
-            if let Some(rec) = get_cached_or_disk_report(&state, &slug).await {
+            let private_reports = state
+                .env
+                .get("PRIVATE_REPORTS_REQUIRED")
+                .map(is_truthy_flag)
+                .unwrap_or(false);
+            let mut narrow_rep = None;
+            if !private_reports && !raw_query_has_share_or_api_key(raw_q_str) {
+                let sec_envs = state
+                    .db
+                    .get_report_sections(
+                        &slug,
+                        &[
+                            ReportSectionKind::ReportSectionGeo,
+                            ReportSectionKind::ReportSectionFacts,
+                            ReportSectionKind::ReportSectionValuation,
+                            ReportSectionKind::ReportSectionSources,
+                        ],
+                    )
+                    .await
+                    .unwrap_or_default();
+                if !sec_envs.is_empty() {
+                    let partial = assemble_partial_report_from_envelopes(&sec_envs);
+                    narrow_rep = Some(
+                        authorize_narrow_report(
+                            &state,
+                            &slug,
+                            None,
+                            partial,
+                            &headers,
+                            raw_q_str,
+                            false,
+                        )
+                        .await?
+                        .record
+                        .report,
+                    );
+                }
+            }
+            if let Some(rep) = narrow_rep {
+                rep
+            } else if let Some(rec) = get_cached_or_disk_report(&state, &slug).await {
                 state
                     .hooks
                     .authorize_report(&state, &slug, Some(rec), &headers, raw_q_str, false)
@@ -7151,8 +7668,17 @@ async fn handle_agent_match_recommendations_get(
             })
         };
 
-    let data =
+    let mut data =
         crate::modules::agent_recommend::build_agent_recommendations(&state.db, &report).await;
+    if let Some(mr) = data
+        .get_mut("mailtoRequest")
+        .and_then(Value::as_object_mut)
+    {
+        mr.insert(
+            "smtpDisabled".to_string(),
+            json!(!state.env.smtp_feature_enabled()),
+        );
+    }
     Ok(json_response(
         StatusCode::OK,
         json!({
@@ -7185,15 +7711,58 @@ async fn handle_agent_match_request_post(
     let mut cached_report_opt: Option<Value> = None;
     if let Some(rs) = raw_slug {
         let s = validate_slug_param(rs).map_err(map_guardrail)?;
-        match authorize_cached_report(&state, &s, &headers, "", false).await {
-            Ok(auth) => {
-                cached_report_opt = Some(auth.record.report);
-                validated_slug = Some(auth.record.slug);
+        let private_reports = state
+            .env
+            .get("PRIVATE_REPORTS_REQUIRED")
+            .map(is_truthy_flag)
+            .unwrap_or(false);
+        if !private_reports {
+            if let Some(hdr) = state.db.get_report_header(&s).await.ok().flatten() {
+                let sec_envs = state
+                    .db
+                    .get_report_sections(
+                        &hdr.slug,
+                        &[
+                            ReportSectionKind::ReportSectionMeta,
+                            ReportSectionKind::ReportSectionGeo,
+                            ReportSectionKind::ReportSectionFacts,
+                            ReportSectionKind::ReportSectionValuation,
+                        ],
+                    )
+                    .await
+                    .unwrap_or_default();
+                if !sec_envs.is_empty() {
+                    let partial = assemble_partial_report_from_envelopes(&sec_envs);
+                    let auth = match authorize_narrow_report(
+                        &state,
+                        &hdr.slug,
+                        Some(&hdr),
+                        partial,
+                        &headers,
+                        "",
+                        false,
+                    )
+                    .await
+                    {
+                        Ok(a) => a,
+                        Err(err_resp) => return Ok(err_resp),
+                    };
+                    cached_report_opt = Some(auth.record.report);
+                    validated_slug = Some(auth.record.slug);
+                }
             }
-            Err(err_resp) if err_resp.status() == StatusCode::NOT_FOUND => {
-                validated_slug = Some(s);
+        }
+        if cached_report_opt.is_none() {
+            match authorize_cached_report(&state, &s, &headers, "", false).await {
+                Ok(auth) => {
+                    cached_report_opt = Some(auth.record.report);
+                    validated_slug = Some(auth.record.slug);
+                }
+                Err(err_resp) if err_resp.status() == StatusCode::NOT_FOUND => {
+                    validated_slug = Some(s);
+                }
+                Err(err_resp) => return Ok(err_resp),
             }
-            Err(err_resp) => return Ok(err_resp),
         }
     }
 
@@ -7233,6 +7802,68 @@ async fn build_live_engagement_for_slug(
     headers: &HeaderMap,
     slug: &str,
 ) -> std::result::Result<Value, Response> {
+    let private_reports = state
+        .env
+        .get("PRIVATE_REPORTS_REQUIRED")
+        .map(is_truthy_flag)
+        .unwrap_or(false);
+    if !private_reports {
+        if let Some(hdr) = state.db.get_report_header(slug).await.ok().flatten() {
+            let sec_envs = state
+                .db
+                .get_report_sections(
+                    &hdr.slug,
+                    &[
+                        ReportSectionKind::ReportSectionGeo,
+                        ReportSectionKind::ReportSectionFacts,
+                        ReportSectionKind::ReportSectionMarket,
+                    ],
+                )
+                .await
+                .unwrap_or_default();
+            if !sec_envs.is_empty() {
+                let partial = assemble_partial_report_from_envelopes(&sec_envs);
+                let partial = authorize_narrow_report(
+                    state,
+                    &hdr.slug,
+                    Some(&hdr),
+                    partial,
+                    headers,
+                    "",
+                    false,
+                )
+                .await?
+                .record
+                .report;
+                let addr = partial
+                    .pointer("/geo/displayAddress")
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.trim().is_empty())
+                    .unwrap_or(&hdr.display_address)
+                    .to_string();
+                let z = partial
+                    .pointer("/geo/zip")
+                    .and_then(Value::as_str)
+                    .map(String::from)
+                    .or_else(|| (!hdr.zip.trim().is_empty()).then(|| hdr.zip.clone()));
+                let facts = partial.get("facts").cloned().unwrap_or_else(|| json!({}));
+                let mkt = partial.pointer("/modules/market/data").cloned();
+                return Ok(
+                    crate::modules::engagement::build_engagement_for_report_with_brand(
+                        &state.db,
+                        slug,
+                        &addr,
+                        z.as_deref(),
+                        &facts,
+                        mkt.as_ref(),
+                        &state.env.brand_name(),
+                    )
+                    .await,
+                );
+            }
+        }
+    }
+
     let cached = match authorize_cached_report(state, slug, headers, "", false).await {
         Ok(auth) => Some(auth.record),
         Err(err_resp) if err_resp.status() == StatusCode::NOT_FOUND => None,
@@ -7262,16 +7893,18 @@ async fn build_live_engagement_for_slug(
     } else {
         (slug.to_string(), None, json!({}), None)
     };
-    Ok(crate::modules::engagement::build_engagement_for_report_with_brand(
-        &state.db,
-        slug,
-        &display_addr,
-        zip_opt.as_deref(),
-        &facts_val,
-        mkt_val.as_ref(),
-        &state.env.brand_name(),
+    Ok(
+        crate::modules::engagement::build_engagement_for_report_with_brand(
+            &state.db,
+            slug,
+            &display_addr,
+            zip_opt.as_deref(),
+            &facts_val,
+            mkt_val.as_ref(),
+            &state.env.brand_name(),
+        )
+        .await,
     )
-    .await)
 }
 
 async fn handle_property_refresh_status(
@@ -7280,14 +7913,48 @@ async fn handle_property_refresh_status(
     AxumPath(slug): AxumPath<String>,
 ) -> ApiResult {
     let clean_slug = validate_slug_param(&slug).map_err(map_guardrail)?;
-    let cached = match authorize_cached_report(&state, &clean_slug, &headers, "", false).await {
-        Ok(auth) => Some(auth.record),
-        Err(err_resp) if err_resp.status() == StatusCode::NOT_FOUND => None,
-        Err(err_resp) => return Ok(err_resp),
+    let private_reports = state
+        .env
+        .get("PRIVATE_REPORTS_REQUIRED")
+        .map(is_truthy_flag)
+        .unwrap_or(false);
+    let disk_fallback = if private_reports {
+        match authorize_cached_report(&state, &clean_slug, &headers, "", false).await {
+            Ok(auth) => Some(auth.record),
+            Err(err_resp) if err_resp.status() == StatusCode::NOT_FOUND => None,
+            Err(err_resp) => return Ok(err_resp),
+        }
+    } else if let Some(hdr) = state
+        .db
+        .get_report_header(&clean_slug)
+        .await
+        .ok()
+        .flatten()
+    {
+        if let Err(err_resp) = authorize_narrow_report(
+            &state,
+            &hdr.slug,
+            Some(&hdr),
+            json!({ "meta": { "displayAddress": hdr.display_address } }),
+            &headers,
+            "",
+            false,
+        )
+        .await
+        {
+            return Ok(err_resp);
+        }
+        None
+    } else {
+        match authorize_cached_report(&state, &clean_slug, &headers, "", false).await {
+            Ok(auth) => Some(auth.record),
+            Err(err_resp) if err_resp.status() == StatusCode::NOT_FOUND => None,
+            Err(err_resp) => return Ok(err_resp),
+        }
     };
     let st = state
         .db
-        .get_report_refresh_status(&clean_slug, cached.as_ref())
+        .get_report_refresh_status(&clean_slug, disk_fallback.as_ref())
         .await
         .map_err(map_anyhow)?;
     Ok(json_response(
@@ -7538,9 +8205,7 @@ async fn handle_admin_reports_export_static(
             skipped_pending += 1;
             continue;
         }
-        let html = rec
-            .rendered_html
-            .unwrap_or_else(|| render_report_html_with_brand(&rec.report, &brand_name, &brand_domain));
+        let html = render_report_html_with_brand(&rec.report, &brand_name, &brand_domain);
         bundles.push((rec.slug, rec.report, html));
     }
 
@@ -8302,7 +8967,9 @@ mod tests {
         assert_eq!(patch_json["subscription"]["name"], "Updated Search");
         assert_eq!(patch_json["subscription"]["frequency"], "weekly");
         assert_eq!(patch_json["subscription"]["notifyOnSold"], true);
-        assert_eq!(patch_json["subscription"]["zips"], json!([z_a, z_b]));
+        let mut expected_zips = vec![z_a.clone(), z_b.clone()];
+        expected_zips.sort();
+        assert_eq!(patch_json["subscription"]["zips"], json!(expected_zips));
 
         let matches_resp = app
             .clone()
@@ -8614,6 +9281,296 @@ mod tests {
         assert_eq!(forsale_json["ok"], true);
         assert_eq!(forsale_json["listings"].as_array().unwrap().len(), 1);
         assert_eq!(forsale_json["listings"][0]["address"], dyn_addr);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn unit_stage2c_narrow_shop_facets_sections_and_profile_routes() {
+        let (state, dir) = make_test_state(vec![]).await;
+        let seed_bits = (uuid::Uuid::new_v4().as_u128() & 0xffff) as u16;
+        let dyn_zip = synthetic_zip5(seed_bits);
+
+        ingest_listings(
+            &state.db,
+            &state.http,
+            &state.env,
+            IngestListingsRequest {
+                zip: Some(dyn_zip.clone()),
+                listings: vec![
+                    json!({
+                        "id": "s2c-fiber-1",
+                        "address": "101 Synthfiber Way, Santa Clara, CA",
+                        "street": "101 Synthfiber Way",
+                        "city": "Santa Clara",
+                        "state": "CA",
+                        "zip": dyn_zip,
+                        "status": "Active",
+                        "price": 1_150_000,
+                        "beds": 4,
+                        "baths": 2.5,
+                        "sqft": 1950,
+                        "fiberAvailable": true,
+                        "highSpeedInternet": true,
+                        "maxDownloadMbps": 2000,
+                        "electricUtilityType": "municipal",
+                        "electricCarrier": "Silicon Valley Power",
+                        "electricRateKwh": 0.16,
+                        "hasSolar": true
+                    }),
+                    json!({
+                        "id": "s2c-fiber-2",
+                        "address": "202 Synthfiber Way, Santa Clara, CA",
+                        "street": "202 Synthfiber Way",
+                        "city": "Santa Clara",
+                        "state": "CA",
+                        "zip": dyn_zip,
+                        "status": "Active",
+                        "price": 1_450_000,
+                        "beds": 4,
+                        "baths": 3.0,
+                        "sqft": 2300,
+                        "fiberAvailable": true,
+                        "highSpeedInternet": true,
+                        "maxDownloadMbps": 5000,
+                        "electricUtilityType": "municipal",
+                        "electricCarrier": "Silicon Valley Power",
+                        "electricRateKwh": 0.16,
+                        "hasSolar": false
+                    }),
+                    json!({
+                        "id": "s2c-cable-3",
+                        "address": "303 Synthcoax Ct, Santa Clara, CA",
+                        "street": "303 Synthcoax Ct",
+                        "city": "Santa Clara",
+                        "state": "CA",
+                        "zip": dyn_zip,
+                        "status": "Active",
+                        "price": 980_000,
+                        "beds": 3,
+                        "baths": 2.0,
+                        "sqft": 1500,
+                        "fiberAvailable": false,
+                        "highSpeedInternet": true,
+                        "maxDownloadMbps": 1000
+                    }),
+                ],
+                trigger_alerts: false,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        let slug = "101-synthfiber-way-santa-clara-ca";
+        let seeded_report = json!({
+            "meta": {
+                "slug": slug,
+                "displayAddress": "101 Synthfiber Way, Santa Clara, CA",
+                "generatedAt": "2026-11-16T18:00:00Z"
+            },
+            "geo": {
+                "zip": dyn_zip,
+                "city": "Santa Clara",
+                "state": "CA",
+                "lat": 37.3541,
+                "lon": -121.9552
+            },
+            "facts": {
+                "price": 1_150_000,
+                "beds": 4,
+                "baths": 2.5,
+                "sqft": 1950
+            },
+            "summary": {
+                "verdict": "Well-priced municipal-power home with 2 Gbps fiber.",
+                "scores": { "overall": 84.5 }
+            },
+            "hoaProfile": { "hasHoa": false, "hoaMonthly": 0 },
+            "buyerDiligence": { "overallRisk": "Low", "modules": {} }
+        });
+        state
+            .db
+            .put_cached_report(slug, &seeded_report, None)
+            .await
+            .unwrap();
+
+        let app = build_router(state.clone());
+
+        // 1. Narrow SQL shop facets + top-K hydration (`limit=1`, `total=2` fiber homes, disjunctive `fiberAvailable=2`)
+        let shop_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/api/listings/shop?zips={dyn_zip}&fiberOnly=true&sortBy=internet_desc&limit=1"
+                    ))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(shop_resp.status(), StatusCode::OK);
+        let shop_json: Value = serde_json::from_slice(
+            &axum::body::to_bytes(shop_resp.into_body(), 128 * 1024)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(shop_json["ok"], true);
+        assert_eq!(shop_json["total"], 2);
+        assert_eq!(shop_json["returned"], 1);
+        assert_eq!(shop_json["listings"][0]["id"], "s2c-fiber-2");
+        assert!(shop_json["listings"][0]["matchScore"].is_number());
+        assert_eq!(shop_json["facets"]["internet"]["fiberAvailable"], 2);
+        assert_eq!(shop_json["facets"]["internet"]["highSpeedAvailable"], 3);
+
+        // 2. Narrow buyer-diligence section fast path (`[Meta, BuyerDiligence]`)
+        let bd_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/buyer-diligence/{slug}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(bd_resp.status(), StatusCode::OK);
+        let bd_json: Value = serde_json::from_slice(
+            &axum::body::to_bytes(bd_resp.into_body(), 64 * 1024)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(bd_json["ok"], true);
+        assert_eq!(bd_json["hoaProfile"]["hasHoa"], false);
+        assert_eq!(bd_json["buyerDiligence"]["overallRisk"], "Low");
+
+        // 3. Narrow translation section persistence & short-circuit (`ReportSectionTranslations`)
+        assert!(
+            upsert_report_translation_section(
+                &state.db,
+                slug,
+                "es",
+                &json!({
+                    "native": true,
+                    "lang": "es",
+                    "translatedAt": "2026-11-16T18:05:00Z",
+                    "data": { "verdict": "Excelente casa con fibra." }
+                }),
+            )
+            .await,
+            "expected narrow upsert_report_translation_section to succeed"
+        );
+        let tr_sec = state
+            .db
+            .get_report_section(slug, ReportSectionKind::ReportSectionTranslations)
+            .await
+            .unwrap();
+        assert!(tr_sec.is_some(), "expected persisted ReportSectionTranslations");
+
+        let tr_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/translate")
+                    .header("host", "localhost")
+                    .header("origin", "http://localhost")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({ "slug": slug, "lang": "es" }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(tr_resp.status(), StatusCode::OK);
+        let tr_json: Value = serde_json::from_slice(
+            &axum::body::to_bytes(tr_resp.into_body(), 64 * 1024)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(tr_json["ok"], true);
+        assert_eq!(tr_json["cached"], true);
+        assert_eq!(tr_json["data"]["verdict"], "Excelente casa con fibra.");
+        let full_after = state.db.get_cached_report(slug).await.unwrap().unwrap();
+        assert_eq!(
+            full_after.report["translations"]["es"]["data"]["verdict"],
+            "Excelente casa con fibra."
+        );
+
+        // 4. Typed Protobuf profile + match feedback routes (`profile_api.rs`)
+        let uid = "user-s2c-profile-0001";
+        let mut prof_val = serde_json::to_value(crate::scoring::profile::Profile::default()).unwrap();
+        prof_val["budget"]["maxPrice"] = json!(1_500_000.0);
+        let put_prof = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/me/profile")
+                    .header("host", "localhost")
+                    .header("origin", "http://localhost")
+                    .header("x-user-id", uid)
+                    .header("content-type", "application/json")
+                    .body(Body::from(json!({ "profile": prof_val }).to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(put_prof.status(), StatusCode::OK);
+
+        let fb_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/match/feedback")
+                    .header("host", "localhost")
+                    .header("origin", "http://localhost")
+                    .header("x-user-id", uid)
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({ "listingId": "s2c-fiber-1", "action": "save" }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(fb_resp.status(), StatusCode::OK);
+        let fb_json: Value = serde_json::from_slice(
+            &axum::body::to_bytes(fb_resp.into_body(), 64 * 1024)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(fb_json["ok"], true);
+        assert_eq!(fb_json["feedback"]["action"], "save");
+        assert_eq!(fb_json["feedbackCount"], 1);
+
+        let get_prof = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/me/profile")
+                    .header("x-user-id", uid)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(get_prof.status(), StatusCode::OK);
+        let prof_json: Value = serde_json::from_slice(
+            &axum::body::to_bytes(get_prof.into_body(), 64 * 1024)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(prof_json["ok"], true);
+        assert_eq!(prof_json["found"], true);
+        assert_eq!(prof_json["profile"]["budget"]["maxPrice"], 1_500_000.0);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -45,3 +45,4 @@ sharing:
 source_attribution:
   name: "California Energy Commission (CEC) Electric Service Territories"
   url: "https://services3.arcgis.com/bWPjFyq029ChCGur/arcgis/rest/services/ElectricLoadServingEntities_IOU_POU/FeatureServer/0"
+  reference_url_template: "https://www.energy.ca.gov/data-reports/energy-almanac/california-electricity-data"

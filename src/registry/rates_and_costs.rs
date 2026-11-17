@@ -1649,9 +1649,9 @@ pub fn build_tax_rate_area_proto(input: &RatesAndCostsPersistInput) -> TaxRateAr
         _ => None,
     };
     let source_url = if st == "CA" {
-        "https://www.boe.ca.gov/proptaxes/taxrateareas.htm"
+        "https://www.boe.ca.gov/proptaxes/proptax.htm"
     } else {
-        "https://www.census.gov/programs-surveys/gov-finance.html"
+        "https://www.census.gov/topics/public-sector/government-finances.html"
     };
     TaxRateAreaProto {
         state: st,
@@ -1698,7 +1698,7 @@ pub fn build_transfer_tax_table_proto(input: &RatesAndCostsPersistInput) -> Tran
     };
     let source_url = match st.as_str() {
         "CA" => "https://www.boe.ca.gov/proptaxes/proptax.htm",
-        "NY" => "https://www.tax.ny.gov/pit/property/transfer/",
+        "NY" => "https://www.tax.ny.gov/pit/property/",
         "WA" => "https://dor.wa.gov/taxes-rates/other-taxes/real-estate-excise-tax",
         _ => "https://www.taxadmin.org/state-tax-agencies",
     };

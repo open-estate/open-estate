@@ -3,6 +3,7 @@ pub mod admin_settings;
 pub mod ai_routes;
 pub mod alerts_ui;
 pub mod cdn_cache;
+pub mod copilot_api;
 // [feat/chrome-extension]
 pub mod deal_room;
 // [/feat/chrome-extension]
@@ -18,6 +19,7 @@ pub mod media_api;
 pub mod ops_dashboard;
 pub mod orchestrator;
 pub mod profile_api;
+pub mod redirect;
 pub mod render;
 pub mod server;
 pub mod summary;

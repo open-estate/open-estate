@@ -33,6 +33,7 @@ cache_ttl_secs: 604800
 source_attribution:
   name: "State PUC & US EIA Published Residential Electric Tariffs"
   url: "https://www.eia.gov/electricity/state/"
+  reference_url_template: "https://www.eia.gov/electricity/state/"
 tariff_catalog:
   electric_rules:
     - id: sdge_california
@@ -234,7 +235,7 @@ tariff_catalog:
       peak_kwh_usd: 0.178
       monthly_base_fee_usd: 10.25
       solar_nem_policy: "Regulated Net Billing"
-      tariff_url: "https://www.epelectric.com/tx/residential/rates-and-tariffs"
+      tariff_url: "https://www.epelectric.com/residential/customer-programs/time-of-day-rates/texas"
       rate_source: "El Paso Electric TX Tariff"
 
     - id: pse_washington
@@ -297,7 +298,7 @@ tariff_catalog:
       peak_kwh_usd: 0.262
       monthly_base_fee_usd: 19.00
       solar_nem_policy: "NY Net Metering + Solar Tax Credit"
-      tariff_url: "https://www.nationalgridus.com/Upstate-NY-Home/Rates/"
+      tariff_url: "https://www.nationalgridus.com/Default.aspx"
       rate_source: "NYPSC Upstate Residential Electric Benchmark"
 
     - id: teco_duke_tampa
@@ -314,7 +315,7 @@ tariff_catalog:
       peak_kwh_usd: 0.174
       monthly_base_fee_usd: 21.30
       solar_nem_policy: "FL FPSC 1:1 Retail Net Metering"
-      tariff_url: "https://www.tampaelectric.com/residential/paybill/rates/"
+      tariff_url: "https://www.tampaelectric.com/rates/"
       rate_source: "FPSC Tampa Bay Residential Tariff"
 
     - id: fpl_florida
@@ -339,9 +340,9 @@ tariff_catalog:
       utility_type: "iou"
       rate_schedule: "Residential Rate RS (BGS + Delivery)"
       rate_per_kwh_usd: 0.218
-      off_peak_kwh_usd: 0.185
-      peak_kwh_usd: 0.273
-      monthly_base_fee_usd: 14.00
+      off_peak_kwh_usd: 0.0
+      peak_kwh_usd: 0.0
+      monthly_base_fee_usd: 0.0
       solar_nem_policy: "State Net Metering / Distributed Generation Schedule"
       tariff_url: "https://nj.pseg.com/myaccount/billandpaymentoptions/understandingmybill"
       rate_source: "Published Residential Electric Tariff Reference"
@@ -353,9 +354,9 @@ tariff_catalog:
       utility_type: "iou"
       rate_schedule: "Residential Rate R-1"
       rate_per_kwh_usd: 0.305
-      off_peak_kwh_usd: 0.259
-      peak_kwh_usd: 0.381
-      monthly_base_fee_usd: 14.00
+      off_peak_kwh_usd: 0.0
+      peak_kwh_usd: 0.0
+      monthly_base_fee_usd: 0.0
       solar_nem_policy: "State Net Metering / Distributed Generation Schedule"
       tariff_url: "https://www.eversource.com/content/residential/account-billing/manage-bill/about-your-bill/rates-tariffs"
       rate_source: "Published Residential Electric Tariff Reference"
@@ -367,9 +368,9 @@ tariff_catalog:
       utility_type: "iou"
       rate_schedule: "Residential Rate 1"
       rate_per_kwh_usd: 0.298
-      off_peak_kwh_usd: 0.253
-      peak_kwh_usd: 0.373
-      monthly_base_fee_usd: 14.00
+      off_peak_kwh_usd: 0.0
+      peak_kwh_usd: 0.0
+      monthly_base_fee_usd: 0.0
       solar_nem_policy: "State Net Metering / Distributed Generation Schedule"
       tariff_url: "https://www.eversource.com/"
       rate_source: "Published Residential Electric Tariff Reference"
@@ -381,9 +382,9 @@ tariff_catalog:
       utility_type: "iou"
       rate_schedule: "Residential Standard Offer + Delivery"
       rate_per_kwh_usd: 0.265
-      off_peak_kwh_usd: 0.225
-      peak_kwh_usd: 0.331
-      monthly_base_fee_usd: 14.00
+      off_peak_kwh_usd: 0.0
+      peak_kwh_usd: 0.0
+      monthly_base_fee_usd: 0.0
       solar_nem_policy: "State Net Metering / Distributed Generation Schedule"
       tariff_url: "https://www.eia.gov/electricity/state/"
       rate_source: "Published Residential Electric Tariff Reference"
@@ -395,9 +396,9 @@ tariff_catalog:
       utility_type: "iou"
       rate_schedule: "Residential Schedule R / TOU-RI"
       rate_per_kwh_usd: 0.428
-      off_peak_kwh_usd: 0.364
-      peak_kwh_usd: 0.535
-      monthly_base_fee_usd: 14.00
+      off_peak_kwh_usd: 0.0
+      peak_kwh_usd: 0.0
+      monthly_base_fee_usd: 0.0
       solar_nem_policy: "State Net Metering / Distributed Generation Schedule"
       tariff_url: "https://www.hawaiianelectric.com/billing-and-payment/rates-and-regulations"
       rate_source: "Published Residential Electric Tariff Reference"
@@ -409,9 +410,9 @@ tariff_catalog:
       utility_type: "iou"
       rate_schedule: "Time-of-Use 4pm–7pm Weekdays"
       rate_per_kwh_usd: 0.158
-      off_peak_kwh_usd: 0.134
-      peak_kwh_usd: 0.198
-      monthly_base_fee_usd: 14.00
+      off_peak_kwh_usd: 0.0
+      peak_kwh_usd: 0.0
+      monthly_base_fee_usd: 0.0
       solar_nem_policy: "State Net Metering / Distributed Generation Schedule"
       tariff_url: "https://www.aps.com/en/Residential/Service-Plans/Compare-Service-Plans"
       rate_source: "Published Residential Electric Tariff Reference"
@@ -423,9 +424,9 @@ tariff_catalog:
       utility_type: "iou"
       rate_schedule: "Single-Family Residential Schedule D-1"
       rate_per_kwh_usd: 0.162
-      off_peak_kwh_usd: 0.138
-      peak_kwh_usd: 0.203
-      monthly_base_fee_usd: 14.00
+      off_peak_kwh_usd: 0.0
+      peak_kwh_usd: 0.0
+      monthly_base_fee_usd: 0.0
       solar_nem_policy: "State Net Metering / Distributed Generation Schedule"
       tariff_url: "https://www.nvenergy.com/account-services/energy-pricing-plans"
       rate_source: "Published Residential Electric Tariff Reference"
@@ -437,9 +438,9 @@ tariff_catalog:
       utility_type: "iou"
       rate_schedule: "Residential Schedule 7"
       rate_per_kwh_usd: 0.182
-      off_peak_kwh_usd: 0.155
-      peak_kwh_usd: 0.228
-      monthly_base_fee_usd: 14.00
+      off_peak_kwh_usd: 0.0
+      peak_kwh_usd: 0.0
+      monthly_base_fee_usd: 0.0
       solar_nem_policy: "State Net Metering / Distributed Generation Schedule"
       tariff_url: "https://portlandgeneral.com/about/info/pricing-plans"
       rate_source: "Published Residential Electric Tariff Reference"
@@ -451,9 +452,9 @@ tariff_catalog:
       utility_type: "iou"
       rate_schedule: "Residential Time-of-Use Schedule RE-TOU"
       rate_per_kwh_usd: 0.164
-      off_peak_kwh_usd: 0.139
-      peak_kwh_usd: 0.205
-      monthly_base_fee_usd: 14.00
+      off_peak_kwh_usd: 0.0
+      peak_kwh_usd: 0.0
+      monthly_base_fee_usd: 0.0
       solar_nem_policy: "State Net Metering / Distributed Generation Schedule"
       tariff_url: "https://co.my.xcelenergy.com/s/billing-payment/residential-rates"
       rate_source: "Published Residential Electric Tariff Reference"
@@ -465,9 +466,9 @@ tariff_catalog:
       utility_type: "iou"
       rate_schedule: "Residential Delivery + Hourly/BES Supply"
       rate_per_kwh_usd: 0.168
-      off_peak_kwh_usd: 0.143
-      peak_kwh_usd: 0.210
-      monthly_base_fee_usd: 14.00
+      off_peak_kwh_usd: 0.0
+      peak_kwh_usd: 0.0
+      monthly_base_fee_usd: 0.0
       solar_nem_policy: "State Net Metering / Distributed Generation Schedule"
       tariff_url: "https://www.comed.com/MyAccount/MyBillUsage/Pages/CurrentRates.aspx"
       rate_source: "Published Residential Electric Tariff Reference"
@@ -479,9 +480,9 @@ tariff_catalog:
       utility_type: "iou"
       rate_schedule: "Residential Service R-28 / Smart Usage"
       rate_per_kwh_usd: 0.162
-      off_peak_kwh_usd: 0.138
-      peak_kwh_usd: 0.203
-      monthly_base_fee_usd: 14.00
+      off_peak_kwh_usd: 0.0
+      peak_kwh_usd: 0.0
+      monthly_base_fee_usd: 0.0
       solar_nem_policy: "State Net Metering / Distributed Generation Schedule"
       tariff_url: "https://www.georgiapower.com/residential/billing-and-rate-plans/pricing-and-rate-plans.html"
       rate_source: "Published Residential Electric Tariff Reference"
@@ -493,9 +494,9 @@ tariff_catalog:
       utility_type: "iou"
       rate_schedule: "Residential Service Schedule RS"
       rate_per_kwh_usd: 0.146
-      off_peak_kwh_usd: 0.124
-      peak_kwh_usd: 0.183
-      monthly_base_fee_usd: 14.00
+      off_peak_kwh_usd: 0.0
+      peak_kwh_usd: 0.0
+      monthly_base_fee_usd: 0.0
       solar_nem_policy: "State Net Metering / Distributed Generation Schedule"
       tariff_url: "https://www.duke-energy.com/home/billing/rates"
       rate_source: "Published Residential Electric Tariff Reference"
@@ -507,9 +508,9 @@ tariff_catalog:
       utility_type: "iou"
       rate_schedule: "Residential Schedule 1"
       rate_per_kwh_usd: 0.148
-      off_peak_kwh_usd: 0.126
-      peak_kwh_usd: 0.185
-      monthly_base_fee_usd: 14.00
+      off_peak_kwh_usd: 0.0
+      peak_kwh_usd: 0.0
+      monthly_base_fee_usd: 0.0
       solar_nem_policy: "State Net Metering / Distributed Generation Schedule"
       tariff_url: "https://www.dominionenergy.com/virginia/rates-and-tariffs/residential-rates"
       rate_source: "Published Residential Electric Tariff Reference"
@@ -521,9 +522,9 @@ tariff_catalog:
       utility_type: "iou"
       rate_schedule: "Residential Schedule R (SOS + Delivery)"
       rate_per_kwh_usd: 0.186
-      off_peak_kwh_usd: 0.158
-      peak_kwh_usd: 0.233
-      monthly_base_fee_usd: 14.00
+      off_peak_kwh_usd: 0.0
+      peak_kwh_usd: 0.0
+      monthly_base_fee_usd: 0.0
       solar_nem_policy: "State Net Metering / Distributed Generation Schedule"
       tariff_url: "https://www.pepco.com/"
       rate_source: "Published Residential Electric Tariff Reference"
@@ -535,9 +536,9 @@ tariff_catalog:
       utility_type: "iou"
       rate_schedule: "Residential Time-of-Day Rate D1.11"
       rate_per_kwh_usd: 0.202
-      off_peak_kwh_usd: 0.172
-      peak_kwh_usd: 0.253
-      monthly_base_fee_usd: 14.00
+      off_peak_kwh_usd: 0.0
+      peak_kwh_usd: 0.0
+      monthly_base_fee_usd: 0.0
       solar_nem_policy: "State Net Metering / Distributed Generation Schedule"
       tariff_url: "https://www.dteenergy.com/us/en/residential/service-request/pricing/rate-options.html"
       rate_source: "Published Residential Electric Tariff Reference"
@@ -549,9 +550,9 @@ tariff_catalog:
       utility_type: "iou"
       rate_schedule: "Residential Service A01"
       rate_per_kwh_usd: 0.162
-      off_peak_kwh_usd: 0.138
-      peak_kwh_usd: 0.203
-      monthly_base_fee_usd: 14.00
+      off_peak_kwh_usd: 0.0
+      peak_kwh_usd: 0.0
+      monthly_base_fee_usd: 0.0
       solar_nem_policy: "State Net Metering / Distributed Generation Schedule"
       tariff_url: "https://mn.my.xcelenergy.com/"
       rate_source: "Published Residential Electric Tariff Reference"
@@ -563,11 +564,11 @@ tariff_catalog:
       utility_type: "iou"
       rate_schedule: "Residential Schedule 1"
       rate_per_kwh_usd: 0.126
-      off_peak_kwh_usd: 0.107
-      peak_kwh_usd: 0.158
-      monthly_base_fee_usd: 14.00
+      off_peak_kwh_usd: 0.0
+      peak_kwh_usd: 0.0
+      monthly_base_fee_usd: 0.0
       solar_nem_policy: "State Net Metering / Distributed Generation Schedule"
-      tariff_url: "https://www.rockymountainpower.net/accounts-billing/rates-regulation.html"
+      tariff_url: "https://www.rockymountainpower.net/about/rates-regulation.html"
       rate_source: "Published Residential Electric Tariff Reference"
 
     - id: us_eia_regional_default

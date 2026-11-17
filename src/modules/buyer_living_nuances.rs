@@ -1871,7 +1871,7 @@ async fn fetch_municipal_planning_projects(
     if state == "CA" && (city_lc.contains("san jose") || city_lc.contains("san josé")) {
         // Query San Jose OPN_OpenDataService Planned Development / Active Development radius
         let sj_dev_layer =
-            "https://geo.sanjoseca.gov/server/rest/services/PLN/PLN_OpenDataService/MapServer/0";
+            "https://geo.sanjoseca.gov/server/rest/services/PLN/PLN_PermitsAndComplaints/MapServer/4";
         if let Ok(Ok(feats)) = tokio::time::timeout(
             Duration::from_millis(3_200),
             http.arcgis_radius_query(
@@ -1879,7 +1879,7 @@ async fn fetch_municipal_planning_projects(
                 lat,
                 lon,
                 600.0,
-                "FOLDERNUMBER,FOLDERTYPE,FOLDERDESC,STATUS,WORKDESCRIPTION",
+                "FOLDERNUM,FOLDERDESC,SUBDESC,WORKDESC",
                 &[("where", "1=1".to_string())],
                 3_000,
             ),
@@ -1896,14 +1896,17 @@ async fn fetch_municipal_planning_projects(
                 let dist_m = haversine_m(lat, lon, pla, plo);
                 if !(18.0..=RADAR_SEARCH_RADIUS_M).contains(&dist_m) {
                     continue;
-                }
+                };
                 let Some(attr) = f.get("attributes") else {
                     continue;
                 };
-                let pnum = val_str(attr.get("FOLDERNUMBER")).unwrap_or("SJ-PLN");
-                let ftype = val_str(attr.get("FOLDERTYPE")).unwrap_or("Planning Application");
+                let pnum = val_str(attr.get("FOLDERNUM").or_else(|| attr.get("FOLDERNUMBER")))
+                    .unwrap_or("SJ-PLN");
+                let ftype = val_str(attr.get("SUBDESC").or_else(|| attr.get("FOLDERTYPE")))
+                    .unwrap_or("Planning Application");
                 let desc = val_str(
-                    attr.get("WORKDESCRIPTION")
+                    attr.get("WORKDESC")
+                        .or_else(|| attr.get("WORKDESCRIPTION"))
                         .or_else(|| attr.get("FOLDERDESC")),
                 )
                 .unwrap_or(ftype);

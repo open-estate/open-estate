@@ -47,6 +47,7 @@ sharing:
 source_attribution:
   name: "LocationIQ Matrix · © OpenStreetMap"
   url: "https://docs.locationiq.com/reference/matrix"
+  reference_url_template: "https://docs.locationiq.com/reference/matrix"
 openapi:
   spec_file: "openapi.yaml"
   operation_id: "getLocationIqDrivingMatrix"

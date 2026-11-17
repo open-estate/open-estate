@@ -74,6 +74,12 @@ paths:
           schema:
             type: string
             default: "Current_Current"
+        - name: layers
+          in: query
+          required: false
+          schema:
+            type: string
+            default: "all"
         - name: format
           in: query
           required: true

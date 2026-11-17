@@ -95,7 +95,7 @@ pub(crate) fn build_turf_rebate_info_opt(
             "SFPUC / BAWSCA Lawn Be Gone! Rebate Program",
             2.50,
             4_000,
-            "https://bawsca.org/conserve/rebates/lawn-be-gone",
+            "https://bawsca.org/conserve/rebates",
             "Typically $2.00–$4.00/sq ft depending on member water agency for replacing irrigated turf with drought-tolerant landscaping; pre-approval required before turf removal.",
         ),
         ("CA", "06001" | "06013") => (
@@ -159,7 +159,7 @@ pub(crate) fn build_turf_rebate_info_opt(
             "Austin Water WaterWise / SAWS WaterSaver Landscape Rebate",
             1.75,
             3_000,
-            "https://www.austintexas.gov/department/waterwise-landscape-rebate",
+            "https://www.austintexas.gov/water",
             "Participating Central Texas water utilities offer rebates (~$1.75/sq ft or coupon packages) for converting healthy irrigated turfgrass to native beds.",
         ),
         ("NM", _) => (
@@ -370,7 +370,7 @@ pub fn build_remodel_and_rebuild(report: &Value) -> ModuleOutput {
         ),
         SourceItem::new(
             "National Association of Home Builders (NAHB) — Cost of Constructing a Home Survey",
-            "https://www.nahb.org/news-and-economics/housing-economics/special-studies/cost-of-constructing-a-home",
+            "https://www.nahb.org/news-and-economics/housing-economics",
         ),
         SourceItem::new(
             "Zonda / Journal of Light Construction (JLC) — Regional Cost vs. Value Remodeling Report",

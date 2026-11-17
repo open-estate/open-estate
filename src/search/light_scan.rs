@@ -8,8 +8,10 @@
 // when upstream data is unavailable.
 
 use crate::db::{
-    CachedReportRecord, DbStore, ListingFactorsRow, ListingRow, ListingSummaryBackfill,
-    SchoolMetricRow,
+    deterministic_sk, extract_section_json, CachedReportRecord, DbRowExt, DbStore,
+    FactorProvenanceProto, FactorSourceTier, HomeFactorsRowProto, ListingCoreProto,
+    ListingFactorsRow, ListingFullView, ListingRow, ListingSummaryBackfill, ReportHeaderProto,
+    ReportSectionKind, SchoolMetricRow, SqlParam, LISTING_FACTORS_COLS,
 };
 use crate::modules::fengshui::{resolve_osm_ways, OsmWay};
 use crate::modules::hazards::{flood_zone_info, URL_ASCE722, URL_NFHL_ZONES, URL_NRI, URL_WHP};
@@ -17,18 +19,19 @@ use crate::modules::school_metrics::ca_metrics_for_report;
 use crate::scanner::batch_geocode::{census_batch_geocode_with_timeout, BatchAddressInput};
 use crate::scanner::engine::canonical_address_slug;
 use crate::scanner::tile_cache::SpatialTileCache;
-use crate::scoring::catalog::SchoolLevel;
+use crate::scoring::catalog::{Feature, SchoolLevel};
 use crate::scoring::factors::{
-    Factor, Grade, HomeFactors, SchoolMetric, SchoolScore, FACTORS_VERSION,
+    Adu, Factor, Grade, HomeFactors, SchoolMetric, SchoolScore, FACTORS_VERSION,
 };
 use crate::search::sync::get_zip_school_context;
 use crate::shared::{
-    bbox_around, haversine_mi, nearest_on_polyline, now_iso, round_n, EnvConfig, HttpClient,
+    bbox_around, haversine_mi, nearest_on_polyline, now_iso, now_unix_secs, round_n, EnvConfig,
+    HttpClient,
 };
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Semaphore;
@@ -200,163 +203,679 @@ static DEFAULT_LIGHT_SCAN_TILE_CACHE: once_cell::sync::Lazy<Arc<SpatialTileCache
         Arc::new(SpatialTileCache::new(10_000, Duration::from_secs(3600)))
     });
 
-async fn light_scan_owned(
-    db: DbStore,
-    http: HttpClient,
-    env: EnvConfig,
-    listings: Vec<ListingRow>,
-    opts: LightScanOptions,
+const FACTOR_INPUT_SECTIONS: &[ReportSectionKind] = &[
+    ReportSectionKind::ReportSectionMeta,
+    ReportSectionKind::ReportSectionSummary,
+    ReportSectionKind::ReportSectionGeo,
+    ReportSectionKind::ReportSectionFacts,
+    ReportSectionKind::ReportSectionValuation,
+    ReportSectionKind::ReportSectionHazards,
+    ReportSectionKind::ReportSectionEnvironment,
+    ReportSectionKind::ReportSectionAmenities,
+    ReportSectionKind::ReportSectionCivic,
+    ReportSectionKind::ReportSectionFengshui,
+    ReportSectionKind::ReportSectionPropertyFeatures,
+];
+
+fn decode_factor_proto_row(r: &dyn DbRowExt) -> HomeFactorsRowProto {
+    HomeFactorsRowProto {
+        listing_sk: r.opt_i64("listing_sk").unwrap_or(0),
+        external_id: r.opt_str("external_id").unwrap_or_default(),
+        schema_version: r.opt_i64("schema_version").unwrap_or(3) as i32,
+        source_tier: r.opt_i64("source_tier").unwrap_or(1) as i32,
+        as_of_year: r.opt_i64("as_of_year").unwrap_or(2026) as i32,
+        completeness_pct: r.opt_f64("completeness_pct").unwrap_or(0.0),
+        estimated_mask: r.opt_i64("estimated_mask").unwrap_or(0) as i32,
+        monthly_total: r.opt_f64("monthly_total"),
+        monthly_pi: r.opt_f64("monthly_pi"),
+        assumed_down_pct: r.opt_f64("assumed_down_pct"),
+        cost_price: r.opt_f64("cost_price"),
+        estimated_value: r.opt_f64("estimated_value"),
+        list_price: r.opt_f64("list_price"),
+        hoa_monthly: r.opt_f64("hoa_monthly"),
+        cash_to_close: r.opt_f64("cash_to_close"),
+        monthly_conv: r.opt_f64("monthly_conv"),
+        monthly_fha: r.opt_f64("monthly_fha"),
+        monthly_va: r.opt_f64("monthly_va"),
+        monthly_cash: r.opt_f64("monthly_cash"),
+        school_elem_score: r.opt_f64("school_elem_score"),
+        school_elem_metric: r.opt_i64("school_elem_metric").map(|n| n as i32),
+        school_mid_score: r.opt_f64("school_mid_score"),
+        school_mid_metric: r.opt_i64("school_mid_metric").map(|n| n as i32),
+        school_high_score: r.opt_f64("school_high_score"),
+        school_high_metric: r.opt_i64("school_high_metric").map(|n| n as i32),
+        school_composite_score: r.opt_f64("school_composite_score"),
+        crime_score: r.opt_f64("crime_score"),
+        convenience_score: r.opt_f64("convenience_score"),
+        walk_score: r.opt_f64("walk_score"),
+        hazards_score: r.opt_f64("hazards_score"),
+        environment_score: r.opt_f64("environment_score"),
+        investment_score: r.opt_f64("investment_score"),
+        fengshui_score: r.opt_f64("fengshui_score"),
+        property_kind: r.opt_i64("property_kind").map(|n| n as i32),
+        beds: r.opt_f64("beds"),
+        baths: r.opt_f64("baths"),
+        sqft: r.opt_f64("sqft"),
+        lot_sqft: r.opt_f64("lot_sqft"),
+        stories: r.opt_f64("stories"),
+        year_built: r.opt_i64("year_built").map(|n| n as i32),
+        effective_year: r.opt_i64("effective_year").map(|n| n as i32),
+        has_adu: r.opt_i64("has_adu").map(|v| v != 0),
+        adu_sqft: r.opt_f64("adu_sqft"),
+        adu_beds: r.opt_f64("adu_beds"),
+        adu_baths: r.opt_f64("adu_baths"),
+        strong_adu_potential: r.opt_i64("strong_adu_potential").map(|v| v != 0),
+        main_level_beds: r.opt_f64("main_level_beds"),
+        main_level_baths: r.opt_f64("main_level_baths"),
+        parking_spaces: r.opt_f64("parking_spaces"),
+        gate_sfha: r.opt_i64("gate_sfha").map(|v| v != 0),
+        flood_zone: r.opt_str("flood_zone"),
+        gate_very_high_fire: r.opt_i64("gate_very_high_fire").map(|v| v != 0),
+        wildfire_tier: r.opt_i64("wildfire_tier").map(|n| n as i32),
+        freeway_distance_m: r.opt_f64("freeway_distance_m"),
+        gate_freeway_500ft: r.opt_i64("gate_freeway_500ft").map(|v| v != 0),
+        gate_t_junction: r.opt_i64("gate_t_junction").map(|v| v != 0),
+        house_number: r.opt_str("house_number"),
+        style_basis: r.opt_i64("style_basis").unwrap_or(0) as i32,
+        primary_style: r.opt_i64("primary_style").unwrap_or(0) as i32,
+        style_families_mask: r.opt_i64("style_families_mask").unwrap_or(0) as i32,
+        features_known: r.opt_i64("features_known").unwrap_or(0) != 0,
+        features_mask: r.opt_i64("features_mask").unwrap_or(0) as i32,
+        zip: r.opt_str("zip"),
+        lat: r.opt_f64("lat"),
+        lon: r.opt_f64("lon"),
+        scanned_ts: r.opt_i64("scanned_ts").unwrap_or(0),
+        updated_ts: r.opt_i64("updated_ts").unwrap_or(0),
+    }
+}
+
+pub(crate) fn proto_to_meta_listing_factors_row(row: &HomeFactorsRowProto) -> ListingFactorsRow {
+    let style_family = crate::db::proto::style_family_from_code(row.primary_style)
+        .map(|sf| sf.key().to_string());
+    let wildfire_zone = row
+        .wildfire_tier
+        .and_then(crate::db::proto::wildfire_risk_from_code)
+        .map(str::to_string);
+    ListingFactorsRow {
+        listing_id: row.external_id.clone(),
+        schema_version: row.schema_version as i64,
+        source_tier: crate::db::proto::factor_tier_from_code(row.source_tier).to_string(),
+        factors_json: String::new(),
+        completeness_pct: row.completeness_pct,
+        style_family,
+        flood_zone: row.flood_zone.clone(),
+        wildfire_zone,
+        walk_score: row.walk_score,
+        school_score: row.school_composite_score,
+        crime_score: row.crime_score,
+        zip: row.zip.clone(),
+        lat: row.lat,
+        lon: row.lon,
+        scanned_at: crate::db::proto::unix_ts_to_iso(row.scanned_ts),
+        updated_at: crate::db::proto::unix_ts_to_iso(row.updated_ts),
+    }
+}
+
+/// Batch-fetches `ReportHeaderProto` rows across arbitrary slug counts in parallel 100-slug `IN (...)`
+/// chunks via `DbStore::get_report_headers_batch` (eliminating all N+1 `get_cached_report` loops).
+pub(crate) async fn fetch_report_headers_concurrent(
+    db: &DbStore,
+    slugs: &[String],
+) -> Result<HashMap<String, ReportHeaderProto>> {
+    let mut seen = HashSet::with_capacity(slugs.len());
+    let mut unique = Vec::with_capacity(slugs.len());
+    for raw in slugs {
+        let s = raw.trim();
+        if !s.is_empty() && seen.insert(s.to_string()) {
+            unique.push(s.to_string());
+        }
+    }
+    if unique.is_empty() {
+        return Ok(HashMap::new());
+    }
+    if unique.len() <= 100 {
+        return db.get_report_headers_batch(&unique).await;
+    }
+    let futs = unique.chunks(100).map(|chunk| db.get_report_headers_batch(chunk));
+    let maps = futures::future::try_join_all(futs).await?;
+    let mut out = HashMap::with_capacity(unique.len());
+    for m in maps {
+        out.extend(m);
+    }
+    Ok(out)
+}
+
+/// Zero-JSON typed batch reader on `listing_factors` by `listing_sk` PK (`500` keys/chunk).
+pub(crate) async fn load_factor_protos_by_sk_batch(
+    db: &DbStore,
+    sks: &[i64],
+) -> Result<HashMap<i64, HomeFactorsRowProto>> {
+    let mut seen = HashSet::with_capacity(sks.len());
+    let valid: Vec<i64> = sks
+        .iter()
+        .copied()
+        .filter(|&k| k > 0 && seen.insert(k))
+        .collect();
+    if valid.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let cols = LISTING_FACTORS_COLS.join(", ");
+    let hint = db.innodb_pk_hint();
+    let futs = valid.chunks(500).map(|chunk| {
+        let placeholders = vec!["?"; chunk.len()].join(", ");
+        let sql = format!(
+            "SELECT {hint}{cols} FROM listing_factors WHERE listing_sk IN ({placeholders})"
+        );
+        let params: Vec<SqlParam> = chunk.iter().map(|&k| SqlParam::I64(k)).collect();
+        async move {
+            db.fetch_all_mapped_raw(&sql, &params, decode_factor_proto_row)
+                .await
+        }
+    });
+    let batches = futures::future::try_join_all(futs).await?;
+    let mut out = HashMap::with_capacity(valid.len());
+    for rows in batches {
+        for r in rows {
+            out.insert(r.listing_sk, r);
+        }
+    }
+    Ok(out)
+}
+
+/// Zero-JSON typed batch reader on `listing_factors` by `external_id` (`500` keys/chunk).
+pub(crate) async fn load_factor_protos_by_external_id_batch(
+    db: &DbStore,
+    external_ids: &[String],
+) -> Result<HashMap<String, HomeFactorsRowProto>> {
+    let mut seen = HashSet::with_capacity(external_ids.len());
+    let mut valid = Vec::with_capacity(external_ids.len());
+    for raw in external_ids {
+        let id = raw.trim();
+        if !id.is_empty() && seen.insert(id.to_string()) {
+            valid.push(id.to_string());
+        }
+    }
+    if valid.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let cols = LISTING_FACTORS_COLS.join(", ");
+    let hint = db.innodb_pk_hint();
+    let futs = valid.chunks(500).map(|chunk| {
+        let placeholders = vec!["?"; chunk.len()].join(", ");
+        let sql = format!(
+            "SELECT {hint}{cols} FROM listing_factors WHERE external_id IN ({placeholders})"
+        );
+        let params: Vec<SqlParam> = chunk.iter().map(|s| SqlParam::from(s.as_str())).collect();
+        async move {
+            db.fetch_all_mapped_raw(&sql, &params, decode_factor_proto_row)
+                .await
+        }
+    });
+    let batches = futures::future::try_join_all(futs).await?;
+    let mut out = HashMap::with_capacity(valid.len());
+    for rows in batches {
+        for r in rows {
+            out.insert(r.external_id.clone(), r);
+        }
+    }
+    Ok(out)
+}
+
+async fn resolve_listing_sks_by_external_id_batch(
+    db: &DbStore,
+    external_ids: &[String],
+) -> Result<HashMap<String, i64>> {
+    let mut seen = HashSet::with_capacity(external_ids.len());
+    let mut valid = Vec::with_capacity(external_ids.len());
+    for raw in external_ids {
+        let id = raw.trim();
+        if !id.is_empty() && seen.insert(id.to_string()) {
+            valid.push(id.to_string());
+        }
+    }
+    if valid.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let mut out = HashMap::with_capacity(valid.len());
+    for chunk in valid.chunks(500) {
+        let placeholders = vec!["?"; chunk.len()].join(", ");
+        let sql = format!(
+            "SELECT external_id, listing_sk FROM listings WHERE external_id IN ({placeholders})"
+        );
+        let params: Vec<SqlParam> = chunk.iter().map(|s| SqlParam::from(s.as_str())).collect();
+        let pairs = db
+            .fetch_all_mapped_raw(&sql, &params, |r| {
+                (
+                    r.opt_str("external_id").unwrap_or_default(),
+                    r.opt_i64("listing_sk").unwrap_or(0),
+                )
+            })
+            .await?;
+        for (ext_id, sk) in pairs {
+            if !ext_id.is_empty() && sk > 0 {
+                out.insert(ext_id, sk);
+            }
+        }
+    }
+    Ok(out)
+}
+
+pub(crate) struct HydrateListingCtx<'a> {
+    pub listing_sk: i64,
+    pub id: &'a str,
+    pub zip: &'a str,
+    pub lat: Option<f64>,
+    pub lon: Option<f64>,
+    pub price: Option<i64>,
+    pub list_price: Option<i64>,
+    pub hoa_monthly: Option<i64>,
+    pub flood_zone: Option<&'a str>,
+    pub wildfire_zone: Option<&'a str>,
+    pub walk_score: Option<f64>,
+    pub school_score: Option<f64>,
+}
+
+impl<'a> HydrateListingCtx<'a> {
+    pub(crate) fn from_listing_row(listing: &'a ListingRow, listing_sk: i64) -> Self {
+        Self {
+            listing_sk,
+            id: &listing.id,
+            zip: &listing.zip,
+            lat: listing.lat,
+            lon: listing.lon,
+            price: listing.price,
+            list_price: listing.list_price,
+            hoa_monthly: listing.hoa_monthly,
+            flood_zone: listing.flood_zone.as_deref(),
+            wildfire_zone: listing.wildfire_zone.as_deref(),
+            walk_score: listing.walk_score,
+            school_score: listing.school_score,
+        }
+    }
+
+    pub(crate) fn from_core(core: &'a ListingCoreProto) -> Self {
+        Self {
+            listing_sk: core.listing_sk,
+            id: &core.external_id,
+            zip: &core.zip,
+            lat: core.lat,
+            lon: core.lon,
+            price: core.price,
+            list_price: core.list_price,
+            hoa_monthly: core.hoa_monthly.map(i64::from),
+            flood_zone: None,
+            wildfire_zone: None,
+            walk_score: core.walk_score,
+            school_score: core.school_score,
+        }
+    }
+}
+
+fn parse_home_factors_from_section_json(sec_json: &Value) -> Option<HomeFactors> {
+    for candidate in [
+        sec_json.pointer("/root/factors"),
+        sec_json.pointer("/modules/factors/data"),
+        sec_json.pointer("/modules/factors"),
+        Some(sec_json),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if candidate.is_object() {
+            if candidate.get("cost").is_some()
+                || candidate.get("home").is_some()
+                || candidate.get("gates").is_some()
+            {
+                if let Ok(hf) = serde_json::from_value::<HomeFactors>(candidate.clone()) {
+                    return Some(hf);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Hydrates `'full_report'` factors for one listing using `ReportSectionKind::ReportSectionFactors`
+/// (`~1.5 KB` Zstd section read via `db.get_report_section`), falling back to narrow factor-input
+/// sections (`db.get_report_sections`) only when the report lacks a pre-computed `factors` section.
+pub(crate) async fn hydrate_factors_from_report_header(
+    db: &DbStore,
+    ctx: &HydrateListingCtx<'_>,
+    hdr: &ReportHeaderProto,
+) -> Result<(
+    HomeFactors,
+    HomeFactorsRowProto,
+    FactorProvenanceProto,
+    ListingFactorsRow,
+    Option<ListingSummaryBackfill>,
+)> {
+    let has_factors_sec =
+        (hdr.section_mask & (1_i32 << (ReportSectionKind::ReportSectionFactors as u32))) != 0;
+    let mut from_sec_factors: Option<HomeFactors> = None;
+    if has_factors_sec {
+        if let Some(sec_env) = db
+            .get_report_section(&hdr.slug, ReportSectionKind::ReportSectionFactors)
+            .await?
+        {
+            if let Ok(sec_json) = extract_section_json(&sec_env) {
+                from_sec_factors = parse_home_factors_from_section_json(&sec_json);
+            }
+        }
+    }
+
+    let (mut factors, rep_wildfire, rep_walk) = if let Some(hf) = from_sec_factors {
+        (hf, None, None)
+    } else {
+        let sec_map = db
+            .get_report_sections(&hdr.slug, FACTOR_INPUT_SECTIONS)
+            .await?;
+        let mut root_map = serde_json::Map::new();
+        let mut mod_map = serde_json::Map::new();
+        for env in sec_map.values() {
+            if let Ok(val) = extract_section_json(env) {
+                if let Some(obj) = val.as_object() {
+                    if obj.contains_key("root") || obj.contains_key("modules") {
+                        if let Some(rm) = obj.get("root").and_then(Value::as_object) {
+                            for (k, v) in rm {
+                                root_map.insert(k.clone(), v.clone());
+                            }
+                        }
+                        if let Some(mm) = obj.get("modules").and_then(Value::as_object) {
+                            for (mk, mv) in mm {
+                                mod_map.insert(mk.clone(), mv.clone());
+                            }
+                        }
+                    } else {
+                        for (k, v) in obj {
+                            root_map.insert(k.clone(), v.clone());
+                        }
+                    }
+                }
+            }
+        }
+        if !mod_map.is_empty() {
+            root_map.insert("modules".to_string(), Value::Object(mod_map));
+        }
+        let partial_rep = Value::Object(root_map);
+        let hf = HomeFactors::from_report(&partial_rep);
+        let wf = partial_rep
+            .pointer("/modules/hazards/data/wildfire/california/fhsz")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .or_else(|| {
+                partial_rep
+                    .pointer("/modules/hazards/data/wildfire/whp/label")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            });
+        let ws = partial_rep
+            .pointer("/modules/civic/data/scores/walkability")
+            .and_then(Value::as_f64);
+        (hf, wf, ws)
+    };
+
+    factors.id = ctx.id.to_string();
+    if factors.cost.list_price.is_none() {
+        if let Some(lp) = ctx
+            .list_price
+            .or(ctx.price)
+            .or(hdr.list_price)
+            .filter(|&p| p > 0)
+        {
+            factors.cost.list_price = Some(Factor::new(
+                lp as f64,
+                "Listing MLS/public price",
+                Grade::Listing,
+            ));
+        }
+    }
+    if factors.cost.hoa_monthly.is_none() {
+        if let Some(hoa) = ctx.hoa_monthly.filter(|&h| h >= 0) {
+            factors.cost.hoa_monthly = Some(Factor::new(hoa as f64, "Listing HOA", Grade::Listing));
+        }
+    }
+
+    let lat = ctx.lat.or(hdr.lat);
+    let lon = ctx.lon.or(hdr.lon);
+    let flood_zone = factors.gates.flood_zone.clone();
+    let wildfire_zone = rep_wildfire
+        .or_else(|| {
+            factors
+                .gates
+                .very_high_fire
+                .as_ref()
+                .and_then(|vh| vh.value.then(|| "Very High".to_string()))
+        })
+        .or_else(|| ctx.wildfire_zone.map(str::to_string));
+    let walk_score = rep_walk
+        .or_else(|| factors.convenience.as_ref().map(|c| c.value))
+        .or(ctx.walk_score);
+    let avg_school = average_school_score(&factors);
+    let completeness_pct = compute_factors_completeness_pct(&factors);
+
+    let resolved_sk = if ctx.listing_sk > 0 {
+        ctx.listing_sk
+    } else if let Some(hsk) = hdr.listing_sk.filter(|&k| k > 0) {
+        hsk
+    } else {
+        db.resolve_listing_sk(ctx.id)
+            .await?
+            .unwrap_or_else(|| deterministic_sk(ctx.id))
+    };
+
+    let report_ts = if hdr.generated_ts > 0 {
+        hdr.generated_ts
+    } else {
+        hdr.updated_ts
+    };
+    let now_ts = now_unix_secs();
+    let scanned_ts = now_ts.max(report_ts);
+
+    let (row_proto, prov_proto) = crate::db::proto::home_factors_to_proto(
+        resolved_sk,
+        ctx.id,
+        "full_report",
+        completeness_pct,
+        walk_score,
+        avg_school,
+        None,
+        wildfire_zone.as_deref(),
+        (!ctx.zip.is_empty()).then_some(ctx.zip),
+        lat,
+        lon,
+        scanned_ts,
+        now_ts,
+        &factors,
+    );
+
+    let mut lf_row = proto_to_meta_listing_factors_row(&row_proto);
+    if lf_row.wildfire_zone.is_none() {
+        lf_row.wildfire_zone = wildfire_zone.clone();
+    }
+
+    let bf = ListingSummaryBackfill {
+        listing_id: ctx.id.to_string(),
+        lat: if ctx.lat.is_none() { lat } else { None },
+        lon: if ctx.lon.is_none() { lon } else { None },
+        flood_zone: if ctx.flood_zone.map_or(true, |s| s.trim().is_empty()) {
+            flood_zone
+        } else {
+            None
+        },
+        wildfire_zone: if ctx.wildfire_zone.map_or(true, |s| s.trim().is_empty()) {
+            wildfire_zone
+        } else {
+            None
+        },
+        walk_score: if ctx.walk_score.is_none() {
+            walk_score
+        } else {
+            None
+        },
+        school_score: if ctx.school_score.is_none() {
+            avg_school
+        } else {
+            None
+        },
+    };
+    let maybe_bf = bf.has_any().then_some(bf);
+
+    Ok((factors, row_proto, prov_proto, lf_row, maybe_bf))
+}
+
+fn collect_candidate_slugs_for_item<'a>(
+    explicit_slug: Option<&'a str>,
+    address: &str,
+    out: &mut Vec<String>,
+) -> (Option<&'a str>, String) {
+    let exp = explicit_slug.map(str::trim).filter(|s| !s.is_empty());
+    if let Some(s) = exp {
+        out.push(s.to_string());
+    }
+    let canon = canonical_address_slug(address);
+    if !canon.is_empty() && exp != Some(canon.as_str()) {
+        out.push(canon.clone());
+    }
+    (exp, canon)
+}
+
+/// Fast-path area factor resolver operating directly on narrow `ListingCoreProto` rows (`Q3_rank_e2e`):
+/// - Batch-loads `HomeFactorsRowProto` by `listing_sk` PK (`1` Rapid query per 500 homes, `0` JSON).
+/// - Batch-probes `ReportHeaderProto` across all candidate slugs concurrently (`0` N+1 loops).
+/// - Hydrates 7-table `ListingFullView` cards ONLY for cold `need_scan` misses!
+pub(crate) async fn resolve_area_factors_for_cores(
+    db: &DbStore,
+    http: &HttpClient,
+    env: &EnvConfig,
+    cores: &[ListingCoreProto],
+    opts: &LightScanOptions,
 ) -> Result<LightScanResult> {
+    if cores.is_empty() {
+        return Ok(LightScanResult::default());
+    }
     let tile_cache = opts
         .tile_cache
         .clone()
         .unwrap_or_else(|| Arc::clone(&DEFAULT_LIGHT_SCAN_TILE_CACHE));
     let stats_before = tile_cache.stats();
 
-    let ids: Vec<String> = listings.iter().map(|l| l.id.clone()).collect();
-    let existing_rows = db.get_listing_factors_batch(&ids).await?;
+    let sks: Vec<i64> = cores.iter().map(|c| c.listing_sk).collect();
+    let mut all_slugs = Vec::with_capacity(cores.len() * 2);
+    let mut item_slugs: Vec<(Option<&str>, String)> = Vec::with_capacity(cores.len());
+    for c in cores {
+        item_slugs.push(collect_candidate_slugs_for_item(
+            c.report_slug.as_deref(),
+            &c.address,
+            &mut all_slugs,
+        ));
+    }
+
+    let (existing_protos, report_headers) = tokio::try_join!(
+        load_factor_protos_by_sk_batch(db, &sks),
+        fetch_report_headers_concurrent(db, &all_slugs),
+    )?;
 
     let mut result = LightScanResult::default();
-    let mut pending_rows_to_upsert: Vec<ListingFactorsRow> = Vec::new();
+    let mut pending_protos: Vec<(HomeFactorsRowProto, Option<FactorProvenanceProto>)> = Vec::new();
     let mut backfills: Vec<ListingSummaryBackfill> = Vec::new();
-    let mut need_scan: Vec<ListingRow> = Vec::new();
+    let mut cold_reports: Vec<(&ListingCoreProto, &ReportHeaderProto)> = Vec::new();
+    let mut need_scan_cores: Vec<ListingCoreProto> = Vec::new();
 
-    for listing in &listings {
-        if let Some(report_rec) = find_cached_report_for_listing(&db, listing).await? {
+    for (core, (exp_slug, canon_slug)) in cores.iter().zip(item_slugs.iter()) {
+        let matched_hdr = exp_slug
+            .and_then(|s| report_headers.get(s))
+            .or_else(|| {
+                (!canon_slug.is_empty())
+                    .then(|| report_headers.get(canon_slug.as_str()))
+                    .flatten()
+            });
+
+        if let Some(hdr) = matched_hdr {
+            let report_ts = if hdr.generated_ts > 0 {
+                hdr.generated_ts
+            } else {
+                hdr.updated_ts
+            };
             if !opts.force_refresh {
-                if let Some(cached_row) = existing_rows.get(&listing.id) {
-                    if cached_row.schema_version >= FACTORS_VERSION as i64
-                        && cached_row.source_tier == "full_report"
-                        && !is_newer_iso(&report_rec.updated_at, &cached_row.scanned_at)
+                if let Some(proto_row) = existing_protos.get(&core.listing_sk) {
+                    if proto_row.schema_version >= FACTORS_VERSION as i32
+                        && proto_row.source_tier == FactorSourceTier::FactorTierFullReport as i32
+                        && report_ts <= proto_row.scanned_ts
                     {
-                        if let Ok(mut parsed) =
-                            serde_json::from_str::<HomeFactors>(&cached_row.factors_json)
-                        {
-                            parsed.id = listing.id.clone();
-                            result.factors.insert(listing.id.clone(), parsed);
-                            result.rows.insert(listing.id.clone(), cached_row.clone());
-                            result.reused_cached += 1;
-                            continue;
-                        }
-                    }
-                }
-            }
-            let (factors, lf_row, maybe_backfill) =
-                hydrate_from_cached_report(listing, &report_rec);
-            pending_rows_to_upsert.push(lf_row.clone());
-            if let Some(bf) = maybe_backfill {
-                backfills.push(bf);
-            }
-            result.factors.insert(listing.id.clone(), factors);
-            result.rows.insert(listing.id.clone(), lf_row);
-            result.hydrated_full_report += 1;
-            continue;
-        }
-
-        // Manual refresh only: never expire or auto-refresh existing `listing_factors` rows by TTL.
-        if !opts.force_refresh {
-            if let Some(cached_row) = existing_rows.get(&listing.id) {
-                if cached_row.schema_version >= FACTORS_VERSION as i64 {
-                    if let Ok(mut parsed) =
-                        serde_json::from_str::<HomeFactors>(&cached_row.factors_json)
-                    {
-                        parsed.id = listing.id.clone();
-                        result.factors.insert(listing.id.clone(), parsed);
-                        result.rows.insert(listing.id.clone(), cached_row.clone());
+                        let mut hf = crate::db::proto::home_factors_from_proto(proto_row, None);
+                        hf.id = core.external_id.clone();
+                        let lf_row = proto_to_meta_listing_factors_row(proto_row);
+                        result.factors.insert(core.external_id.clone(), hf);
+                        result.rows.insert(core.external_id.clone(), lf_row);
                         result.reused_cached += 1;
                         continue;
                     }
                 }
             }
+            cold_reports.push((core, hdr));
+            continue;
         }
 
-        need_scan.push(listing.clone());
+        if !opts.force_refresh {
+            if let Some(proto_row) = existing_protos.get(&core.listing_sk) {
+                if proto_row.schema_version >= FACTORS_VERSION as i32 {
+                    let mut hf = crate::db::proto::home_factors_from_proto(proto_row, None);
+                    hf.id = core.external_id.clone();
+                    let lf_row = proto_to_meta_listing_factors_row(proto_row);
+                    result.factors.insert(core.external_id.clone(), hf);
+                    result.rows.insert(core.external_id.clone(), lf_row);
+                    result.reused_cached += 1;
+                    continue;
+                }
+            }
+        }
+
+        need_scan_cores.push(core.clone());
     }
 
-    if !need_scan.is_empty() {
-        let mut geocoded_map: HashMap<String, (f64, f64, Option<String>)> = HashMap::new();
-        if opts.network_enabled {
-            let missing: Vec<BatchAddressInput> = need_scan
-                .iter()
-                .filter(|l| l.lat.is_none() || l.lon.is_none())
-                .map(|l| BatchAddressInput::from_oneline(&l.id, &l.address))
-                .collect();
-            if !missing.is_empty() {
-                if let Ok(hits) = census_batch_geocode_with_timeout(
-                    &http,
-                    &missing,
-                    opts.endpoints.census_batch_url.as_deref(),
-                    opts.timeout_ms.max(8_000),
-                )
-                .await
-                {
-                    for hit in hits {
-                        if let (Some(la), Some(lo)) = (hit.lat, hit.lon) {
-                            let tract = hit.tract_geoid();
-                            geocoded_map.insert(hit.id, (la, lo, tract));
-                        }
-                    }
-                }
+    if !cold_reports.is_empty() {
+        let hydrate_futs = cold_reports.iter().map(|(core, hdr)| {
+            let ctx = HydrateListingCtx::from_core(core);
+            async move { hydrate_factors_from_report_header(db, &ctx, hdr).await }
+        });
+        let hydrated = futures::future::try_join_all(hydrate_futs).await?;
+        for (factors, row_proto, prov_proto, lf_row, maybe_bf) in hydrated {
+            pending_protos.push((row_proto, Some(prov_proto)));
+            if let Some(bf) = maybe_bf {
+                backfills.push(bf);
             }
-        }
-
-        for item in &mut need_scan {
-            if item.lat.is_none() || item.lon.is_none() {
-                if let Some((la, lo, _)) = geocoded_map.get(&item.id) {
-                    item.lat = Some(*la);
-                    item.lon = Some(*lo);
-                }
-            }
-        }
-
-        let db_arc = db.clone();
-        let http_arc = http.clone();
-        let env_arc = env.clone();
-        let opts_arc = Arc::new(opts.clone());
-        let tile_cache_ref = Arc::clone(&tile_cache);
-        let geo_hints = Arc::new(geocoded_map);
-        let sem = Arc::new(Semaphore::new(opts.concurrency.clamp(1, 24)));
-        let mut join_set = JoinSet::new();
-
-        for listing in need_scan {
-            let db_c = db_arc.clone();
-            let http_c = http_arc.clone();
-            let env_c = env_arc.clone();
-            let opts_c = Arc::clone(&opts_arc);
-            let tc_c = Arc::clone(&tile_cache_ref);
-            let gh_c = Arc::clone(&geo_hints);
-            let sem_c = Arc::clone(&sem);
-            join_set.spawn(async move {
-                let _permit = sem_c
-                    .acquire_owned()
-                    .await
-                    .map_err(|e| anyhow!("light scan semaphore closed: {e}"))?;
-                scan_one_listing(db_c, http_c, env_c, tc_c, opts_c, gh_c, listing).await
-            });
-        }
-
-        while let Some(joined) = join_set.join_next().await {
-            match joined {
-                Ok(Ok((factors, row, bf))) => {
-                    pending_rows_to_upsert.push(row.clone());
-                    if let Some(b) = bf {
-                        backfills.push(b);
-                    }
-                    result.factors.insert(row.listing_id.clone(), factors);
-                    result.rows.insert(row.listing_id.clone(), row);
-                    result.scanned_light += 1;
-                }
-                Ok(Err(err)) => result.warnings.push(err.to_string()),
-                Err(join_err) => result
-                    .warnings
-                    .push(format!("Light scan task join error: {join_err}")),
-            }
+            result.factors.insert(lf_row.listing_id.clone(), factors);
+            result.rows.insert(lf_row.listing_id.clone(), lf_row);
+            result.hydrated_full_report += 1;
         }
     }
 
-    if !pending_rows_to_upsert.is_empty() {
-        db.upsert_listing_factors_batch(&pending_rows_to_upsert)
-            .await?;
+    if !need_scan_cores.is_empty() {
+        let cards = db.hydrate_listing_cards(&need_scan_cores).await?;
+        let mut sk_by_id: HashMap<String, i64> = HashMap::with_capacity(cards.len());
+        let mut need_scan_rows: Vec<ListingRow> = Vec::with_capacity(cards.len());
+        for view in &cards {
+            sk_by_id.insert(view.core.external_id.clone(), view.core.listing_sk);
+            need_scan_rows.push(ListingFullView::to_listing_row(view));
+        }
+
+        run_cold_light_scans(
+            db,
+            http,
+            env,
+            &tile_cache,
+            opts,
+            need_scan_rows,
+            &sk_by_id,
+            &mut pending_protos,
+            &mut backfills,
+            &mut result,
+        )
+        .await;
+    }
+
+    if !pending_protos.is_empty() {
+        db.upsert_home_factors_proto_batch(&pending_protos).await?;
     }
     if !backfills.is_empty() {
         let _ = db.backfill_listing_summary_fields(&backfills).await;
@@ -372,27 +891,278 @@ async fn light_scan_owned(
     Ok(result)
 }
 
-async fn find_cached_report_for_listing(
+async fn light_scan_owned(
+    db: DbStore,
+    http: HttpClient,
+    env: EnvConfig,
+    listings: Vec<ListingRow>,
+    opts: LightScanOptions,
+) -> Result<LightScanResult> {
+    let tile_cache = opts
+        .tile_cache
+        .clone()
+        .unwrap_or_else(|| Arc::clone(&DEFAULT_LIGHT_SCAN_TILE_CACHE));
+    let stats_before = tile_cache.stats();
+
+    let ids: Vec<String> = listings.iter().map(|l| l.id.clone()).collect();
+    let mut all_slugs = Vec::with_capacity(listings.len() * 2);
+    let mut item_slugs: Vec<(Option<&str>, String)> = Vec::with_capacity(listings.len());
+    for l in &listings {
+        item_slugs.push(collect_candidate_slugs_for_item(
+            l.report_slug.as_deref(),
+            &l.address,
+            &mut all_slugs,
+        ));
+    }
+
+    let (existing_protos, report_headers) = tokio::try_join!(
+        load_factor_protos_by_external_id_batch(&db, &ids),
+        fetch_report_headers_concurrent(&db, &all_slugs),
+    )?;
+
+    let mut result = LightScanResult::default();
+    let mut pending_protos: Vec<(HomeFactorsRowProto, Option<FactorProvenanceProto>)> = Vec::new();
+    let mut backfills: Vec<ListingSummaryBackfill> = Vec::new();
+    let mut cold_reports: Vec<(&ListingRow, &ReportHeaderProto)> = Vec::new();
+    let mut need_scan: Vec<ListingRow> = Vec::new();
+
+    for (listing, (exp_slug, canon_slug)) in listings.iter().zip(item_slugs.iter()) {
+        let matched_hdr = exp_slug
+            .and_then(|s| report_headers.get(s))
+            .or_else(|| {
+                (!canon_slug.is_empty())
+                    .then(|| report_headers.get(canon_slug.as_str()))
+                    .flatten()
+            });
+
+        if let Some(hdr) = matched_hdr {
+            let report_ts = if hdr.generated_ts > 0 {
+                hdr.generated_ts
+            } else {
+                hdr.updated_ts
+            };
+            if !opts.force_refresh {
+                if let Some(proto_row) = existing_protos.get(&listing.id) {
+                    if proto_row.schema_version >= FACTORS_VERSION as i32
+                        && proto_row.source_tier == FactorSourceTier::FactorTierFullReport as i32
+                        && report_ts <= proto_row.scanned_ts
+                    {
+                        let mut hf = crate::db::proto::home_factors_from_proto(proto_row, None);
+                        hf.id = listing.id.clone();
+                        let lf_row = proto_to_meta_listing_factors_row(proto_row);
+                        result.factors.insert(listing.id.clone(), hf);
+                        result.rows.insert(listing.id.clone(), lf_row);
+                        result.reused_cached += 1;
+                        continue;
+                    }
+                }
+            }
+            cold_reports.push((listing, hdr));
+            continue;
+        }
+
+        // Manual refresh only: never expire or auto-refresh existing `listing_factors` rows by TTL.
+        if !opts.force_refresh {
+            if let Some(proto_row) = existing_protos.get(&listing.id) {
+                if proto_row.schema_version >= FACTORS_VERSION as i32 {
+                    let mut hf = crate::db::proto::home_factors_from_proto(proto_row, None);
+                    hf.id = listing.id.clone();
+                    let lf_row = proto_to_meta_listing_factors_row(proto_row);
+                    result.factors.insert(listing.id.clone(), hf);
+                    result.rows.insert(listing.id.clone(), lf_row);
+                    result.reused_cached += 1;
+                    continue;
+                }
+            }
+        }
+
+        need_scan.push(listing.clone());
+    }
+
+    let mut sk_by_id: HashMap<String, i64> = HashMap::new();
+    if !cold_reports.is_empty() || !need_scan.is_empty() {
+        let mut need_sk_ids = Vec::with_capacity(cold_reports.len() + need_scan.len());
+        for (l, hdr) in &cold_reports {
+            if let Some(sk) = existing_protos
+                .get(&l.id)
+                .map(|p| p.listing_sk)
+                .filter(|&k| k > 0)
+                .or_else(|| hdr.listing_sk.filter(|&k| k > 0))
+            {
+                sk_by_id.insert(l.id.clone(), sk);
+            } else {
+                need_sk_ids.push(l.id.clone());
+            }
+        }
+        for l in &need_scan {
+            if let Some(sk) = existing_protos
+                .get(&l.id)
+                .map(|p| p.listing_sk)
+                .filter(|&k| k > 0)
+            {
+                sk_by_id.insert(l.id.clone(), sk);
+            } else {
+                need_sk_ids.push(l.id.clone());
+            }
+        }
+        if !need_sk_ids.is_empty() {
+            if let Ok(resolved) = resolve_listing_sks_by_external_id_batch(&db, &need_sk_ids).await
+            {
+                sk_by_id.extend(resolved);
+            }
+        }
+    }
+
+    if !cold_reports.is_empty() {
+        let db_ref = &db;
+        let hydrate_futs = cold_reports.iter().map(|(listing, hdr)| {
+            let sk = sk_by_id
+                .get(&listing.id)
+                .copied()
+                .unwrap_or_else(|| deterministic_sk(&listing.id));
+            let ctx = HydrateListingCtx::from_listing_row(listing, sk);
+            async move { hydrate_factors_from_report_header(db_ref, &ctx, hdr).await }
+        });
+        let hydrated = futures::future::try_join_all(hydrate_futs).await?;
+        for (factors, row_proto, prov_proto, lf_row, maybe_bf) in hydrated {
+            pending_protos.push((row_proto, Some(prov_proto)));
+            if let Some(bf) = maybe_bf {
+                backfills.push(bf);
+            }
+            result.factors.insert(lf_row.listing_id.clone(), factors);
+            result.rows.insert(lf_row.listing_id.clone(), lf_row);
+            result.hydrated_full_report += 1;
+        }
+    }
+
+    if !need_scan.is_empty() {
+        run_cold_light_scans(
+            &db,
+            &http,
+            &env,
+            &tile_cache,
+            &opts,
+            need_scan,
+            &sk_by_id,
+            &mut pending_protos,
+            &mut backfills,
+            &mut result,
+        )
+        .await;
+    }
+
+    if !pending_protos.is_empty() {
+        db.upsert_home_factors_proto_batch(&pending_protos).await?;
+    }
+    if !backfills.is_empty() {
+        let _ = db.backfill_listing_summary_fields(&backfills).await;
+    }
+
+    let stats_after = tile_cache.stats();
+    result.tile_hits = stats_after.hits.saturating_sub(stats_before.hits);
+    result.tile_misses = stats_after.misses.saturating_sub(stats_before.misses);
+    result.tile_coalesced = stats_after
+        .coalesced_waiters
+        .saturating_sub(stats_before.coalesced_waiters);
+
+    Ok(result)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_cold_light_scans(
     db: &DbStore,
-    listing: &ListingRow,
-) -> Result<Option<CachedReportRecord>> {
-    if let Some(slug) = listing
-        .report_slug
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
-        if let Some(rec) = db.get_cached_report(slug).await? {
-            return Ok(Some(rec));
+    http: &HttpClient,
+    env: &EnvConfig,
+    tile_cache: &Arc<SpatialTileCache>,
+    opts: &LightScanOptions,
+    mut need_scan: Vec<ListingRow>,
+    sk_by_id: &HashMap<String, i64>,
+    pending_protos: &mut Vec<(HomeFactorsRowProto, Option<FactorProvenanceProto>)>,
+    backfills: &mut Vec<ListingSummaryBackfill>,
+    result: &mut LightScanResult,
+) {
+    let mut geocoded_map: HashMap<String, (f64, f64, Option<String>)> = HashMap::new();
+    if opts.network_enabled {
+        let missing: Vec<BatchAddressInput> = need_scan
+            .iter()
+            .filter(|l| l.lat.is_none() || l.lon.is_none())
+            .map(|l| BatchAddressInput::from_oneline(&l.id, &l.address))
+            .collect();
+        if !missing.is_empty() {
+            if let Ok(hits) = census_batch_geocode_with_timeout(
+                http,
+                &missing,
+                opts.endpoints.census_batch_url.as_deref(),
+                opts.timeout_ms.max(8_000),
+            )
+            .await
+            {
+                for hit in hits {
+                    if let (Some(la), Some(lo)) = (hit.lat, hit.lon) {
+                        let tract = hit.tract_geoid();
+                        geocoded_map.insert(hit.id, (la, lo, tract));
+                    }
+                }
+            }
         }
     }
-    let canon = canonical_address_slug(&listing.address);
-    if !canon.is_empty() {
-        if let Some(rec) = db.get_cached_report(&canon).await? {
-            return Ok(Some(rec));
+
+    for item in &mut need_scan {
+        if item.lat.is_none() || item.lon.is_none() {
+            if let Some((la, lo, _)) = geocoded_map.get(&item.id) {
+                item.lat = Some(*la);
+                item.lon = Some(*lo);
+            }
         }
     }
-    Ok(None)
+
+    let db_arc = db.clone();
+    let http_arc = http.clone();
+    let env_arc = env.clone();
+    let opts_arc = Arc::new(opts.clone());
+    let tile_cache_ref = Arc::clone(tile_cache);
+    let geo_hints = Arc::new(geocoded_map);
+    let sem = Arc::new(Semaphore::new(opts.concurrency.clamp(1, 24)));
+    let mut join_set = JoinSet::new();
+
+    for listing in need_scan {
+        let sk = sk_by_id
+            .get(&listing.id)
+            .copied()
+            .unwrap_or_else(|| deterministic_sk(&listing.id));
+        let db_c = db_arc.clone();
+        let http_c = http_arc.clone();
+        let env_c = env_arc.clone();
+        let opts_c = Arc::clone(&opts_arc);
+        let tc_c = Arc::clone(&tile_cache_ref);
+        let gh_c = Arc::clone(&geo_hints);
+        let sem_c = Arc::clone(&sem);
+        join_set.spawn(async move {
+            let _permit = sem_c
+                .acquire_owned()
+                .await
+                .map_err(|e| anyhow!("light scan semaphore closed: {e}"))?;
+            scan_one_listing(db_c, http_c, env_c, tc_c, opts_c, gh_c, listing, sk).await
+        });
+    }
+
+    while let Some(joined) = join_set.join_next().await {
+        match joined {
+            Ok(Ok((factors, row_proto, prov_proto, lf_row, bf))) => {
+                pending_protos.push((row_proto, Some(prov_proto)));
+                if let Some(b) = bf {
+                    backfills.push(b);
+                }
+                result.factors.insert(lf_row.listing_id.clone(), factors);
+                result.rows.insert(lf_row.listing_id.clone(), lf_row);
+                result.scanned_light += 1;
+            }
+            Ok(Err(err)) => result.warnings.push(err.to_string()),
+            Err(join_err) => result
+                .warnings
+                .push(format!("Light scan task join error: {join_err}")),
+        }
+    }
 }
 
 pub fn hydrate_from_cached_report(
@@ -489,6 +1259,7 @@ pub fn hydrate_from_cached_report(
     (factors, row, bf)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn scan_one_listing(
     db: DbStore,
     http: HttpClient,
@@ -497,8 +1268,11 @@ async fn scan_one_listing(
     opts: Arc<LightScanOptions>,
     geo_hints: Arc<HashMap<String, (f64, f64, Option<String>)>>,
     listing: ListingRow,
+    listing_sk: i64,
 ) -> Result<(
     HomeFactors,
+    HomeFactorsRowProto,
+    FactorProvenanceProto,
     ListingFactorsRow,
     Option<ListingSummaryBackfill>,
 )> {
@@ -710,6 +1484,57 @@ async fn scan_one_listing(
     let mut factors = HomeFactors::from_report(&envelope);
     factors.id = listing.id.clone();
 
+    if factors.home.adu.is_none() && listing.has_adu == Some(1) {
+        factors.home.adu = Some(Factor::new(
+            Adu::default(),
+            "Listing features",
+            Grade::Listing,
+        ));
+    }
+    if factors.home.adu_feasibility.is_none() && listing.adu_feasible == Some(1) {
+        factors.home.adu_feasibility = Some(Factor::new(
+            "Strong".to_string(),
+            "Open Estate lot and ADU screen (open lot area, state ADU law)",
+            Grade::Area,
+        ));
+    }
+    if listing.has_pool == Some(1)
+        || listing.has_ev_charger == Some(1)
+        || listing.has_hardwood_floors == Some(1)
+    {
+        let f_ref = factors.features.get_or_insert_with(|| {
+            Factor::new(
+                BTreeSet::new(),
+                "MLS feature fields and listing text",
+                Grade::Listing,
+            )
+        });
+        if listing.has_pool == Some(1) {
+            f_ref.value.insert(Feature::Pool);
+        }
+        if listing.has_ev_charger == Some(1) {
+            f_ref.value.insert(Feature::EvReady);
+        }
+        if listing.has_hardwood_floors == Some(1) {
+            f_ref.value.insert(Feature::Hardwood);
+        }
+        if listing.stories.map_or(false, |s| s < 1.5) {
+            f_ref.value.insert(Feature::MainLevelPrimary);
+        }
+    }
+    if factors.crime.is_none() {
+        if let Some(sc) = listing
+            .safety_score
+            .filter(|s| s.is_finite() && (0.0..=100.0).contains(s))
+        {
+            factors.crime = Some(Factor::new(
+                sc,
+                "FBI Crime Data Explorer, agency rates",
+                Grade::Area,
+            ));
+        }
+    }
+
     // Fill any missing school level strictly with Grade::Area fallback if the listing lacked
     // explicit assigned names, using nearest ZIP public school that has an official score.
     supplement_area_school_scores(&mut factors, &per_home_schools);
@@ -718,17 +1543,29 @@ async fn scan_one_listing(
     let walk_score = walk_data.walk_score.or(listing.walk_score);
     let wildfire_zone = wildfire_label(&hazards_data).or_else(|| listing.wildfire_zone.clone());
     let avg_school = average_school_score(&factors).or(listing.school_score);
+    let completeness_pct = compute_factors_completeness_pct(&factors);
+    let now_ts = now_unix_secs();
 
-    let row = build_listing_factors_row(
-        &listing,
-        &factors,
+    let (row_proto, prov_proto) = crate::db::proto::home_factors_to_proto(
+        listing_sk,
+        &listing.id,
         "light_scan",
-        lat,
-        lon,
-        wildfire_zone.as_deref(),
+        completeness_pct,
         walk_score,
         avg_school,
+        None,
+        wildfire_zone.as_deref(),
+        (!listing.zip.is_empty()).then_some(listing.zip.as_str()),
+        lat,
+        lon,
+        now_ts,
+        now_ts,
+        &factors,
     );
+    let mut row = proto_to_meta_listing_factors_row(&row_proto);
+    if row.wildfire_zone.is_none() {
+        row.wildfire_zone = wildfire_zone.clone();
+    }
 
     let flood_for_backfill = factors.gates.flood_zone.clone();
     let bf = build_summary_backfill(
@@ -741,7 +1578,7 @@ async fn scan_one_listing(
         avg_school,
     );
 
-    Ok((factors, row, bf))
+    Ok((factors, row_proto, prov_proto, row, bf))
 }
 
 fn build_light_scan_factor_envelope(
@@ -807,6 +1644,17 @@ fn build_light_scan_factor_envelope(
     if let Some(hoa) = listing.hoa_monthly {
         facts_map.insert("hoaMonthly".to_string(), json!(hoa));
     }
+    if let Some(style) = listing
+        .architectural_style
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        facts_map.insert("architecturalStyle".to_string(), json!(style));
+    }
+    if let Some(gar) = listing.garage_spaces.filter(|g| g.is_finite() && *g >= 0.0) {
+        facts_map.insert("garageSpaces".to_string(), json!(gar));
+    }
     if let Some(ft) = &listing.features_text {
         facts_map.insert("features".to_string(), json!(ft));
         facts_map.insert(
@@ -821,32 +1669,6 @@ fn build_light_scan_factor_envelope(
     }
     if !assigned.is_empty() {
         facts_map.insert("schools".to_string(), json!({ "assigned": assigned }));
-    }
-
-    // Parse optional raw_json clues (architecturalStyle / remarks / poolFeatures / garage) if present.
-    if let Some(raw) = &listing.raw_json {
-        if let Ok(v) = serde_json::from_str::<Value>(raw) {
-            if let Some(style) = v
-                .get("architecturalStyle")
-                .or_else(|| v.get("architectureType"))
-                .and_then(Value::as_str)
-            {
-                facts_map.insert("architecturalStyle".to_string(), json!(style));
-            }
-            if let Some(gar) = v.get("garageSpaces").and_then(Value::as_f64) {
-                facts_map.insert("garageSpaces".to_string(), json!(gar));
-            }
-            if let Some(rem) = v
-                .get("remarks")
-                .or_else(|| v.get("description"))
-                .and_then(Value::as_str)
-            {
-                let mls = facts_map.entry("mlsListing").or_insert_with(|| json!({}));
-                if let Some(obj) = mls.as_object_mut() {
-                    obj.insert("remarks".to_string(), json!(rem));
-                }
-            }
-        }
     }
 
     let mut modules_map = serde_json::Map::new();
@@ -1222,16 +2044,6 @@ fn wildfire_label(h: &TileHazardsData) -> Option<String> {
         return Some(lbl.to_string());
     }
     h.nri_wildfire_rating.clone()
-}
-
-fn is_newer_iso(candidate: &str, baseline: &str) -> bool {
-    match (
-        chrono::DateTime::parse_from_rfc3339(candidate),
-        chrono::DateTime::parse_from_rfc3339(baseline),
-    ) {
-        (Ok(c), Ok(b)) => c > b,
-        _ => false,
-    }
 }
 
 // ------------------------------------------------------------------ Tile Cache Fetchers

@@ -2,10 +2,11 @@
 // `csv`-crate MLS/Redfin CSV parser, school-grade enricher, and diff event tracker.
 
 use crate::db::{
-    format_listing_row, listing_slug, normalize_listing_status, normalize_property_category,
-    score_to_school_grade, DbStore, ListingRow, SqlParam,
+    deterministic_sk, format_listing_row, listing_slug, normalize_listing_status,
+    normalize_property_category, proto, score_to_school_grade, CachedReportRecord, DbStore,
+    ListingFullView, ListingRow, SqlParam,
 };
-use crate::shared::{haversine_m, now_iso, round_n, EnvConfig, HttpClient, MILE_M};
+use crate::shared::{haversine_m, now_iso, now_unix_secs, round_n, EnvConfig, HttpClient, MILE_M};
 use anyhow::{anyhow, Result};
 use base64::Engine as _;
 use once_cell::sync::Lazy;
@@ -621,6 +622,10 @@ pub fn parse_listing_csv(csv_text: &str, fallback_zip: &str) -> Vec<ListingInput
                 }
                 if let Some(h) = hot {
                     m.insert("hotHome".into(), json!(h));
+                    if h {
+                        m.insert("isHotHome".into(), json!(true));
+                        m.insert("hotTag".into(), json!("Hot Home"));
+                    }
                 }
                 if let Some(ref u) = csv_url {
                     m.insert("url".into(), json!(u));
@@ -1591,25 +1596,55 @@ pub async fn get_zip_school_context(
     hint_lat: Option<f64>,
     hint_lon: Option<f64>,
 ) -> Result<ZipSchoolContext> {
-    if let Some((c_lat, c_lon, schools_json, updated_at)) = db.get_zip_school_cache_row(zip).await?
+    db.ensure_schema().await?;
+    let clean_zip = zip.trim();
+    if let Some((c_lat, c_lon, updated_ts)) = db
+        .fetch_optional_mapped(
+            "SELECT lat, lon, updated_ts FROM zip_school_cache WHERE zip = ?",
+            &[SqlParam::from(clean_zip)],
+            |r| {
+                (
+                    r.opt_f64("lat"),
+                    r.opt_f64("lon"),
+                    r.opt_i64("updated_ts").unwrap_or(0),
+                )
+            },
+        )
+        .await?
     {
-        let fresh = chrono::DateTime::parse_from_rfc3339(&updated_at)
-            .map(|dt| {
-                chrono::Utc::now()
-                    .signed_duration_since(dt.with_timezone(&chrono::Utc))
-                    .num_seconds()
-                    < SCHOOL_CACHE_TTL_SECS
-            })
-            .unwrap_or(false);
-        if fresh {
-            if let Ok(mut schools) = serde_json::from_str::<Vec<CachedSchoolEntry>>(&schools_json) {
-                attach_official_school_ratings(db, env, &mut schools).await;
-                return Ok(ZipSchoolContext {
-                    lat: c_lat.or(hint_lat),
-                    lon: c_lon.or(hint_lon),
-                    schools,
-                });
-            }
+        let now_ts = now_unix_secs();
+        if updated_ts > 0 && (now_ts - updated_ts) < SCHOOL_CACHE_TTL_SECS {
+            let mut schools = db
+                .fetch_all_mapped_raw(
+                    "SELECT nces_id, school_name, district_name, level, lat, lon \
+                     FROM zip_school_cache_entries WHERE zip = ? ORDER BY entry_idx ASC",
+                    &[SqlParam::from(clean_zip)],
+                    |r| {
+                        let lvl_str = match r.opt_i64("level").unwrap_or(0) {
+                            1 => "elementary",
+                            2 => "middle",
+                            3 => "high",
+                            _ => "other",
+                        };
+                        CachedSchoolEntry {
+                            nces_id: r.opt_str("nces_id"),
+                            name: r.opt_str("school_name").unwrap_or_default(),
+                            district: r.opt_str("district_name"),
+                            level: lvl_str.to_string(),
+                            lat: r.opt_f64("lat").unwrap_or(0.0),
+                            lon: r.opt_f64("lon").unwrap_or(0.0),
+                            rating: None,
+                            rating_source: None,
+                        }
+                    },
+                )
+                .await?;
+            attach_official_school_ratings(db, env, &mut schools).await;
+            return Ok(ZipSchoolContext {
+                lat: c_lat.or(hint_lat),
+                lon: c_lon.or(hint_lon),
+                schools,
+            });
         }
     }
 
@@ -1624,7 +1659,7 @@ pub async fn get_zip_school_context(
     let mut lat = hint_lat;
     let mut lon = hint_lon;
     if lat.is_none() || lon.is_none() {
-        if let Some((clat, clon)) = lookup_zip_centroid(client, zip).await {
+        if let Some((clat, clon)) = lookup_zip_centroid(client, clean_zip).await {
             lat = Some(clat);
             lon = Some(clon);
         }
@@ -1634,19 +1669,9 @@ pub async fn get_zip_school_context(
     };
 
     let mut schools = fetch_schools_near_zip(client, la, lo, env).await;
-    let schools_json = serde_json::to_string(&schools).unwrap_or_else(|_| "[]".to_string());
+    let entries_val = serde_json::to_value(&schools).unwrap_or_else(|_| json!([]));
     let _ = db
-        .upsert_row(
-            "zip_school_cache",
-            &[
-                ("zip", zip.into()),
-                ("lat", Some(la).into()),
-                ("lon", Some(lo).into()),
-                ("schools_json", schools_json.into()),
-                ("updated_at", now_iso().into()),
-            ],
-            &["zip"],
-        )
+        .upsert_zip_school_cache_entries(clean_zip, Some(la), Some(lo), &entries_val, now_unix_secs())
         .await;
     attach_official_school_ratings(db, env, &mut schools).await;
 
@@ -2732,21 +2757,186 @@ pub async fn upsert_listings_batch(
         }
     }
 
-    let mut existing_map: HashMap<String, ListingRow> = HashMap::new();
-    for z in &unique_zips {
+    #[derive(Clone)]
+    struct ExistingListingDiff {
+        listing_sk: i64,
+        external_id: String,
+        status: String,
+        price: Option<i64>,
+        report_slug: Option<String>,
+        school_score: Option<f64>,
+        first_seen_ts: i64,
+        status_changed_ts: i64,
+        price_changed_ts: Option<i64>,
+    }
+
+    // Narrow event-diff lookup strictly for target `order_ids` (replaces 85-col `SELECT * FROM listings WHERE zip = ?`).
+    let mut diff_by_id: HashMap<String, ExistingListingDiff> = HashMap::new();
+    for chunk in order_ids.chunks(200) {
+        let ph = vec!["?"; chunk.len()].join(", ");
+        let sql = format!(
+            "SELECT listing_sk, external_id, status, price, report_slug, school_score, \
+                    first_seen_ts, status_changed_ts, price_changed_ts \
+             FROM listings WHERE external_id IN ({ph})"
+        );
+        let params: Vec<SqlParam> = chunk.iter().map(|s| SqlParam::from(s.as_str())).collect();
         let rows = db
-            .fetch_listings_sql(
-                "SELECT * FROM listings WHERE zip = ?",
-                &[SqlParam::from(z.as_str())],
-            )
+            .fetch_all_mapped_raw(&sql, &params, |r| {
+                let st_code = r.opt_i64("status").unwrap_or(1) as i32;
+                ExistingListingDiff {
+                    listing_sk: r.opt_i64("listing_sk").unwrap_or(0),
+                    external_id: r.opt_str("external_id").unwrap_or_default(),
+                    status: proto::listing_status_from_code(st_code).to_string(),
+                    price: r.opt_i64("price"),
+                    report_slug: r.opt_str("report_slug"),
+                    school_score: r.opt_f64("school_score"),
+                    first_seen_ts: r.opt_i64("first_seen_ts").unwrap_or(0),
+                    status_changed_ts: r.opt_i64("status_changed_ts").unwrap_or(0),
+                    price_changed_ts: r.opt_i64("price_changed_ts"),
+                }
+            })
             .await?;
-        for r in rows {
-            existing_map.insert(r.id.clone(), r);
+        for d in rows {
+            if !d.external_id.is_empty() {
+                diff_by_id.insert(d.external_id.clone(), d);
+            }
         }
     }
 
+    let mut sks_to_hydrate: Vec<i64> = Vec::new();
+    for (id, diff) in &diff_by_id {
+        if diff.listing_sk <= 0 {
+            continue;
+        }
+        let needs_full_merge = merged_by_id
+            .get(id)
+            .map(|it| {
+                diff.report_slug.is_some()
+                    || it.beds.is_none()
+                    || it.sqft.is_none()
+                    || (diff.school_score.is_some() && it.school_score.is_none())
+            })
+            .unwrap_or(false);
+        if needs_full_merge {
+            sks_to_hydrate.push(diff.listing_sk);
+        }
+    }
+
+    let mut existing_map: HashMap<String, ListingRow> = HashMap::with_capacity(diff_by_id.len());
+    if !sks_to_hydrate.is_empty() {
+        for chunk in sks_to_hydrate.chunks(200) {
+            let ph = vec!["?"; chunk.len()].join(", ");
+            let sql = format!("SELECT * FROM listings WHERE listing_sk IN ({ph})");
+            let params: Vec<SqlParam> = chunk.iter().copied().map(SqlParam::I64).collect();
+            let cores = db.search_listing_cores(&sql, &params).await?;
+            let views = db.hydrate_listing_cards(&cores).await?;
+            for view in views {
+                let row = view.to_listing_row();
+                existing_map.insert(row.id.clone(), row);
+            }
+        }
+    }
+    for (id, diff) in &diff_by_id {
+        if existing_map.contains_key(id) {
+            continue;
+        }
+        existing_map.insert(
+            id.clone(),
+            ListingRow {
+                id: id.clone(),
+                address: String::new(),
+                street: None,
+                city: None,
+                state: None,
+                zip: String::new(),
+                lat: None,
+                lon: None,
+                status: diff.status.clone(),
+                price: diff.price,
+                list_price: None,
+                sold_price: None,
+                estimated_value: None,
+                price_per_sqft: None,
+                beds: None,
+                baths: None,
+                sqft: None,
+                lot_sqft: None,
+                year_built: None,
+                stories: None,
+                property_type: None,
+                hoa_monthly: None,
+                days_on_market: None,
+                listed_date: None,
+                sold_date: None,
+                school_score: diff.school_score,
+                school_grade: None,
+                school_elem_name: None,
+                school_elem_rating: None,
+                school_mid_name: None,
+                school_mid_rating: None,
+                school_high_name: None,
+                school_high_rating: None,
+                school_district: None,
+                walk_score: None,
+                flood_zone: None,
+                wildfire_zone: None,
+                overall_score: None,
+                verdict: None,
+                mls_number: None,
+                source: None,
+                url: None,
+                photo_url: None,
+                report_slug: diff.report_slug.clone(),
+                features_text: None,
+                raw_json: None,
+                electric_carrier: None,
+                electric_utility_type: None,
+                electric_rate_kwh: None,
+                gas_carrier: None,
+                gas_rate_therm: None,
+                water_carrier: None,
+                water_source_type: None,
+                sewer_type: None,
+                est_monthly_utilities: None,
+                internet_tier: None,
+                fiber_available: None,
+                high_speed_internet: None,
+                internet_carriers: None,
+                fiber_carriers: None,
+                max_download_mbps: None,
+                max_upload_mbps: None,
+                all_in_monthly: None,
+                property_tax_rate: None,
+                has_special_tax: None,
+                has_solar: None,
+                has_ev_charger: None,
+                has_heat_pump: None,
+                has_adu: None,
+                adu_feasible: None,
+                has_pool: None,
+                garage_spaces: None,
+                architectural_style: None,
+                safety_score: None,
+                has_hardwood_floors: None,
+                has_updated_kitchen: None,
+                has_remodeled: None,
+                quiet_street: None,
+                noise_max_db: None,
+                seismic_pga: None,
+                tags_json: None,
+                first_seen_at: proto::unix_ts_to_iso(diff.first_seen_ts),
+                last_seen_at: String::new(),
+                status_changed_at: proto::unix_ts_to_iso(diff.status_changed_ts),
+                price_changed_at: diff.price_changed_ts.map(proto::unix_ts_to_iso),
+            },
+        );
+    }
+
     let now = now_iso();
+    let now_ts = now_unix_secs();
     let mut res = UpsertBatchResult::default();
+    let mut rows_to_upsert: Vec<ListingRow> = Vec::with_capacity(order_ids.len());
+    let mut pending_events: Vec<(usize, &'static str, Option<String>, Option<i64>)> = Vec::new();
 
     for id in order_ids {
         let Some(mut item) = merged_by_id.remove(&id) else {
@@ -3087,205 +3277,145 @@ pub async fn upsert_listings_batch(
             },
         };
 
-        db.upsert_row(
-            "listings",
-            &[
-                ("id", row_record.id.clone().into()),
-                ("address", row_record.address.clone().into()),
-                ("street", row_record.street.clone().into()),
-                ("city", row_record.city.clone().into()),
-                ("state", row_record.state.clone().into()),
-                ("zip", row_record.zip.clone().into()),
-                ("lat", row_record.lat.into()),
-                ("lon", row_record.lon.into()),
-                ("status", row_record.status.clone().into()),
-                ("price", row_record.price.into()),
-                ("list_price", row_record.list_price.into()),
-                ("sold_price", row_record.sold_price.into()),
-                ("estimated_value", row_record.estimated_value.into()),
-                ("price_per_sqft", row_record.price_per_sqft.into()),
-                ("beds", row_record.beds.into()),
-                ("baths", row_record.baths.into()),
-                ("sqft", row_record.sqft.into()),
-                ("lot_sqft", row_record.lot_sqft.into()),
-                ("year_built", row_record.year_built.into()),
-                ("stories", row_record.stories.into()),
-                ("property_type", row_record.property_type.clone().into()),
-                ("hoa_monthly", row_record.hoa_monthly.into()),
-                ("days_on_market", row_record.days_on_market.into()),
-                ("listed_date", row_record.listed_date.clone().into()),
-                ("sold_date", row_record.sold_date.clone().into()),
-                ("school_score", row_record.school_score.into()),
-                ("school_grade", row_record.school_grade.clone().into()),
-                (
-                    "school_elem_name",
-                    row_record.school_elem_name.clone().into(),
-                ),
-                ("school_elem_rating", row_record.school_elem_rating.into()),
-                ("school_mid_name", row_record.school_mid_name.clone().into()),
-                ("school_mid_rating", row_record.school_mid_rating.into()),
-                (
-                    "school_high_name",
-                    row_record.school_high_name.clone().into(),
-                ),
-                ("school_high_rating", row_record.school_high_rating.into()),
-                ("school_district", row_record.school_district.clone().into()),
-                ("walk_score", row_record.walk_score.into()),
-                ("flood_zone", row_record.flood_zone.clone().into()),
-                ("wildfire_zone", row_record.wildfire_zone.clone().into()),
-                ("overall_score", row_record.overall_score.into()),
-                ("verdict", row_record.verdict.clone().into()),
-                ("mls_number", row_record.mls_number.clone().into()),
-                ("source", row_record.source.clone().into()),
-                ("url", row_record.url.clone().into()),
-                ("photo_url", row_record.photo_url.clone().into()),
-                ("report_slug", row_record.report_slug.clone().into()),
-                ("features_text", row_record.features_text.clone().into()),
-                ("raw_json", row_record.raw_json.clone().into()),
-                (
-                    "electric_carrier",
-                    row_record.electric_carrier.clone().into(),
-                ),
-                (
-                    "electric_utility_type",
-                    row_record.electric_utility_type.clone().into(),
-                ),
-                ("electric_rate_kwh", row_record.electric_rate_kwh.into()),
-                ("gas_carrier", row_record.gas_carrier.clone().into()),
-                ("gas_rate_therm", row_record.gas_rate_therm.into()),
-                ("water_carrier", row_record.water_carrier.clone().into()),
-                (
-                    "water_source_type",
-                    row_record.water_source_type.clone().into(),
-                ),
-                ("sewer_type", row_record.sewer_type.clone().into()),
-                (
-                    "est_monthly_utilities",
-                    row_record.est_monthly_utilities.into(),
-                ),
-                ("internet_tier", row_record.internet_tier.clone().into()),
-                ("fiber_available", row_record.fiber_available.into()),
-                ("high_speed_internet", row_record.high_speed_internet.into()),
-                (
-                    "internet_carriers",
-                    row_record.internet_carriers.clone().into(),
-                ),
-                ("fiber_carriers", row_record.fiber_carriers.clone().into()),
-                ("max_download_mbps", row_record.max_download_mbps.into()),
-                ("max_upload_mbps", row_record.max_upload_mbps.into()),
-                ("all_in_monthly", row_record.all_in_monthly.into()),
-                ("property_tax_rate", row_record.property_tax_rate.into()),
-                ("has_special_tax", row_record.has_special_tax.into()),
-                ("has_solar", row_record.has_solar.into()),
-                ("has_ev_charger", row_record.has_ev_charger.into()),
-                ("has_heat_pump", row_record.has_heat_pump.into()),
-                ("has_adu", row_record.has_adu.into()),
-                ("adu_feasible", row_record.adu_feasible.into()),
-                ("has_pool", row_record.has_pool.into()),
-                ("garage_spaces", row_record.garage_spaces.into()),
-                (
-                    "architectural_style",
-                    row_record.architectural_style.clone().into(),
-                ),
-                ("safety_score", row_record.safety_score.into()),
-                ("has_hardwood_floors", row_record.has_hardwood_floors.into()),
-                ("has_updated_kitchen", row_record.has_updated_kitchen.into()),
-                ("has_remodeled", row_record.has_remodeled.into()),
-                ("quiet_street", row_record.quiet_street.into()),
-                ("noise_max_db", row_record.noise_max_db.into()),
-                ("seismic_pga", row_record.seismic_pga.into()),
-                ("tags_json", row_record.tags_json.clone().into()),
-                ("first_seen_at", row_record.first_seen_at.clone().into()),
-                ("last_seen_at", row_record.last_seen_at.clone().into()),
-                (
-                    "status_changed_at",
-                    row_record.status_changed_at.clone().into(),
-                ),
-                (
-                    "price_changed_at",
-                    row_record.price_changed_at.clone().into(),
-                ),
-            ],
-            &["id"],
-        )
-        .await?;
-        res.upserted += 1;
-
+        let row_idx = rows_to_upsert.len();
         if emit_events {
             if let Some(ev) = event_type {
                 let old_status = existing.map(|e| e.status.clone());
                 let old_price = existing.and_then(|e| e.price);
-                db.insert_ignore_row(
-                    "listing_events",
-                    &[
-                        ("id", Uuid::new_v4().to_string().into()),
-                        ("listing_id", row_record.id.clone().into()),
-                        ("zip", row_record.zip.clone().into()),
-                        ("event_type", ev.into()),
-                        ("old_status", old_status.clone().into()),
-                        ("new_status", status.clone().into()),
-                        ("old_price", old_price.into()),
-                        ("new_price", price.into()),
-                        ("created_at", now.clone().into()),
-                    ],
-                )
-                .await?;
-
-                let formatted = format_listing_row(&row_record);
-                if ev == "new_listing" || ev == "back_on_market" {
-                    res.new_listings.push(formatted.clone());
-                } else if ev == "sold" {
-                    res.sold_listings.push(formatted.clone());
-                } else if ev == "price_change" {
-                    res.price_changes.push(formatted.clone());
-                }
-                res.changed_listings.push(ListingChangeEvent {
-                    event_type: ev.to_string(),
-                    old_status,
-                    old_price,
-                    listing: row_record,
-                    listing_json: formatted,
-                });
+                pending_events.push((row_idx, ev, old_status, old_price));
             }
+        }
+        rows_to_upsert.push(row_record);
+    }
+
+    let sks = db.upsert_listing_vertical_batch(&rows_to_upsert).await?;
+    res.upserted = rows_to_upsert.len();
+
+    if emit_events && !pending_events.is_empty() {
+        for (row_idx, ev, old_status, old_price) in pending_events {
+            let row_record = &rows_to_upsert[row_idx];
+            let sk = sks
+                .get(row_idx)
+                .copied()
+                .unwrap_or_else(|| deterministic_sk(&row_record.id));
+            let ev_id = Uuid::new_v4().to_string();
+            let old_status_code = old_status
+                .as_deref()
+                .map(|s| i64::from(proto::listing_status_to_code(Some(s))));
+            let new_status_code =
+                i64::from(proto::listing_status_to_code(Some(row_record.status.as_str())));
+            let event_kind = i64::from(proto::listing_event_to_code(ev));
+
+            db.insert_ignore_row_raw(
+                "listing_events",
+                &[
+                    ("event_sk", SqlParam::I64(deterministic_sk(&ev_id))),
+                    ("public_id", SqlParam::from(ev_id.as_str())),
+                    ("listing_sk", SqlParam::I64(sk)),
+                    ("external_id", SqlParam::from(row_record.id.as_str())),
+                    ("zip", SqlParam::from(row_record.zip.as_str())),
+                    ("event_kind", SqlParam::I64(event_kind)),
+                    ("old_status", SqlParam::from(old_status_code)),
+                    ("new_status", SqlParam::I64(new_status_code)),
+                    ("old_price", SqlParam::from(old_price)),
+                    ("new_price", SqlParam::from(row_record.price)),
+                    ("created_ts", SqlParam::I64(now_ts)),
+                ],
+            )
+            .await?;
+
+            let formatted = format_listing_row(row_record);
+            if ev == "new_listing" || ev == "back_on_market" {
+                res.new_listings.push(formatted.clone());
+            } else if ev == "sold" {
+                res.sold_listings.push(formatted.clone());
+            } else if ev == "price_change" {
+                res.price_changes.push(formatted.clone());
+            }
+            res.changed_listings.push(ListingChangeEvent {
+                event_type: ev.to_string(),
+                old_status,
+                old_price,
+                listing: row_record.clone(),
+                listing_json: formatted,
+            });
         }
     }
 
     Ok(res)
 }
 
-/// Idempotently populates the 27 structured shopping/utility/fiber columns on any pre-existing
-/// `listings` rows where `electric_carrier IS NULL` (e.g., rows inserted prior to schema upgrade).
+/// Idempotently populates structured shopping/utility/fiber columns on any pre-existing
+/// listings missing utility/fiber facets using indexed probes on `listing_utilities`
+/// (`idx_lu_elec_kind_rate` + `idx_lu_broadband`), returning `Ok(0)` immediately when already backfilled.
 pub async fn backfill_missing_shopping_facets(db: &DbStore) -> Result<usize> {
     db.ensure_schema().await?;
-    let rows = db
-        .fetch_listings_sql(
-            "SELECT * FROM listings WHERE electric_carrier IS NULL OR fiber_available IS NULL LIMIT 400",
+
+    let mut missing_set: HashSet<i64> = HashSet::new();
+    let (elec_missing, fiber_missing, core_cnt, util_cnt) = tokio::try_join!(
+        db.fetch_all_mapped_raw(
+            "SELECT listing_sk FROM listing_utilities \
+             WHERE electric_utility_kind = 0 AND electric_rate_kwh IS NULL LIMIT 400",
             &[],
-        )
-        .await?;
+            |r| r.opt_i64("listing_sk").unwrap_or(0),
+        ),
+        db.fetch_all_mapped_raw(
+            "SELECT listing_sk FROM listing_utilities WHERE fiber_available IS NULL LIMIT 400",
+            &[],
+            |r| r.opt_i64("listing_sk").unwrap_or(0),
+        ),
+        db.fetch_scalar_i64("SELECT COUNT(*) AS cnt FROM listings", &[], "cnt"),
+        db.fetch_scalar_i64("SELECT COUNT(*) AS cnt FROM listing_utilities", &[], "cnt"),
+    )?;
+    for sk in elec_missing.into_iter().chain(fiber_missing.into_iter()) {
+        if sk > 0 && missing_set.len() < 400 {
+            missing_set.insert(sk);
+        }
+    }
+    if missing_set.len() < 400 && core_cnt > util_cnt {
+        let rem = 400 - missing_set.len();
+        let orphan_sks = db
+            .fetch_all_mapped_raw(
+                "SELECT l.listing_sk FROM listings l \
+                 LEFT JOIN listing_utilities lu ON lu.listing_sk = l.listing_sk \
+                 WHERE lu.listing_sk IS NULL LIMIT ?",
+                &[SqlParam::I64(rem as i64)],
+                |r| r.opt_i64("listing_sk").unwrap_or(0),
+            )
+            .await?;
+        for sk in orphan_sks {
+            if sk > 0 && missing_set.len() < 400 {
+                missing_set.insert(sk);
+            }
+        }
+    }
+    if missing_set.is_empty() {
+        return Ok(0);
+    }
+
+    let mut missing_sks: Vec<i64> = missing_set.into_iter().collect();
+    missing_sks.sort_unstable();
+
+    let mut rows: Vec<ListingRow> = Vec::with_capacity(missing_sks.len());
+    for chunk in missing_sks.chunks(200) {
+        let ph = vec!["?"; chunk.len()].join(", ");
+        let sql = format!("SELECT * FROM listings WHERE listing_sk IN ({ph})");
+        let params: Vec<SqlParam> = chunk.iter().copied().map(SqlParam::I64).collect();
+        let cores = db.search_listing_cores(&sql, &params).await?;
+        let views = db.hydrate_listing_cards(&cores).await?;
+        rows.extend(views.iter().map(ListingFullView::to_listing_row));
+    }
     if rows.is_empty() {
         return Ok(0);
     }
-    let sql = "UPDATE listings SET
-        state = COALESCE(state, ?),
-        electric_carrier = ?, electric_utility_type = ?, electric_rate_kwh = ?,
-        gas_carrier = ?, gas_rate_therm = ?,
-        water_carrier = ?, water_source_type = ?, sewer_type = ?,
-        est_monthly_utilities = ?,
-        internet_tier = ?, fiber_available = ?, high_speed_internet = ?,
-        internet_carriers = ?, fiber_carriers = ?, max_download_mbps = ?, max_upload_mbps = ?,
-        all_in_monthly = ?, property_tax_rate = ?, has_special_tax = ?,
-        has_solar = ?, has_ev_charger = ?, has_heat_pump = ?,
-        has_adu = ?, adu_feasible = ?, has_pool = ?,
-        garage_spaces = ?, architectural_style = ?
-        WHERE id = ?";
-    let mut updated = 0_usize;
-    for r in &rows {
+
+    for r in &mut rows {
         let pt = r
             .property_type
             .as_deref()
-            .unwrap_or("Single-Family Detached");
-        let ft = r.features_text.as_deref().unwrap_or("");
+            .unwrap_or("Single-Family Detached")
+            .to_string();
+        let ft = r.features_text.clone().unwrap_or_default();
         let sf = compute_listing_shopping_facets(
             r.city.as_deref(),
             r.state.as_deref(),
@@ -3294,50 +3424,46 @@ pub async fn backfill_missing_shopping_facets(db: &DbStore) -> Result<usize> {
             r.sqft,
             r.lot_sqft,
             r.year_built,
-            pt,
+            &pt,
             r.hoa_monthly,
-            ft,
+            &ft,
             r.raw_json.as_deref(),
             Some(r),
         );
-        db.execute_params(
-            sql,
-            &[
-                sf.inferred_state.into(),
-                sf.electric_carrier.into(),
-                sf.electric_utility_type.into(),
-                sf.electric_rate_kwh.into(),
-                sf.gas_carrier.into(),
-                sf.gas_rate_therm.into(),
-                sf.water_carrier.into(),
-                sf.water_source_type.into(),
-                sf.sewer_type.into(),
-                sf.est_monthly_utilities.into(),
-                sf.internet_tier.into(),
-                sf.fiber_available.into(),
-                sf.high_speed_internet.into(),
-                sf.internet_carriers.into(),
-                sf.fiber_carriers.into(),
-                sf.max_download_mbps.into(),
-                sf.max_upload_mbps.into(),
-                sf.all_in_monthly.into(),
-                sf.property_tax_rate.into(),
-                sf.has_special_tax.into(),
-                sf.has_solar.into(),
-                sf.has_ev_charger.into(),
-                sf.has_heat_pump.into(),
-                sf.has_adu.into(),
-                sf.adu_feasible.into(),
-                sf.has_pool.into(),
-                sf.garage_spaces.into(),
-                sf.architectural_style.into(),
-                r.id.clone().into(),
-            ],
-        )
-        .await?;
-        updated += 1;
+        if r.state.as_deref().map(str::trim).unwrap_or("").is_empty() {
+            r.state = sf.inferred_state;
+        }
+        r.electric_carrier = sf.electric_carrier;
+        r.electric_utility_type = sf.electric_utility_type;
+        r.electric_rate_kwh = sf.electric_rate_kwh;
+        r.gas_carrier = sf.gas_carrier;
+        r.gas_rate_therm = sf.gas_rate_therm;
+        r.water_carrier = sf.water_carrier;
+        r.water_source_type = sf.water_source_type;
+        r.sewer_type = sf.sewer_type;
+        r.est_monthly_utilities = sf.est_monthly_utilities;
+        r.internet_tier = sf.internet_tier;
+        r.fiber_available = sf.fiber_available;
+        r.high_speed_internet = sf.high_speed_internet;
+        r.internet_carriers = sf.internet_carriers;
+        r.fiber_carriers = sf.fiber_carriers;
+        r.max_download_mbps = sf.max_download_mbps;
+        r.max_upload_mbps = sf.max_upload_mbps;
+        r.all_in_monthly = sf.all_in_monthly;
+        r.property_tax_rate = sf.property_tax_rate;
+        r.has_special_tax = sf.has_special_tax;
+        r.has_solar = sf.has_solar;
+        r.has_ev_charger = sf.has_ev_charger;
+        r.has_heat_pump = sf.has_heat_pump;
+        r.has_adu = sf.has_adu;
+        r.adu_feasible = sf.adu_feasible;
+        r.has_pool = sf.has_pool;
+        r.garage_spaces = sf.garage_spaces;
+        r.architectural_style = sf.architectural_style;
     }
-    Ok(updated)
+
+    db.upsert_listing_vertical_batch(&rows).await?;
+    Ok(rows.len())
 }
 
 pub async fn ingest_report_into_db(
@@ -3421,20 +3547,26 @@ pub async fn ingest_report_into_db(
                 .count_listings_by_status_for_zip(&first.zip)
                 .await
                 .unwrap_or((0, 0));
+            let st_upper = first
+                .state
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_ascii_uppercase());
             let _ = db
-                .upsert_row(
+                .upsert_row_raw(
                     "watched_zips",
                     &[
-                        ("zip", first.zip.clone().into()),
-                        ("city", first.city.clone().into()),
-                        ("state", first.state.clone().into()),
-                        ("lat", first.lat.into()),
-                        ("lon", first.lon.into()),
-                        ("active", 1_i64.into()),
-                        ("sync_interval_min", 1440_i64.into()),
-                        ("total_active_listings", act_cnt.into()),
-                        ("total_sold_listings", sld_cnt.into()),
-                        ("created_at", now_iso().into()),
+                        ("zip", SqlParam::from(first.zip.as_str())),
+                        ("city", SqlParam::from(first.city.as_deref())),
+                        ("state_code", SqlParam::from(st_upper.as_deref())),
+                        ("lat", SqlParam::from(first.lat)),
+                        ("lon", SqlParam::from(first.lon)),
+                        ("active", SqlParam::I64(1)),
+                        ("sync_interval_min", SqlParam::I64(1440)),
+                        ("total_active_listings", SqlParam::I64(act_cnt)),
+                        ("total_sold_listings", SqlParam::I64(sld_cnt)),
+                        ("created_ts", SqlParam::I64(now_unix_secs())),
                     ],
                     &["zip"],
                 )
@@ -3443,32 +3575,34 @@ pub async fn ingest_report_into_db(
     }
 
     if let Some(slug) = str_from_val(report.pointer("/meta/slug")).filter(|s| !s.is_empty()) {
-        if let Ok(Some(rec)) = db.get_cached_report(&slug).await {
-            let zip = str_from_val(report.pointer("/geo/zip"))
-                .or_else(|| str_from_val(report.pointer("/facts/zip")))
-                .unwrap_or_default();
-            if zip.len() == 5 {
-                if let Ok(rows) = db
-                    .query_listings_in_areas(std::slice::from_ref(&zip), &[], None, 500)
-                    .await
-                {
-                    let mut to_upsert = Vec::new();
-                    let mut backfills = Vec::new();
-                    for l in &rows {
-                        if l.report_slug.as_deref() == Some(slug.as_str()) {
+        // Header-only existence check (~240 B) + already-in-memory `report` JSON + `O(1)` PK resolve
+        // (eliminates 409 KB `get_cached_report` decompression + 500-row ZIP scan!).
+        if let Ok(Some(hdr)) = db.get_report_header(&slug).await {
+            let rec = CachedReportRecord {
+                slug: hdr.slug,
+                display_address: hdr.display_address,
+                zip: (!hdr.zip.trim().is_empty()).then_some(hdr.zip),
+                report: report.clone(),
+                rendered_html: None,
+                osrm_degraded: hdr.osrm_degraded,
+                updated_at: proto::unix_ts_to_iso(hdr.updated_ts),
+            };
+            if let Ok(Some(sk)) = db.resolve_listing_sk(&slug).await {
+                if let Ok(Some(core)) = db.get_listing_core(sk).await {
+                    if let Ok(views) = db.hydrate_listing_cards(std::slice::from_ref(&core)).await {
+                        if let Some(view) = views.first() {
+                            let l = view.to_listing_row();
                             let (_f, lf_row, maybe_bf) =
-                                crate::search::light_scan::hydrate_from_cached_report(l, &rec);
-                            to_upsert.push(lf_row);
+                                crate::search::light_scan::hydrate_from_cached_report(&l, &rec);
+                            let _ = db
+                                .upsert_listing_factors_batch(std::slice::from_ref(&lf_row))
+                                .await;
                             if let Some(bf) = maybe_bf {
-                                backfills.push(bf);
+                                let _ = db
+                                    .backfill_listing_summary_fields(std::slice::from_ref(&bf))
+                                    .await;
                             }
                         }
-                    }
-                    if !to_upsert.is_empty() {
-                        let _ = db.upsert_listing_factors_batch(&to_upsert).await;
-                    }
-                    if !backfills.is_empty() {
-                        let _ = db.backfill_listing_summary_fields(&backfills).await;
                     }
                 }
             }
@@ -3513,15 +3647,12 @@ pub async fn seed_reports_from_dir(db: &DbStore, reports_dir: &Path) -> Result<u
             continue;
         };
         let target_slug = str_from_val(rep.pointer("/meta/slug")).unwrap_or(slug);
-        if db.get_cached_report(&target_slug).await?.is_some() {
+        if db.get_report_header(&target_slug).await?.is_some() {
             // Never overwrite an already-cached (or manually refreshed) database report on startup.
             continue;
         }
-        let rendered_html = match html_path_opt {
-            Some(ref hp) => tokio::fs::read_to_string(hp).await.ok(),
-            None => None,
-        };
-        db.put_cached_report(&target_slug, &rep, rendered_html.as_deref())
+        let _ = html_path_opt;
+        db.put_cached_report(&target_slug, &rep, None)
             .await?;
         let batch = ingest_report_into_db(db, None, &env, &rep, false).await?;
         total += batch.upserted;
@@ -4132,88 +4263,74 @@ pub async fn sync_zip_listings_with_provider(
     } else {
         Some(warnings.join(" | ").chars().take(500).collect::<String>())
     };
-    let last_sync_status = if !warnings.is_empty() && all_items.is_empty() {
-        "partial_or_no_keys"
+    let last_sync_status_code: i64 = if !warnings.is_empty() && all_items.is_empty() {
+        2
     } else {
-        "ok"
+        1
     };
+    let now_ts = proto::iso_to_unix_ts(&now).unwrap_or_else(now_unix_secs);
+    let watch_city = sample_city.or_else(|| existing_watch.as_ref().and_then(|w| w.city.clone()));
+    let watch_state = sample_state
+        .or_else(|| existing_watch.as_ref().and_then(|w| w.state.clone()))
+        .map(|s| s.trim().to_ascii_uppercase())
+        .filter(|s| !s.is_empty());
+    let watch_lat = school_ctx
+        .lat
+        .or_else(|| existing_watch.as_ref().and_then(|w| w.lat));
+    let watch_lon = school_ctx
+        .lon
+        .or_else(|| existing_watch.as_ref().and_then(|w| w.lon));
+    let watch_created_ts = existing_watch
+        .as_ref()
+        .and_then(|w| proto::iso_to_unix_ts(&w.created_at))
+        .filter(|&t| t > 0)
+        .unwrap_or(now_ts);
 
-    db.upsert_row(
+    db.upsert_row_raw(
         "watched_zips",
         &[
-            ("zip", clean_zip.clone().into()),
-            (
-                "city",
-                sample_city
-                    .or_else(|| existing_watch.as_ref().and_then(|w| w.city.clone()))
-                    .into(),
-            ),
-            (
-                "state",
-                sample_state
-                    .or_else(|| existing_watch.as_ref().and_then(|w| w.state.clone()))
-                    .into(),
-            ),
-            (
-                "lat",
-                school_ctx
-                    .lat
-                    .or_else(|| existing_watch.as_ref().and_then(|w| w.lat))
-                    .into(),
-            ),
-            (
-                "lon",
-                school_ctx
-                    .lon
-                    .or_else(|| existing_watch.as_ref().and_then(|w| w.lon))
-                    .into(),
-            ),
+            ("zip", SqlParam::from(clean_zip.as_str())),
+            ("city", SqlParam::from(watch_city.as_deref())),
+            ("state_code", SqlParam::from(watch_state.as_deref())),
+            ("lat", SqlParam::from(watch_lat)),
+            ("lon", SqlParam::from(watch_lon)),
             (
                 "active",
-                existing_watch
-                    .as_ref()
-                    .map(|w| w.active)
-                    .unwrap_or(1)
-                    .into(),
+                SqlParam::I64(existing_watch.as_ref().map(|w| w.active).unwrap_or(1)),
             ),
             (
                 "subscriber_count",
-                existing_watch
-                    .as_ref()
-                    .map(|w| w.subscriber_count)
-                    .unwrap_or(0)
-                    .into(),
+                SqlParam::I64(
+                    existing_watch
+                        .as_ref()
+                        .map(|w| w.subscriber_count)
+                        .unwrap_or(0),
+                ),
             ),
             (
                 "sync_interval_min",
-                existing_watch
-                    .as_ref()
-                    .map(|w| w.sync_interval_min)
-                    .unwrap_or(15)
-                    .into(),
+                SqlParam::I64(
+                    existing_watch
+                        .as_ref()
+                        .map(|w| w.sync_interval_min)
+                        .unwrap_or(15),
+                ),
             ),
-            ("last_synced_at", Some(now.clone()).into()),
-            ("last_sync_status", Some(last_sync_status).into()),
+            ("last_synced_ts", SqlParam::I64(now_ts)),
+            ("last_sync_status", SqlParam::I64(last_sync_status_code)),
             (
                 "last_new_count",
-                (batch_res.new_listings.len() as i64).into(),
+                SqlParam::I64(batch_res.new_listings.len() as i64),
             ),
             (
                 "last_sold_count",
-                (batch_res.sold_listings.len() as i64).into(),
+                SqlParam::I64(batch_res.sold_listings.len() as i64),
             ),
-            ("total_active_listings", active_count.into()),
-            ("total_sold_listings", sold_count.into()),
-            ("sources_used", Some(sources_str).into()),
-            ("last_error", last_err.into()),
-            (
-                "created_at",
-                existing_watch
-                    .map(|w| w.created_at)
-                    .filter(|s| !s.is_empty())
-                    .unwrap_or(now)
-                    .into(),
-            ),
+            ("total_active_listings", SqlParam::I64(active_count)),
+            ("total_sold_listings", SqlParam::I64(sold_count)),
+            ("sources_used", SqlParam::from(sources_str.as_str())),
+            ("last_error", SqlParam::from(last_err.as_deref())),
+            ("created_ts", SqlParam::I64(watch_created_ts)),
         ],
         &["zip"],
     )
