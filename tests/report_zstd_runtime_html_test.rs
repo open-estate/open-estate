@@ -28,10 +28,11 @@ use prost::Message;
 use open_estate::guardrails::HttpDefenseShield;
 use open_estate::shared::{round_geojson_coordinates_6dec, EnvConfig, HttpClient};
 use open_estate::web::render::{
-    live_template_compile_count, render_report_html, render_template_single_pass,
-    safe_inline_json, sanitize_report_for_html, HOUSE3D_JS, I18NEXT_JS, I18N_EN_JSON,
-    I18N_ES_JSON, I18N_ZH_JSON, OPEN_ESTATE_CORE_JS, REPORT_DASHBOARD_JS, REPORT_MOTION_JS,
-    REPORT_TEMPLATE_HTML, REPORT_WORKSPACE_JS, WALKIN_MEDIA_JS,
+    live_template_compile_count, localize_i18n_json_for_brand, render_report_html,
+    render_template_single_pass, safe_inline_json, sanitize_report_for_html, BUYER_COPILOT_JS,
+    HOUSE3D_JS, I18NEXT_JS, I18N_EN_JSON, I18N_ES_JSON, I18N_ZH_JSON, OPEN_ESTATE_CORE_JS,
+    PDF_STUDIO_JS, REPORT_DASHBOARD_JS, REPORT_MOTION_JS, REPORT_TEMPLATE_HTML,
+    REPORT_WORKSPACE_JS, WALKIN_MEDIA_JS,
 };
 use open_estate::web::server::{build_router, AppState};
 use serde_json::{json, Value};
@@ -323,22 +324,45 @@ async fn zstd_roundtrip_compression_ratio_null_html_and_compiled_template_parity
     let esc_desc = &html_fast[desc_start..desc_end];
 
     let wordmark = open_estate::shared::format_brand_wordmark_html("Open Estate");
-    let combined_ws = format!("{REPORT_WORKSPACE_JS}\n;\n{WALKIN_MEDIA_JS}");
+    let combined_ws = format!(
+        "{REPORT_WORKSPACE_JS}\n;\n{WALKIN_MEDIA_JS}\n;\n{PDF_STUDIO_JS}\n;\n{BUYER_COPILOT_JS}"
+    );
+    let en_json = open_estate::web::render::safe_inline_json(&localize_i18n_json_for_brand(
+        I18N_EN_JSON,
+        "Open Estate",
+        "open-estate.local",
+    ));
+    let zh_json = open_estate::web::render::safe_inline_json(&localize_i18n_json_for_brand(
+        I18N_ZH_JSON,
+        "Open Estate",
+        "open-estate.local",
+    ));
+    let es_json = open_estate::web::render::safe_inline_json(&localize_i18n_json_for_brand(
+        I18N_ES_JSON,
+        "Open Estate",
+        "open-estate.local",
+    ));
+    let brand_name_json = open_estate::web::render::safe_inline_json("\"Open Estate\"");
+    let brand_domain_json = open_estate::web::render::safe_inline_json("\"open-estate.local\"");
     let legacy_single_pass = render_template_single_pass(
         REPORT_TEMPLATE_HTML,
         &[
             ("__REPORT_TITLE__", esc_title),
             ("__REPORT_DESC__", esc_desc),
             ("__REPORT_BRAND_WORDMARK__", wordmark.as_str()),
+            ("__REPORT_BRAND_NAME__", "Open Estate"),
+            ("__REPORT_BRAND_DOMAIN__", "open-estate.local"),
+            ("__REPORT_BRAND_NAME_JSON__", &brand_name_json),
+            ("__REPORT_BRAND_DOMAIN_JSON__", &brand_domain_json),
             ("__I18NEXT_JS__", &open_estate::web::render::safe_inline_js(I18NEXT_JS)),
             ("__OPEN_ESTATE_CORE_JS__", &open_estate::web::render::safe_inline_js(OPEN_ESTATE_CORE_JS)),
             ("__HOUSE3D_JS__", &open_estate::web::render::safe_inline_js(HOUSE3D_JS)),
             ("__REPORT_WORKSPACE_JS__", &open_estate::web::render::safe_inline_js(&combined_ws)),
             ("__REPORT_MOTION_JS__", &open_estate::web::render::safe_inline_js(REPORT_MOTION_JS)),
             ("__REPORT_DASHBOARD_JS__", &open_estate::web::render::safe_inline_js(REPORT_DASHBOARD_JS)),
-            ("__I18N_EN_JSON__", &open_estate::web::render::safe_inline_json(I18N_EN_JSON)),
-            ("__I18N_ZH_JSON__", &open_estate::web::render::safe_inline_json(I18N_ZH_JSON)),
-            ("__I18N_ES_JSON__", &open_estate::web::render::safe_inline_json(I18N_ES_JSON)),
+            ("__I18N_EN_JSON__", &en_json),
+            ("__I18N_ZH_JSON__", &zh_json),
+            ("__I18N_ES_JSON__", &es_json),
             ("__REPORT_JSON__", embedded_safe_json),
         ],
     );
@@ -407,7 +431,7 @@ async fn legacy_uncompressed_db_upgrade_runtime_html_live_template_reload_and_re
 
     let (etag_default, html_default) = {
         let _lock = ENV_MUTEX.lock().unwrap();
-        std::env::remove_var("OPENESTATE_ASSETS_DIR");
+        std::env::remove_var("OPEN_ESTATE_ASSETS_DIR");
         let resp = app
             .clone()
             .oneshot(
@@ -433,7 +457,7 @@ async fn legacy_uncompressed_db_upgrade_runtime_html_live_template_reload_and_re
     assert!(!html_default.contains("STALE_DB_RENDERED_HTML_V0"));
     assert!(html_default.contains(common::SYNTH_SECONDARY_ADDRESS));
 
-    // 4. Modify `template.html` via `OPENESTATE_ASSETS_DIR` WITHOUT regenerating or touching DB rows ->
+    // 4. Modify `template.html` via `OPEN_ESTATE_ASSETS_DIR` WITHOUT regenerating or touching DB rows ->
     //    `/r/:slug` compiles ONCE across ETag + render, caches steady-state requests (0 recompiles),
     //    and recompiles ONCE + rotates `ETag` when `template.html` changes on disk!
     let custom_assets = dir.join("custom-assets");
@@ -445,8 +469,8 @@ async fn legacy_uncompressed_db_upgrade_runtime_html_live_template_reload_and_re
 
     let (etag_updated, html_updated) = {
         let _lock = ENV_MUTEX.lock().unwrap();
-        std::env::set_var("OPENESTATE_ASSETS_DIR", &custom_assets);
-        let _guard = EnvVarGuard("OPENESTATE_ASSETS_DIR");
+        std::env::set_var("OPEN_ESTATE_ASSETS_DIR", &custom_assets);
+        let _guard = EnvVarGuard("OPEN_ESTATE_ASSETS_DIR");
 
         let c0 = live_template_compile_count();
         let resp = app

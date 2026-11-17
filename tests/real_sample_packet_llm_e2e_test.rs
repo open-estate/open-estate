@@ -759,7 +759,7 @@ async function runSingleInspectionFlow(cdp) {
       const panel = document.getElementById('bcPanelFn2');
       if (!badge || !panel) return null;
       const brief = document.getElementById('bcAiPacketBriefCard');
-      const modelBadge = document.getElementById('bcAiModelBadge');
+      const modelBadge = document.getElementById('bcSynthBadge');
       return {
         panelText: panel.innerText,
         briefText: brief ? brief.innerText : '',

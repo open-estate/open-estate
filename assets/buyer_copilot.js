@@ -2176,13 +2176,13 @@
       var aiNeg = String(analysisObj.negotiationStrategy || '').trim();
       var aiQuestions = Array.isArray(analysisObj.topQuestionsForSeller) ? analysisObj.topQuestionsForSeller : [];
       var aiEnhanced = !!analysisObj.aiEnhanced;
-      var aiModel = String(analysisObj.model || '').trim();
+      var synthModelLabel = String(analysisObj.model || '').trim();
       if (aiHeadline || aiExec || aiNeg) {
         out.push('<div class="bc-notice" id="bcAiPacketBriefCard" style="margin-top:12px;display:block;border-left:4px solid var(--bc-brand-fg)">');
         out.push('  <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:6px">');
         out.push('    <strong style="font-size:14px;color:var(--bc-ink)">' + esc(aiHeadline || L('Disclosure Packet Briefing', '披露包综合研判', 'Resumen del Paquete')) + '</strong>');
         if (aiEnhanced) {
-          out.push('    <span class="bc-badge bc-badge-sale" id="bcAiModelBadge">✨ ' + esc(L('AI Synthesized', 'AI 深度综合', 'Sintetizado con IA')) + (aiModel ? (' · ' + esc(aiModel)) : '') + '</span>');
+          out.push('    <span class="bc-badge bc-badge-sale" id="bcSynthBadge">✨ ' + esc(L('AI Synthesized', 'AI 深度综合', 'Sintetizado con IA')) + (synthModelLabel ? (' · ' + esc(synthModelLabel)) : '') + '</span>');
         }
         out.push('  </div>');
         if (aiExec) {

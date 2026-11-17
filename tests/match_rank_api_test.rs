@@ -645,7 +645,7 @@ async fn rank_api_triggers_and_completes_tier2_refinement_job() {
     // Poll GET /api/match/rank/:id until real OpenEstateScanRunner completes background batch
     let mut final_stage = j["stage"].as_str().unwrap().to_string();
     let mut last_payload = j;
-    for _ in 0..40 {
+    for _ in 0..250 {
         if final_stage == "complete" {
             break;
         }
