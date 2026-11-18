@@ -10,7 +10,7 @@
 //!   4-second timeouts, offline guards (`http.is_offline_blocked()`), and pre-storage natural-person
 //!   party-name redaction.
 
-use crate::ai::title_review::redact_title_pii;
+use crate::ai::pdf::redact_title_pii;
 use crate::extensions::adapter::{BoxFuture, DataExtensionAdapter};
 use crate::extensions::proto::v1::{
     extension_envelope_proto::Payload, CapabilityDomain, DriverKind, ExtensionEnvelopeProto,

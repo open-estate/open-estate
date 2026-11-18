@@ -779,8 +779,8 @@ async fn buyer_copilot_full_workflow_gate_comps_disclosures_and_offer_builder() 
     assert_eq!(seller_lookup_json["activeRole"], "seller");
     assert_eq!(seller_lookup_json["needsRoleSelection"], false);
 
-    // 1e. Verify GET /api/agent-match/recommendations also carries prefilled mailtoRequest & smtpDisabled
-    let rec_json: Value = client
+    // 1e. Verify removed brokerage /api/agent-match/recommendations returns 404 NOT_FOUND in Personal Edition
+    let rec_resp = client
         .get(format!(
             "{}/api/agent-match/recommendations?slug={}",
             srv.base_url,
@@ -788,16 +788,8 @@ async fn buyer_copilot_full_workflow_gate_comps_disclosures_and_offer_builder() 
         ))
         .send()
         .await
-        .unwrap()
-        .json()
-        .await
         .unwrap();
-    assert_eq!(rec_json["ok"], true);
-    assert_valid_mailto_payload(
-        &rec_json["data"]["mailtoRequest"],
-        "listing.agent@example.com",
-        "421-18-022",
-    );
+    assert_eq!(rec_resp.status(), reqwest::StatusCode::NOT_FOUND);
 
     // =========================================================================
     // 2. Unified Role-Aware Q&A (`POST /api/ask`: unset | buyer | seller | agent)

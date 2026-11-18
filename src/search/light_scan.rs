@@ -17,7 +17,7 @@ use crate::modules::fengshui::{resolve_osm_ways, OsmWay};
 use crate::modules::hazards::{flood_zone_info, URL_ASCE722, URL_NFHL_ZONES, URL_NRI, URL_WHP};
 use crate::modules::school_metrics::ca_metrics_for_report;
 use crate::scanner::batch_geocode::{census_batch_geocode_with_timeout, BatchAddressInput};
-use crate::scanner::engine::canonical_address_slug;
+use crate::scanner::canonical_address_slug;
 use crate::scanner::tile_cache::SpatialTileCache;
 use crate::scoring::catalog::{Feature, SchoolLevel};
 use crate::scoring::factors::{
@@ -360,11 +360,10 @@ pub(crate) async fn load_factor_protos_by_sk_batch(
         return Ok(HashMap::new());
     }
     let cols = LISTING_FACTORS_COLS.join(", ");
-    let hint = db.innodb_pk_hint();
     let futs = valid.chunks(500).map(|chunk| {
         let placeholders = vec!["?"; chunk.len()].join(", ");
         let sql = format!(
-            "SELECT {hint}{cols} FROM listing_factors WHERE listing_sk IN ({placeholders})"
+            "SELECT {cols} FROM listing_factors WHERE listing_sk IN ({placeholders})"
         );
         let params: Vec<SqlParam> = chunk.iter().map(|&k| SqlParam::I64(k)).collect();
         async move {
@@ -399,11 +398,10 @@ pub(crate) async fn load_factor_protos_by_external_id_batch(
         return Ok(HashMap::new());
     }
     let cols = LISTING_FACTORS_COLS.join(", ");
-    let hint = db.innodb_pk_hint();
     let futs = valid.chunks(500).map(|chunk| {
         let placeholders = vec!["?"; chunk.len()].join(", ");
         let sql = format!(
-            "SELECT {hint}{cols} FROM listing_factors WHERE external_id IN ({placeholders})"
+            "SELECT {cols} FROM listing_factors WHERE external_id IN ({placeholders})"
         );
         let params: Vec<SqlParam> = chunk.iter().map(|s| SqlParam::from(s.as_str())).collect();
         async move {

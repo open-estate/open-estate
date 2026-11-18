@@ -7,7 +7,6 @@ pub mod scrape;
 pub mod guardrails;
 pub mod db;
 pub mod ai;
-pub mod cre; // [feat/cre-mode]
 pub mod search;
 pub mod property;
 pub mod modules;
@@ -17,7 +16,6 @@ pub mod scoring;
 pub mod web;
 pub mod lazy;
 pub mod metering;
-pub mod scheduler;
 
 #[cfg(test)]
 extern crate self as open_estate;

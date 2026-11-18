@@ -47,25 +47,6 @@ async fn assert_campbell_unreachable_upstream(extension_id: &str, site: &PublicC
     assert_eq!(fail.health_status, "upstream_unavailable");
 }
 
-fn require_shovels_env() -> EnvConfig {
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap_or_else(|| std::path::Path::new("."));
-    let env = EnvConfig::from_process_and_dotenv(Some(root));
-    let key = env
-        .get("SHOVELS_API_KEY")
-        .map(str::to_string)
-        .or_else(|| {
-            std::env::var("SHOVELS_API_KEY")
-                .ok()
-                .filter(|v| !v.trim().is_empty())
-        })
-        .expect(
-            "SHOVELS_API_KEY must be set in environment or .env for live_keyed_shovels_* tests (zero silent skips)",
-        );
-    env_with(&[("SHOVELS_API_KEY", key)])
-}
-
 // =========================================================================
 // 1. `campbell_mgo_permits` (Stage-1 City of Campbell MGO ArcGIS)
 // =========================================================================
@@ -304,141 +285,16 @@ async fn live_public_municipal_open_data_unreachable_endpoint_reports_error() {
 }
 
 // =========================================================================
-// 3. `shovels_permits` (Stage-1 Keyed Shovels v2 API)
+// 3. Personal OSS Scope: `shovels_permits` BYOK Commercial Adapter Excluded
 // =========================================================================
 
-#[tokio::test]
-async fn live_keyed_shovels_permits_sf_city_hall_resolves_via_v2() {
-    let env = require_shovels_env();
+#[test]
+fn personal_oss_hub_excludes_shovels_permits_extension() {
     let hub = ExtensionHub::new_default();
-    let http = HttpClient::from_env(&env, None);
-
-    let ctx = InvocationContext::new("shovels_permits").with_trigger(InvocationTrigger::AdminTest);
-    let (res_wrap, event) = MeterScope::run(ctx, async {
-        hub.test_fetch(
-            "shovels_permits",
-            &SF_CITY_HALL.to_extension_query(),
-            &http,
-            &env,
-        )
-        .await
-    })
-    .await;
-
-    let res = res_wrap.expect("test_fetch shovels sf");
-    assert!(res.ok, "err={:?}", res.error);
-    assert!(matches!(
-        res.health_status.as_str(),
-        "healthy" | "empty_for_scope"
-    ));
-    assert!(event.dims.external_api_calls >= 1);
-}
-
-#[tokio::test]
-async fn live_keyed_shovels_permits_seattle_city_hall_second_geography() {
-    let env = require_shovels_env();
-    let hub = ExtensionHub::new_default();
-    let http = HttpClient::from_env(&env, None);
-
-    let res = hub
-        .test_fetch(
-            "shovels_permits",
-            &SEATTLE_CITY_HALL.to_extension_query(),
-            &http,
-            &env,
-        )
-        .await
-        .expect("test_fetch shovels seattle");
-    assert!(res.ok, "err={:?}", res.error);
-    assert!(matches!(
-        res.health_status.as_str(),
-        "healthy" | "empty_for_scope"
-    ));
-}
-
-#[tokio::test]
-async fn live_keyed_shovels_permits_out_of_scope_non_us_returns_empty() {
-    let env = require_shovels_env();
-    let hub = ExtensionHub::new_default();
-    let http = HttpClient::from_env(&env, None);
-
-    let res = hub
-        .test_fetch(
-            "shovels_permits",
-            &TORONTO_CITY_HALL_OUT_OF_SCOPE.to_extension_query(),
-            &http,
-            &env,
-        )
-        .await
-        .expect("test_fetch shovels out of scope");
-    assert!(res.ok, "err={:?}", res.error);
-    assert_eq!(res.health_status, "empty_for_scope");
-    assert_eq!(res.envelope_count, 0);
-}
-
-#[tokio::test]
-async fn live_public_shovels_unconfigured_returns_auth_missing() {
-    let hub = ExtensionHub::new_default();
-    let env = default_live_env();
-    let http = HttpClient::from_env(&env, None);
-
-    let res = hub
-        .test_fetch(
-            "shovels_permits",
-            &SF_CITY_HALL.to_extension_query(),
-            &http,
-            &env,
-        )
-        .await
-        .expect("test_fetch unconfigured shovels");
-    assert!(!res.ok);
-    assert_eq!(res.health_status, "auth_missing");
-}
-
-#[tokio::test]
-async fn live_public_shovels_invalid_credential_fails_honestly_against_real_api() {
-    let hub = ExtensionHub::new_default();
-    let env = env_with(&[("SHOVELS_API_KEY", "invalid-shovels-key-0000".to_string())]);
-    let http = HttpClient::from_env(&env, None);
-
-    let ctx = InvocationContext::new("shovels_permits").with_trigger(InvocationTrigger::AdminTest);
-    let (res_wrap, event) = MeterScope::run(ctx, async {
-        hub.test_fetch(
-            "shovels_permits",
-            &SF_CITY_HALL.to_extension_query(),
-            &http,
-            &env,
-        )
-        .await
-    })
-    .await;
-
-    let res = res_wrap.expect("test_fetch invalid shovels credential");
-    assert!(!res.ok);
-    assert_eq!(res.health_status, "error");
-    assert!(event.dims.external_api_calls >= 1);
-}
-
-#[tokio::test]
-async fn live_public_shovels_unreachable_endpoint_fails_honestly() {
-    let hub = ExtensionHub::new_default();
-    let env = env_with(&[
-        ("SHOVELS_API_KEY", "dummy-local-probe".to_string()),
-        ("SHOVELS_API_BASE_URL", unreachable_local_url()),
-    ]);
-    let http = HttpClient::from_env(&env, None);
-
-    let res = hub
-        .test_fetch(
-            "shovels_permits",
-            &SF_CITY_HALL.to_extension_query(),
-            &http,
-            &env,
-        )
-        .await
-        .expect("test_fetch unreachable shovels");
-    assert!(!res.ok);
-    assert_eq!(res.health_status, "error");
+    assert!(
+        hub.get_extension_json("shovels_permits", None).is_none(),
+        "shovels_permits BYOK commercial extension must not be registered in Personal OSS ExtensionHub"
+    );
 }
 
 // =========================================================================

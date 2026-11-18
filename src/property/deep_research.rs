@@ -11,10 +11,9 @@
 // - Strict SSRF protection on public document downloads (`https://` public routable IPs only, no redirects to private space, <= 8 MB cap).
 // - Every permit, violation, document, and HOA issue carries `sourceName` + clickable `https://` `sourceUrl` with deep `#anchor` / `#:~:text=...` where possible.
 
-use crate::ai::hoa_review::parse_hoa_documents;
-use crate::ai::packet_review::analyze_packet_documents_deterministic;
-use crate::ai::pdf::{extract_pdf_pages_from_bytes, ExtractedDocument, PageExtract};
-use crate::ai::title_review::{parse_title_report_text, redact_title_pii};
+use crate::ai::pdf::{
+    extract_pdf_pages_from_bytes, redact_title_pii, ExtractedDocument, PageExtract,
+};
 use crate::db::{
     extract_section_json, DbStore, ListingCoreProto, ListingPriceStatus, ReportSectionKind,
     SqlParam,
@@ -887,7 +886,7 @@ fn synthesize_api_fetched_reviews(
     fetched_docs: &[FetchedPublicDoc],
     geo: &Value,
     facts: &Value,
-    hoa_profile: Option<&Value>,
+    _hoa_profile: Option<&Value>,
 ) -> Value {
     if fetched_docs.is_empty() {
         return json!({
@@ -899,60 +898,6 @@ fn synthesize_api_fetched_reviews(
         });
     }
 
-    let synth_report = json!({
-        "geo": geo,
-        "facts": facts,
-        "hoaProfile": hoa_profile.cloned().unwrap_or(Value::Null),
-    });
-
-    let all_extracted: Vec<ExtractedDocument> =
-        fetched_docs.iter().map(|d| d.extracted.clone()).collect();
-    let mut packet_review =
-        analyze_packet_documents_deterministic(&all_extracted, Some(&synth_report), 0, None);
-    if let Some(obj) = packet_review.as_object_mut() {
-        obj.insert("fetchedViaApi".to_string(), Value::Bool(true));
-    }
-    strip_forbidden_review_keys(&mut packet_review);
-
-    // 1. Title Review (if any Prelim / Title / Deed document was fetched via API)
-    let title_docs: Vec<&FetchedPublicDoc> = fetched_docs
-        .iter()
-        .filter(|d| matches!(d.kind, DocumentKind::Title))
-        .collect();
-    let title_review = if !title_docs.is_empty() {
-        let joined = title_docs
-            .iter()
-            .map(|d| d.extracted.formatted_text.as_str())
-            .collect::<Vec<_>>()
-            .join("\n\n");
-        let mut tr = parse_title_report_text(&joined, Some(&synth_report));
-        if let Some(obj) = tr.as_object_mut() {
-            obj.insert("fetchedViaApi".to_string(), Value::Bool(true));
-        }
-        strip_forbidden_review_keys(&mut tr);
-        tr
-    } else {
-        Value::Null
-    };
-
-    // 2. HOA Review (if any HOA Reserve / CC&Rs / Budget document was fetched via API)
-    let hoa_extracted: Vec<ExtractedDocument> = fetched_docs
-        .iter()
-        .filter(|d| matches!(d.kind, DocumentKind::Hoa))
-        .map(|d| d.extracted.clone())
-        .collect();
-    let hoa_review = if !hoa_extracted.is_empty() {
-        let mut hr = parse_hoa_documents(&hoa_extracted, Some(&synth_report), 0);
-        if let Some(obj) = hr.as_object_mut() {
-            obj.insert("fetchedViaApi".to_string(), Value::Bool(true));
-        }
-        strip_forbidden_review_keys(&mut hr);
-        hr
-    } else {
-        Value::Null
-    };
-
-    // 3. Inspection / Disclosure Review (if any Inspection, WDO, or Disclosure document was fetched via API)
     let insp_docs: Vec<&FetchedPublicDoc> = fetched_docs
         .iter()
         .filter(|d| matches!(d.kind, DocumentKind::Inspection | DocumentKind::Packet))
@@ -984,12 +929,6 @@ fn synthesize_api_fetched_reviews(
             .find_map(|d| d.meta.get("documentDate").and_then(Value::as_str))
             .map(|dt| format!("Dated {dt}"));
 
-        let dedup_arr = packet_review
-            .get("deduplicatedDefects")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default();
-
         let mut findings: Vec<Value> = Vec::new();
         let mut sys_map: std::collections::BTreeMap<String, (usize, i64, i64, &'static str)> =
             std::collections::BTreeMap::new();
@@ -1009,126 +948,58 @@ fn synthesize_api_fetched_reviews(
             }
         };
 
-        for def in &dedup_arr {
-            if def.get("isLiability").and_then(Value::as_bool) == Some(true) {
-                continue;
-            }
-            let raw_sev = def
-                .get("severity")
-                .and_then(Value::as_str)
-                .unwrap_or("Moderate")
-                .to_ascii_lowercase();
-            let sev: &'static str = match raw_sev.as_str() {
-                "critical" => "critical",
-                "major" => "major",
-                "moderate" => "moderate",
-                _ => "minor",
-            };
-            let trade = def
-                .get("trade")
-                .and_then(Value::as_str)
-                .unwrap_or("General Contractor");
-            let item_title = def
-                .get("title")
-                .and_then(Value::as_str)
-                .unwrap_or("Inspection Item");
-            let detail = def.get("detail").and_then(Value::as_str).unwrap_or("");
-            let clow = def.get("costLow").and_then(Value::as_i64).unwrap_or(0);
-            let chigh = def.get("costHigh").and_then(Value::as_i64).unwrap_or(clow);
-            let page_no = def
-                .pointer("/primaryCitation/page")
-                .and_then(Value::as_u64)
-                .unwrap_or(1);
-
-            total_low += clow;
-            total_high += chigh;
-            if sev == "critical" || sev == "major" {
-                urgent_low += clow;
-                urgent_high += chigh;
-            } else {
-                near_low += clow;
-                near_high += chigh;
-            }
-
-            let entry = sys_map
-                .entry(trade.to_string())
-                .or_insert((0, 0, 0, "minor"));
-            entry.0 += 1;
-            entry.1 += clow;
-            entry.2 += chigh;
-            if sev_rank(sev) > sev_rank(entry.3) {
-                entry.3 = sev;
-            }
-
-            findings.push(json!({
-                "severity": sev,
-                "system": trade,
-                "item": item_title,
-                "detail": detail,
-                "pageRef": format!("p.{page_no}"),
-                "trade": trade,
-                "urgency": if sev == "critical" || sev == "major" { "Before closing / contingency" } else { "1–3 year maintenance" },
-                "costLow": clow,
-                "costHigh": chigh,
-            }));
-        }
-
-        // If regex defect extractor found 0 severe items (e.g. a clean or concise summary doc),
-        // surface the extracted document highlights so the buyer still sees every API-fetched note!
-        if findings.is_empty() {
-            for d in &insp_docs {
-                if let Some(hls) = d.meta.get("highlights").and_then(Value::as_array) {
-                    for hl in hls.iter().take(5) {
-                        if let Some(txt) = hl.as_str() {
-                            let lc = txt.to_ascii_lowercase();
-                            let (sys, sev, cl, ch) = if lc.contains("termite")
-                                || lc.contains("wdo")
-                                || lc.contains("section 1")
-                            {
-                                ("Pest / WDO", "major", 900, 2_400)
-                            } else if lc.contains("roof") || lc.contains("flashing") {
-                                ("Roofing", "moderate", 450, 1_800)
-                            } else if lc.contains("electrical")
-                                || lc.contains("panel")
-                                || lc.contains("gfci")
-                            {
-                                ("Electrical", "moderate", 350, 1_500)
-                            } else if lc.contains("plumbing")
-                                || lc.contains("sewer")
-                                || lc.contains("water heater")
-                            {
-                                ("Plumbing", "moderate", 400, 1_600)
-                            } else {
-                                ("General Inspection", "minor", 0, 500)
-                            };
-                            total_low += cl;
-                            total_high += ch;
-                            if sev == "major" {
-                                urgent_low += cl;
-                                urgent_high += ch;
-                            } else {
-                                near_low += cl;
-                                near_high += ch;
-                            }
-                            let entry = sys_map.entry(sys.to_string()).or_insert((0, 0, 0, "minor"));
-                            entry.0 += 1;
-                            entry.1 += cl;
-                            entry.2 += ch;
-                            if sev_rank(sev) > sev_rank(entry.3) {
-                                entry.3 = sev;
-                            }
-                            findings.push(json!({
-                                "severity": sev,
-                                "system": sys,
-                                "item": format!("{sys} observation"),
-                                "detail": txt,
-                                "pageRef": "p.1",
-                                "trade": sys,
-                                "urgency": if sev == "major" { "Review during contingency" } else { "Routine / monitor" },
-                                "costLow": cl,
-                                "costHigh": ch,
-                            }));
+        for d in &insp_docs {
+            if let Some(hls) = d.meta.get("highlights").and_then(Value::as_array) {
+                for hl in hls.iter().take(5) {
+                    if let Some(txt) = hl.as_str() {
+                        let lc = txt.to_ascii_lowercase();
+                        let (sys, sev, cl, ch) = if lc.contains("termite")
+                            || lc.contains("wdo")
+                            || lc.contains("section 1")
+                        {
+                            ("Pest / WDO", "major", 900, 2_400)
+                        } else if lc.contains("roof") || lc.contains("flashing") {
+                            ("Roofing", "moderate", 450, 1_800)
+                        } else if lc.contains("electrical")
+                            || lc.contains("panel")
+                            || lc.contains("gfci")
+                        {
+                            ("Electrical", "moderate", 350, 1_500)
+                        } else if lc.contains("plumbing")
+                            || lc.contains("sewer")
+                            || lc.contains("water heater")
+                        {
+                            ("Plumbing", "moderate", 400, 1_600)
+                        } else {
+                            ("General Inspection", "minor", 0, 500)
+                        };
+                        total_low += cl;
+                        total_high += ch;
+                        if sev == "major" {
+                            urgent_low += cl;
+                            urgent_high += ch;
+                        } else {
+                            near_low += cl;
+                            near_high += ch;
                         }
+                        let entry = sys_map.entry(sys.to_string()).or_insert((0, 0, 0, "minor"));
+                        entry.0 += 1;
+                        entry.1 += cl;
+                        entry.2 += ch;
+                        if sev_rank(sev) > sev_rank(entry.3) {
+                            entry.3 = sev;
+                        }
+                        findings.push(json!({
+                            "severity": sev,
+                            "system": sys,
+                            "item": format!("{sys} observation"),
+                            "detail": txt,
+                            "pageRef": "p.1",
+                            "trade": sys,
+                            "urgency": if sev == "major" { "Review during contingency" } else { "Routine / monitor" },
+                            "costLow": cl,
+                            "costHigh": ch,
+                        }));
                     }
                 }
             }
@@ -1224,7 +1095,7 @@ fn synthesize_api_fetched_reviews(
             "systemBreakdown": system_breakdown,
             "findings": findings,
             "crossChecks": cross_checks,
-            "specialistQuotes": packet_review.get("topQuestionsForSeller").cloned().unwrap_or_else(|| json!([])),
+            "specialistQuotes": [],
             "negotiationScript": neg_script,
         });
         strip_forbidden_review_keys(&mut ir);
@@ -1234,11 +1105,11 @@ fn synthesize_api_fetched_reviews(
     };
 
     json!({
-        "hasAny": true,
+        "hasAny": inspection_review.is_object() || !fetched_docs.is_empty(),
         "inspection": inspection_review,
-        "titleReview": title_review,
-        "hoaReview": hoa_review,
-        "packetReview": packet_review,
+        "titleReview": Value::Null,
+        "hoaReview": Value::Null,
+        "packetReview": Value::Null,
     })
 }
 

@@ -23,10 +23,8 @@ use open_estate::extensions::shared_cache::{
     derive_geo_index_columns, derive_scope_key, encode_geohash, get_or_fetch_with_spec,
     get_shared_dataset_proto, invalidate_all, invalidate_extension, invalidate_key,
     invalidate_scope, put_shared_dataset_proto, refresh_hot_shared_keys,
-    register_shared_cache_scheduled_jobs, seed_builtin_shared_datasets,
-    seed_shared_cache_default_jobs, shared_cache_lazy_slug, HotRefreshConfig, ShareScope,
+    seed_builtin_shared_datasets, shared_cache_lazy_slug, HotRefreshConfig, ShareScope,
     ShareScopeExt, SharedExtensionCache, SharingSpec, FORCE_REFRESH_PARAM,
-    SHARED_DATA_REFRESH_JOB_KIND,
 };
 use open_estate::extensions::{
     decode_proto_bytes, CapabilityDomain, ExtensionEnvelopeProto, ExtensionHub,
@@ -35,7 +33,6 @@ use open_estate::extensions::{
 };
 use open_estate::lazy::{LazyExecutor, LazyWorker, LazyWorkerConfig};
 use open_estate::metering::{InvocationContext, InvocationOutcome, InvocationTrigger, MeterScope};
-use open_estate::scheduler::{global_handler_registry, store::list_scheduled_jobs};
 use open_estate::shared::{now_unix_secs, EnvConfig, HttpClient};
 use serde_json::json;
 use std::collections::HashMap;
@@ -1121,33 +1118,11 @@ async fn deterministic_shared_cache_invalidation_and_stats() {
 }
 
 #[test]
-fn live_public_shared_cache_scheduler_and_hot_refresh() {
+fn live_public_shared_cache_hot_refresh() {
     run_on_large_stack("hot-refresh-live", async move {
         let (_dir, env, http, db) = setup_real_db("hot-refresh").await;
         let hub = load_hub_with_extensions();
         let cache = SharedExtensionCache::new();
-
-        register_shared_cache_scheduled_jobs();
-        assert!(
-            global_handler_registry()
-                .get(SHARED_DATA_REFRESH_JOB_KIND)
-                .is_some(),
-            "shared_data_refresh must be registered with open_estate::scheduler"
-        );
-
-        let seeded1 = seed_shared_cache_default_jobs(&db, &env)
-            .await
-            .expect("seed default shared cache job");
-        assert_eq!(seeded1, 1);
-        let seeded2 = seed_shared_cache_default_jobs(&db, &env)
-            .await
-            .expect("idempotent re-seed");
-        assert_eq!(seeded2, 0);
-        let jobs = list_scheduled_jobs(&db, Some(SHARED_DATA_REFRESH_JOB_KIND), None, None, 16)
-            .await
-            .expect("list scheduled jobs");
-        assert_eq!(jobs.len(), 1);
-        assert_eq!(jobs[0].kind, SHARED_DATA_REFRESH_JOB_KIND);
 
         // Seed an expiring hot key (hit_count >= 3, expires within lead_time_secs) and run hot refresh
         let now = now_unix_secs();

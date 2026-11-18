@@ -222,7 +222,6 @@ pub fn normalize_stored_report(report: &mut Value) -> bool {
         {
             crate::modules::buyer_living_nuances::ensure_buyer_living_nuances_on_report(report);
         }
-        crate::modules::seller_agent_suite::attach_seller_and_agent_suites(report);
     }
     before != report_display_fingerprint(report)
 }

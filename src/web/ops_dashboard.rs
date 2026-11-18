@@ -796,15 +796,10 @@ async fn fetch_recent_reports(db: &DbStore, limit: i64) -> Vec<RecentReportSumma
 async fn collect_database_storage_info(db: &DbStore) -> Value {
     let connected = db.ping().await.is_ok();
     let dialect = db.dialect();
-    let heatwave = db.is_heatwave();
+    let heatwave = false;
     let engine = match &db.backend {
         DbBackend::Sqlite(_) => "SQLite WAL",
-        DbBackend::MySql {
-            is_heatwave: true, ..
-        } => "OCI MySQL HeatWave",
-        DbBackend::MySql {
-            is_heatwave: false, ..
-        } => "MySQL 8/9",
+        DbBackend::MySql { .. } => "MySQL 8/9",
     };
 
     match &db.backend {
@@ -1077,13 +1072,6 @@ pub fn build_connector_catalog(env: &EnvConfig) -> Vec<Value> {
             env.get("ATTOM_API_KEY").is_some(),
         ),
         (
-            "shovels_permits",
-            "Shovels Building Permits",
-            "permits",
-            "api_key",
-            env.shovels_configured(),
-        ),
-        (
             "zoneomics_zoning",
             "Zoneomics Zoning & ADU",
             "zoning",
@@ -1096,34 +1084,6 @@ pub fn build_connector_catalog(env: &EnvConfig) -> Vec<Value> {
             "alerts",
             "credentials",
             env.smtp_configured(),
-        ),
-        (
-            "mapbox_routing",
-            "Mapbox Directions Matrix API",
-            "routing",
-            "token",
-            env.mapbox_access_token().is_some(),
-        ),
-        (
-            "locationiq_routing",
-            "LocationIQ Matrix API",
-            "routing",
-            "api_key",
-            env.locationiq_api_key().is_some(),
-        ),
-        (
-            "freeroute_routing",
-            "FreeRoute Matrix API",
-            "routing",
-            "token",
-            env.freeroute_api_key().is_some(),
-        ),
-        (
-            "openrouteservice_routing",
-            "OpenRouteService Matrix API",
-            "routing",
-            "api_key",
-            env.openrouteservice_api_key().is_some(),
         ),
     ];
 
@@ -1217,10 +1177,8 @@ pub async fn build_ops_telemetry_snapshot(state: &AppState) -> Value {
     let now_unix = now_unix_secs();
 
     // Run independent DB & filesystem probes concurrently.
-    let listings_status_sql = format!(
-        "SELECT {} status, COUNT(*) AS cnt FROM listings GROUP BY status",
-        state.db.rapid_query_hint_for_scan(0, false)
-    );
+    let listings_status_sql =
+        "SELECT status, COUNT(*) AS cnt FROM listings GROUP BY status".to_string();
     let (
         db_info,
         reports_total,
@@ -1327,7 +1285,7 @@ pub async fn build_ops_telemetry_snapshot(state: &AppState) -> Value {
     let pending = *listing_status_map.get("pending").unwrap_or(&0);
     let sold = *listing_status_map.get("sold").unwrap_or(&0);
 
-    let scan_metrics = state.scan_engine.metrics_json();
+    let scan_metrics = json!({});
     let tile_hits = scan_metrics
         .get("tileCacheHits")
         .and_then(Value::as_u64)

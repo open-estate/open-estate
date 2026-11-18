@@ -10,7 +10,6 @@
 mod common;
 
 use axum::routing::get;
-use open_estate::cre::attach_cre_section_if_applicable;
 use open_estate::db::DbStore;
 use open_estate::guardrails::HttpDefenseShield;
 use open_estate::property::{
@@ -105,7 +104,6 @@ impl ParityServer {
     async fn seed_campbell_fixture(&self) -> Value {
         let mut report = common::synth_report_secondary();
         normalize_stored_report(&mut report);
-        attach_cre_section_if_applicable(&mut report, None, false);
 
         let html = render_report_html(&report);
         let slug_dir = self.state.reports_dir.join(CAMPBELL_SYNTH_SLUG);
@@ -547,8 +545,7 @@ async fn campbell_synth_interactive_workspace_endpoints_parity() {
     assert!(dr_html.contains("200 Synthparcelbeta Ave"));
     assert!(dr_html.contains("堪舆风水 · 坐向元运"));
 
-    // 8. POST /api/cre/business-eval -> On-demand 8-concept Store Profit + Land/Farm simulator
-    //    works for any US address while keeping residential `cre.enabled == false`!
+    // 8. POST /api/cre/business-eval is unmounted (`404`) in Personal Edition
     let cre_resp = client
         .post(format!("{}/api/cre/business-eval", srv.base_url))
         .header(header::ORIGIN, &srv.base_url)
@@ -561,17 +558,7 @@ async fn campbell_synth_interactive_workspace_endpoints_parity() {
         .send()
         .await
         .expect("POST /api/cre/business-eval");
-    assert_eq!(cre_resp.status(), StatusCode::OK);
-    let cre_json: Value = cre_resp.json().await.expect("parse cre/business-eval");
-    assert_eq!(cre_json["ok"], json!(true));
-    assert_eq!(
-        cre_json["businessProfit"]["concepts"]
-            .as_array()
-            .map(|a| a.len()),
-        Some(8)
-    );
-    assert!(cre_json["landAndFarm"]["commercialLand"].is_object());
-    assert!(cre_json["landAndFarm"]["farmland"].is_object());
+    assert_eq!(cre_resp.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
@@ -683,10 +670,10 @@ async fn cloud_open_estate_twelve_factor_connectors_and_clean_room_market_parity
     }
 
     let catalog = build_connector_catalog(&cloud_env);
-    assert_eq!(catalog.len(), 18);
+    assert_eq!(catalog.len(), 13);
     assert!(
         catalog.iter().all(|c| c["configured"] == json!(true)),
-        "all 18 ops catalog connectors must report configured=true in full Cloud env: {catalog:?}"
+        "all 13 Personal OSS ops catalog connectors must report configured=true in full env: {catalog:?}"
     );
     let catalog_str = serde_json::to_string(&catalog).unwrap();
     for secret in [

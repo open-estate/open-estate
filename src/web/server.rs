@@ -6,13 +6,6 @@ use crate::ai::{
     ask_property_question_for_role_with_config, generate_repair_addendum, translate_report,
     AskPromptConfig, RepairAddendumInput, UploadedDocInput,
 };
-use crate::cre::{
-    analyze_cre_documents, analyze_cre_trade_area, analyze_location_business_profit,
-    attach_cre_section_if_applicable, attach_cre_section_with_live_hydration,
-    build_cre_report_section_live, classify_cre_asset, evaluate_land_and_farm,
-    fetch_osm_plaza_pois, CreAssetClass, CreUnderwritingOverrides, LandFarmEvalOptions,
-    StoreEvalRequest,
-};
 use crate::db::{
     extract_section_json, format_listing_row, make_report_section_envelope,
     proto::{
@@ -34,9 +27,6 @@ use crate::property::{
     score_property_condition_hybrid, suggest_addresses,
 };
 // [/feat/insurance-risk]
-use crate::scanner::{
-    BatchScanRequest, DynScanRunner, ScanEngine, ScanEngineConfig, SpatialTileCache,
-};
 use crate::search::{
     alerts::{
         authorize_subscription_access, create_and_send_manage_link,
@@ -49,7 +39,6 @@ use crate::search::{
     ingest_listings, is_synthetic_comp_entry, list_subscriptions, lookup_zip_centroid,
     parse_requirements_heuristic, query_listings, score_listing_deterministic,
     seed_reports_from_dir, sync_areas_on_demand, sync::LiveZipListingProvider, sync_zip_listings,
-    retranslate_stale_subscriptions, spawn_event_retranslate_check,
     unsubscribe_by_token, validate_search_requirements, CreateSubscriptionRequest,
     IngestListingsRequest, SearchFilters,
 };
@@ -62,11 +51,8 @@ use crate::shared::{
 use crate::web::{
     alerts_ui::render_alerts_manager_html,
     cdn_cache::{
-        apply_report_cache_headers, evaluate_report_cache_policy,
-        export_static_report_bundle_with_limits, if_none_match_matches, not_modified_response,
-        raw_query_has_share_or_api_key, report_ai_pending, spawn_static_export_if_configured,
-        static_mirror_config_from_env, DEFAULT_REPORT_STATIC_MAX_FILES,
-        DEFAULT_REPORT_STATIC_MAX_MB,
+        apply_report_cache_headers, evaluate_report_cache_policy, if_none_match_matches,
+        not_modified_response, raw_query_has_share_or_api_key, report_ai_pending,
     },
     copilot_api::{
         handle_copilot_comps_post, handle_copilot_disclosures_get, handle_copilot_disclosures_post,
@@ -91,8 +77,7 @@ use crate::web::{
     house3d_api::handle_house3d_get,
     i18n::{resolve_lang, t, t_brand},
     internal_auth::{
-        attach_optional_set_cookie, has_valid_batch_or_internal_key,
-        has_valid_cron_or_internal_key, has_valid_internal_api_key,
+        attach_optional_set_cookie, has_valid_cron_or_internal_key, has_valid_internal_api_key,
         has_valid_internal_credential_for_report_page, internal_auth_middleware,
         internal_auth_required, prepare_oe_session_for_html, resolve_trusted_client_id,
     },
@@ -105,10 +90,7 @@ use crate::web::{
         handle_media_file_get, handle_media_hotspots_post, handle_media_manifest_get,
         handle_media_tour_post, handle_media_upload_post,
     },
-    orchestrator::{
-        ActiveJobHandle, DbLlmCache, OpenEstateScanRunner, OsrmRecoveryCoordinator,
-        ReportJobManager,
-    },
+    orchestrator::{ActiveJobHandle, DbLlmCache, OsrmRecoveryCoordinator, ReportJobManager},
     profile_api::{handle_get_my_profile, handle_post_match_feedback, handle_put_my_profile},
     render::{
         apply_runtime_module_filter, localize_i18n_json_for_brand,
@@ -385,51 +367,6 @@ impl crate::web::admin_console::AdminExtensionBridge for HubAdminExtensionBridge
     }
 }
 
-struct HubLazyScanHook {
-    db: DbStore,
-    hub: std::sync::Weak<crate::extensions::ExtensionHub>,
-    env: EnvConfig,
-}
-
-impl crate::scanner::lazy_hook::PeriodicLazyEnqueueHook for HubLazyScanHook {
-    fn on_batch_flushed<'a>(
-        &'a self,
-        outcomes: &'a [crate::scanner::engine::ScanItemOutcome],
-    ) -> crate::scanner::engine::BoxFuture<'a, ()> {
-        Box::pin(async move {
-            let Some(hub) = self.hub.upgrade() else {
-                return;
-            };
-            let specs = crate::scanner::lazy_hook::PeriodicLazyExtensionSpec::discover_from_hub(
-                &hub,
-                Some(&self.env),
-            );
-            if specs.is_empty() || outcomes.is_empty() {
-                return;
-            }
-            let targets: Vec<crate::scanner::lazy_hook::LazyScanTarget> = outcomes
-                .iter()
-                .filter(|o| !o.slug.trim().is_empty())
-                .map(crate::scanner::lazy_hook::LazyScanTarget::from)
-                .collect();
-            if targets.is_empty() {
-                return;
-            }
-            if let Err(err) = crate::scanner::lazy_hook::enqueue_periodic_scan_lazy_jobs(
-                &self.db,
-                Some(&hub),
-                &targets,
-                &specs,
-                "periodic_scan",
-            )
-            .await
-            {
-                tracing::warn!(error = %err, "Periodic lazy scan enqueue hook error");
-            }
-        })
-    }
-}
-
 #[derive(Clone)]
 pub struct AppState {
     pub env: EnvConfig,
@@ -437,7 +374,6 @@ pub struct AppState {
     pub db: DbStore,
     pub shield: HttpDefenseShield,
     pub job_mgr: ReportJobManager,
-    pub scan_engine: Arc<ScanEngine<DynScanRunner>>,
     pub extension_hub: Arc<crate::extensions::ExtensionHub>,
     pub reports_dir: PathBuf,
     pub data_dir: Option<PathBuf>,
@@ -447,7 +383,6 @@ pub struct AppState {
     pub osrm_recovery: Arc<OsrmRecoveryCoordinator>,
     pub hooks: Arc<dyn ServerExtensionHooks>,
     pub lazy_worker: Arc<tokio::sync::Mutex<Option<crate::lazy::LazyWorkerHandle>>>,
-    pub scheduler_handle: Arc<tokio::sync::Mutex<Option<crate::scheduler::SchedulerHandle>>>,
 }
 
 impl AppState {
@@ -480,26 +415,30 @@ impl AppState {
         reports_dir: PathBuf,
         data_dir: Option<PathBuf>,
     ) -> Self {
+        Self::with_components_and_hub(
+            env,
+            http,
+            db,
+            shield,
+            reports_dir,
+            data_dir,
+            Arc::clone(crate::extensions::ExtensionHub::global()),
+        )
+    }
+
+    pub fn with_components_and_hub(
+        env: EnvConfig,
+        http: HttpClient,
+        db: DbStore,
+        shield: HttpDefenseShield,
+        reports_dir: PathBuf,
+        data_dir: Option<PathBuf>,
+        extension_hub: Arc<crate::extensions::ExtensionHub>,
+    ) -> Self {
         crate::web::admin_console::register_admin_extension_bridge(Arc::new(
             HubAdminExtensionBridge,
         ));
-        let extension_hub = Arc::clone(crate::extensions::ExtensionHub::global());
         let job_mgr = ReportJobManager::default();
-        let runner = OpenEstateScanRunner {
-            http: http.clone(),
-            env: env.clone(),
-            db: db.clone(),
-            data_dir: data_dir.clone(),
-        };
-        let scan_cfg = ScanEngineConfig::from_env(&env);
-        let tile_cache = Arc::new(SpatialTileCache::default());
-        let lazy_scan_hook = Arc::new(HubLazyScanHook {
-            db: db.clone(),
-            hub: Arc::downgrade(&extension_hub),
-            env: env.clone(),
-        });
-        let scan_engine =
-            Arc::new(ScanEngine::new_dyn(scan_cfg, tile_cache, runner).with_lazy_hook(lazy_scan_hook));
         // [feat/deed-title-marketplace]
         let marketplace_clicks =
             Arc::new(crate::modules::deed_title_marketplace::MarketplaceClickStore::default());
@@ -514,7 +453,6 @@ impl AppState {
             db,
             shield,
             job_mgr,
-            scan_engine,
             extension_hub,
             reports_dir,
             data_dir,
@@ -524,7 +462,6 @@ impl AppState {
             osrm_recovery,
             hooks: Arc::new(NoopExtensionHooks),
             lazy_worker: Arc::new(tokio::sync::Mutex::new(None)),
-            scheduler_handle: Arc::new(tokio::sync::Mutex::new(None)),
         };
         st.extension_hub
             .attach_hook_state_builder(st.hook_state_builder());
@@ -537,7 +474,6 @@ impl AppState {
         let db = self.db.clone();
         let shield = self.shield.clone();
         let job_mgr = self.job_mgr.clone();
-        let scan_engine = Arc::clone(&self.scan_engine);
         let reports_dir = self.reports_dir.clone();
         let data_dir = self.data_dir.clone();
         let marketplace_clicks = Arc::clone(&self.marketplace_clicks);
@@ -550,7 +486,6 @@ impl AppState {
             db: db.clone(),
             shield: shield.clone(),
             job_mgr: job_mgr.clone(),
-            scan_engine: Arc::clone(&scan_engine),
             extension_hub: Arc::clone(hub),
             reports_dir: reports_dir.clone(),
             data_dir: data_dir.clone(),
@@ -559,7 +494,6 @@ impl AppState {
             osrm_recovery: Arc::clone(&osrm_recovery),
             hooks: Arc::clone(&hooks),
             lazy_worker: Arc::new(tokio::sync::Mutex::new(None)),
-            scheduler_handle: Arc::new(tokio::sync::Mutex::new(None)),
         })
     }
 
@@ -816,21 +750,9 @@ pub fn build_router(state: AppState) -> Router {
             "/api/ops/telemetry",
             get(crate::web::ops_dashboard::handle_ops_telemetry_json),
         )
-        .route(
-            "/api/ops/telemetry/redirects",
-            get(crate::web::redirect::handle_ops_redirect_telemetry_json),
-        )
         .route("/api/geo/ip", get(crate::web::ip_geo::handle_ip_geo))
         .route("/api/area/forsale", get(handle_area_forsale))
         .merge(crate::web::admin_console::admin_routes())
-        .route(
-            "/api/admin/reports/export-static",
-            post(handle_admin_reports_export_static),
-        )
-        .route(
-            "/api/admin/subscriptions/retranslate",
-            post(handle_admin_subscriptions_retranslate),
-        )
         .route("/", get(handle_home))
         .route("/match", get(handle_home))
         .route("/shop", get(handle_home))
@@ -924,8 +846,6 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/translate", post(handle_translate))
         .route("/api/ask", post(handle_ask))
         .route("/api/move-in-quote", post(handle_move_in_quote_post))
-        .route("/api/cre/underwrite", post(handle_cre_underwrite)) // [feat/cre-mode]
-        .route("/api/cre/business-eval", post(handle_cre_business_eval)) // [feat/cre-mode]
         .route("/api/match", post(handle_match_query))
         .route("/api/match/catalog", get(handle_match_catalog))
         .route("/api/match/areas", get(handle_match_areas))
@@ -962,24 +882,7 @@ pub fn build_router(state: AppState) -> Router {
             "/api/subscriptions/unsubscribe",
             get(handle_unsubscribe_get).post(handle_unsubscribe_post),
         )
-        .route("/api/scan/batch/:id", get(handle_scan_batch_status))
-        .route("/api/scan/batch/:id/cancel", post(handle_scan_batch_cancel))
-        .route("/api/scan/metrics", get(handle_scan_metrics))
-        .route(
-            "/api/marketplace/quotes",
-            get(handle_marketplace_quotes_get).post(handle_marketplace_quotes_post),
-        )
-        .route("/api/marketplace/click", post(handle_marketplace_click))
-        .route(
-            "/api/agent-match/recommendations",
-            get(handle_agent_match_recommendations_get),
-        )
-        .route(
-            "/api/agent-match/request",
-            post(handle_agent_match_request_post),
-        )
         .merge(crate::lazy::lazy_routes())
-        .merge(crate::scheduler::routes::admin_scheduler_routes())
         .merge(extra_normal_routes)
         .layer(DefaultBodyLimit::max(64 * 1024));
 
@@ -993,10 +896,6 @@ pub fn build_router(state: AppState) -> Router {
             get(handle_title_review_get).post(handle_title_review_post),
         )
         .route("/api/condition-score", post(handle_condition_score))
-        .route(
-            "/api/cre-review",
-            get(handle_cre_review_get).post(handle_cre_review_post),
-        )
         .route(
             "/api/hoa-review",
             get(handle_hoa_review_get).post(handle_hoa_review_post),
@@ -1013,8 +912,6 @@ pub fn build_router(state: AppState) -> Router {
             "/api/repair-addendum",
             get(handle_repair_addendum_get).post(handle_repair_addendum_post),
         )
-        .route("/api/listings/ingest", post(handle_listings_ingest))
-        .route("/api/scan/batch", post(handle_scan_batch_submit))
         .route("/api/match/score", post(handle_match_score))
         .route("/api/house/photos", post(handle_house_photos))
         .route("/api/media/:slug/upload", post(handle_media_upload_post))
@@ -1079,54 +976,6 @@ pub fn build_probe_router(state: AppState) -> Router {
         .route("/api/health", get(handle_api_health))
         .fallback(handle_not_found)
         .with_state(state)
-}
-
-static WATCHED_ZIPS_HANDLER_ONCE: std::sync::Once = std::sync::Once::new();
-const WATCHED_ZIPS_SYNC_JOB_KIND: &str = "watched_zips_sync";
-
-fn register_watched_zips_sync_scheduler_handler() {
-    WATCHED_ZIPS_HANDLER_ONCE.call_once(|| {
-        crate::scheduler::register_job_kind_fn(WATCHED_ZIPS_SYNC_JOB_KIND, |ctx| {
-            Box::pin(async move {
-                let base_origin = ctx
-                    .param_str("baseOrigin")
-                    .or_else(|| {
-                        ctx.env
-                            .get("PUBLIC_BASE_URL")
-                            .map(|s| s.trim().to_string())
-                            .filter(|s| !s.is_empty())
-                    })
-                    .unwrap_or_else(|| "http://127.0.0.1:8080".to_string());
-                let max_zips = ctx
-                    .param_u64("maxZips")
-                    .or_else(|| {
-                        ctx.env
-                            .get("SYNC_MAX_ZIPS_PER_TICK")
-                            .and_then(|s| s.trim().parse::<u64>().ok())
-                    })
-                    .unwrap_or(5)
-                    .clamp(1, 500) as usize;
-                let provider = ctx
-                    .app_state
-                    .as_ref()
-                    .map(|s| s as &dyn LiveZipListingProvider);
-                let out = run_background_sync_cycle_with_provider(
-                    &ctx.db,
-                    &ctx.http,
-                    &ctx.env,
-                    &base_origin,
-                    None,
-                    max_zips,
-                    provider,
-                )
-                .await?;
-                Ok(crate::scheduler::JobRunOutput::ok(
-                    "Completed watched ZIPs sync cycle",
-                    out,
-                ))
-            })
-        });
-    });
 }
 
 pub fn spawn_startup_background_tasks(state: &AppState, default_port: u16) {
@@ -1249,32 +1098,20 @@ pub fn spawn_startup_background_tasks(state: &AppState, default_port: u16) {
         });
     }
 
-    // Event-driven schema migration check: only translates active subscriptions whose
-    // `filter_schema_version < CURRENT_FILTER_SCHEMA_VERSION` (runs in `all` or `scanner` mode).
-    if run_mode != RunMode::Web {
-        spawn_event_retranslate_check(
-            state.db.clone(),
-            state.http.clone(),
-            state.env.clone(),
-        );
-    }
-
-    // Register DB-backed scheduler handlers (OSRM health checks, extension/shared refreshes,
-    // watched ZIPs sync, plus host extension jobs), idempotently seed initial defaults, and
-    // start the leased scheduler runner loop.
-    crate::scheduler::register_builtin_public_handlers();
-    crate::lazy::register_lazy_scheduled_jobs();
-    crate::extensions::shared_cache::register_shared_cache_scheduled_jobs();
-    register_watched_zips_sync_scheduler_handler();
-
     if !state.env.email_monitor_enabled() {
         tracing::info!(
             "Background ZIP/email alert monitor disabled by default (set ENABLE_EMAIL_MONITOR=true to enable)"
         );
     }
 
-    let sched_state = state.clone();
-    let sched_default_origin = state
+    let hook_state = state.clone();
+    tokio::spawn(async move {
+        if let Err(e) = hook_state.hooks.register_scheduled_jobs(&hook_state).await {
+            tracing::warn!(error = %e, "Failed registering host extension scheduled jobs");
+        }
+    });
+
+    let sync_default_origin = state
         .env
         .get("PUBLIC_BASE_URL")
         .map(|s| s.trim().to_string())
@@ -1288,68 +1125,65 @@ pub fn spawn_startup_background_tasks(state: &AppState, default_port: u16) {
         .env
         .get("SYNC_INTERVAL_MIN")
         .and_then(|s| s.trim().parse::<u64>().ok())
-        .unwrap_or(if run_mode == RunMode::Scanner { 15 } else { 0 });
-    let max_zips: u64 = state
+        .unwrap_or(0);
+    let max_zips: usize = state
         .env
         .get("SYNC_MAX_ZIPS_PER_TICK")
-        .and_then(|s| s.trim().parse::<u64>().ok())
+        .and_then(|s| s.trim().parse::<usize>().ok())
         .unwrap_or(5);
-
-    tokio::spawn(async move {
-        if let Err(e) =
-            crate::scheduler::seed_public_default_jobs(&sched_state.db, &sched_state.env).await
-        {
-            tracing::warn!(error = %e, "Failed seeding built-in public scheduled jobs");
-        }
-        if let Err(e) =
-            crate::lazy::seed_lazy_default_jobs(&sched_state.db, &sched_state.env).await
-        {
-            tracing::warn!(error = %e, "Failed seeding built-in lazy scheduled jobs");
-        }
-        if let Err(e) = crate::extensions::shared_cache::seed_shared_cache_default_jobs(
-            &sched_state.db,
-            &sched_state.env,
-        )
-        .await
-        {
-            tracing::warn!(error = %e, "Failed seeding built-in shared cache scheduled jobs");
-        }
-        if run_mode != RunMode::Web {
-            let sync_seed = crate::scheduler::SeedJobSpec::new(
-                WATCHED_ZIPS_SYNC_JOB_KIND,
-                "default",
-                crate::scheduler::ScheduleSpec {
-                    kind: crate::scheduler::ScheduleKind::Interval,
-                    cron_expr: None,
-                    interval_secs: Some((sync_min.max(1) * 60).max(60)),
-                    run_at_unix: None,
-                    jitter_secs: 15,
-                    timezone: "UTC".to_string(),
-                },
-            )
-            .with_enabled(auto_sync_enabled && sync_min > 0)
-            .with_initial_delay_secs(25)
-            .with_max_runtime_secs(600)
-            .with_params(json!({
-                "baseOrigin": sched_default_origin,
-                "maxZips": max_zips,
-            }));
-            if let Err(e) = crate::scheduler::seed_default_job(&sched_state.db, &sync_seed).await {
-                tracing::warn!(error = %e, "Failed seeding watched_zips_sync default schedule");
+    if run_mode != RunMode::Web && auto_sync_enabled && sync_min > 0 {
+        let sync_state = state.clone();
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(Duration::from_secs((sync_min * 60).max(60)));
+            ticker.tick().await;
+            loop {
+                ticker.tick().await;
+                let _ = run_background_sync_cycle_with_provider(
+                    &sync_state.db,
+                    &sync_state.http,
+                    &sync_state.env,
+                    &sync_default_origin,
+                    None,
+                    max_zips,
+                    Some(&sync_state as &dyn LiveZipListingProvider),
+                )
+                .await;
             }
-        }
-        if let Err(e) = sched_state.hooks.register_scheduled_jobs(&sched_state).await {
-            tracing::warn!(error = %e, "Failed registering host extension scheduled jobs");
-        }
-        let mut guard = sched_state.scheduler_handle.lock().await;
-        if guard.is_none() {
-            let runner = crate::scheduler::SchedulerRunner::from_app_state(&sched_state);
-            *guard = Some(crate::scheduler::spawn_scheduler_runner(runner));
-        }
-    });
+        });
+    }
 
-    // Report & house data refresh is manual-only by default unless enabled in `scheduled_jobs`
-    // (seeded from `AUTO_SYNC_ENABLED` / `SYNC_INTERVAL_MIN`). In `RUN_MODE=web`, lazy background
+    if crate::modules::commute::RoutingConfig::from_env(&state.env).is_enabled() {
+        let poll_secs: u64 = state
+            .env
+            .get("OSRM_HEALTH_POLL_SECS")
+            .and_then(|s| s.trim().parse::<u64>().ok())
+            .unwrap_or(60)
+            .clamp(1, 86_400);
+        let osrm_state = state.clone();
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(Duration::from_secs(poll_secs));
+            loop {
+                ticker.tick().await;
+                if let Err(err) = osrm_state
+                    .osrm_recovery
+                    .run_recovery_pass(
+                        &osrm_state.http,
+                        &osrm_state.env,
+                        &osrm_state.db,
+                        "background_watcher",
+                        None,
+                        20,
+                        false,
+                    )
+                    .await
+                {
+                    tracing::warn!(error = %err, "OSRM background recovery pass failed");
+                }
+            }
+        });
+    }
+
+    // Report & house data refresh is manual-only by default; in `RUN_MODE=web`, lazy background
     // workers are skipped so web replicas remain pure HTTP workers.
     if run_mode == RunMode::Web {
         tracing::info!(
@@ -1454,9 +1288,7 @@ fn hold_permit_until_job_done(
             notified.await;
         };
         if let Some(slug) = final_slug {
-            if !state.extension_hub.list_lazy_manifests().is_empty()
-                || static_mirror_config_from_env(&state.env).is_some()
-            {
+            if !state.extension_hub.list_lazy_manifests().is_empty() {
                 if let Some(rec) = get_cached_or_disk_report(&state, &slug).await {
                     let _ = state
                         .extension_hub
@@ -1468,16 +1300,6 @@ fn hold_permit_until_job_done(
                             None,
                         )
                         .await;
-                    if static_mirror_config_from_env(&state.env).is_some()
-                        && !report_ai_pending(&rec.report)
-                    {
-                        let html = render_report_html_with_brand(
-                            &rec.report,
-                            &state.env.brand_name(),
-                            &state.env.brand_domain(),
-                        );
-                        spawn_static_export_if_configured(&state.env, &rec.slug, &rec.report, html);
-                    }
                 }
             }
         }
@@ -1822,39 +1644,16 @@ pub(crate) async fn get_cached_or_disk_report(
     }
     if let Some(mut rec) = state.db.get_cached_report(&clean).await.ok().flatten() {
         normalize_stored_report(&mut rec.report);
-        if rec.report.get("agentRecommendations").is_none() {
-            rec.report["agentRecommendations"] =
-                crate::modules::agent_recommend::build_agent_recommendations(
-                    &state.db,
-                    &rec.report,
-                )
-                .await;
-        }
         return Some(rec);
     }
 
     let rj_path = state.reports_dir.join(&clean).join("report.json");
     if let Ok(raw_json) = tokio::fs::read_to_string(&rj_path).await {
-        if let Ok(mut rep) = serde_json::from_str::<Value>(&raw_json) {
+        if let Ok(rep) = serde_json::from_str::<Value>(&raw_json) {
             if rep.get("error").is_none() {
-                if rep.get("agentRecommendations").is_none() {
-                    rep["agentRecommendations"] =
-                        crate::modules::agent_recommend::build_agent_recommendations(
-                            &state.db, &rep,
-                        )
-                        .await;
-                }
                 let _ = state.db.put_cached_report(&clean, &rep, None).await;
                 let mut rec = state.db.get_cached_report(&clean).await.ok().flatten()?;
                 normalize_stored_report(&mut rec.report);
-                if rec.report.get("agentRecommendations").is_none() {
-                    rec.report["agentRecommendations"] =
-                        crate::modules::agent_recommend::build_agent_recommendations(
-                            &state.db,
-                            &rec.report,
-                        )
-                        .await;
-                }
                 return Some(rec);
             }
         }
@@ -1868,7 +1667,7 @@ pub(crate) fn maybe_resume_ai_in_bg(state: &AppState, slug: &str, report: &Value
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
     if ai_pend && state.env.llm_configured() && !state.job_mgr.has_inflight_slug(slug, slug) {
-        let handle = state.job_mgr.spawn_or_join_ai_completion(
+        let _handle = state.job_mgr.spawn_or_join_ai_completion(
             state.http.clone(),
             state.env.clone(),
             state.db.clone(),
@@ -1876,37 +1675,6 @@ pub(crate) fn maybe_resume_ai_in_bg(state: &AppState, slug: &str, report: &Value
             None,
             report.clone(),
         );
-        if static_mirror_config_from_env(&state.env).is_some() {
-            let st = state.clone();
-            let slug_owned = slug.to_string();
-            tokio::spawn(async move {
-                loop {
-                    let notified = handle.notify.notified();
-                    tokio::pin!(notified);
-                    notified.as_mut().enable();
-                    {
-                        let snap = handle.snapshot();
-                        if snap.done {
-                            break;
-                        }
-                        if snap.error.is_some() {
-                            return;
-                        }
-                    }
-                    notified.await;
-                }
-                if let Some(rec) = get_cached_or_disk_report(&st, &slug_owned).await {
-                    if !report_ai_pending(&rec.report) {
-                        let html = render_report_html_with_brand(
-                            &rec.report,
-                            &st.env.brand_name(),
-                            &st.env.brand_domain(),
-                        );
-                        spawn_static_export_if_configured(&st.env, &rec.slug, &rec.report, html);
-                    }
-                }
-            });
-        }
     }
 }
 
@@ -3313,9 +3081,7 @@ async fn ensure_report_parcel_outlines(state: &AppState, slug: &str, report: &mu
         .unwrap_or("")
         .to_string();
     let generated_at = report.pointer("/meta/generatedAt").cloned();
-    let (http, db, env_owned) = (state.http.clone(), state.db.clone(), state.env.clone());
-    let brand_name = state.env.brand_name();
-    let brand_domain = state.env.brand_domain();
+    let (http, db) = (state.http.clone(), state.db.clone());
     let slug_owned = slug.to_string();
     let mut work = report.clone();
     let task = tokio::spawn(async move {
@@ -3365,10 +3131,6 @@ async fn ensure_report_parcel_outlines(state: &AppState, slug: &str, report: &mu
         };
         if unchanged {
             let _ = db.put_cached_report(&slug_owned, &work, None).await;
-            if static_mirror_config_from_env(&env_owned).is_some() {
-                let html = render_report_html_with_brand(&work, &brand_name, &brand_domain);
-                spawn_static_export_if_configured(&env_owned, &slug_owned, &work, html);
-            }
         }
         Some(work)
     });
@@ -3860,12 +3622,6 @@ struct ApiReportQuery {
     refresh: Option<String>,
     ai: Option<String>,
     lang: Option<String>,
-    // [feat/cre-mode]
-    mode: Option<String>,
-    cre: Option<String>,
-    asset_class: Option<String>,
-    #[serde(rename = "assetClass")]
-    asset_class_camel: Option<String>,
     lat: Option<f64>,
     lon: Option<f64>,
 }
@@ -4139,40 +3895,6 @@ async fn execute_api_report(
         }
     };
 
-    let explicit_asset_class = q
-        .asset_class
-        .as_deref()
-        .or(q.asset_class_camel.as_deref())
-        .or_else(|| body.get("asset_class").and_then(|v| v.as_str()))
-        .or_else(|| body.get("assetClass").and_then(|v| v.as_str()))
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(String::from);
-
-    let mode_str = q
-        .mode
-        .as_deref()
-        .or_else(|| body.get("mode").and_then(|v| v.as_str()))
-        .unwrap_or("")
-        .trim();
-    let cre_flag = matches!(q.cre.as_deref().map(str::trim), Some("1") | Some("true"))
-        || body.get("cre").and_then(|v| v.as_bool()).unwrap_or(false)
-        || body.get("cre").and_then(|v| v.as_i64()) == Some(1)
-        || matches!(
-            body.get("cre").and_then(|v| v.as_str()),
-            Some("1") | Some("true")
-        )
-        || mode_str.eq_ignore_ascii_case("cre")
-        || explicit_asset_class.is_some();
-
-    attach_cre_section_with_live_hydration(
-        &state.http,
-        &state.env,
-        &mut report,
-        explicit_asset_class.as_deref(),
-        cre_flag,
-    )
-    .await;
     let _ = state
         .extension_hub
         .enqueue_lazy_for_report(&state.db, &final_slug, &report, "first_visit", None)
@@ -4227,14 +3949,6 @@ async fn execute_api_report(
                             .db
                             .put_cached_report(&final_slug, &report, None)
                             .await;
-                    }
-                    if static_mirror_config_from_env(&state.env).is_some() {
-                        let html = render_report_html_with_brand(
-                            &report,
-                            &state.env.brand_name(),
-                            &state.env.brand_domain(),
-                        );
-                        spawn_static_export_if_configured(&state.env, &final_slug, &report, html);
                     }
                 }
             }
@@ -4502,21 +4216,6 @@ async fn handle_translate(
                         .await;
                 }
             }
-            if static_mirror_config_from_env(&state.env).is_some() {
-                if let Ok(Some(full_rec)) = state.db.get_cached_report(&target_slug).await {
-                    let html = render_report_html_with_brand(
-                        &full_rec.report,
-                        &state.env.brand_name(),
-                        &state.env.brand_domain(),
-                    );
-                    spawn_static_export_if_configured(
-                        &state.env,
-                        &target_slug,
-                        &full_rec.report,
-                        html,
-                    );
-                }
-            }
         }
     }
 
@@ -4639,14 +4338,6 @@ async fn handle_title_review_get(
     Query(q): Query<DocReviewQuery>,
 ) -> Response {
     handle_doc_review_get(&state, &headers, "title", q.slug.as_deref()).await
-}
-
-async fn handle_cre_review_get(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Query(q): Query<DocReviewQuery>,
-) -> Response {
-    handle_doc_review_get(&state, &headers, "cre", q.slug.as_deref()).await
 }
 
 async fn handle_hoa_review_get(
@@ -5032,17 +4723,12 @@ async fn handle_doc_review_post(
     verify_same_origin(headers, req_host, &state.env).map_err(map_guardrail)?;
     let max_keys = match doc_type {
         "packet" => 25_000,
-        "cre" => 12_000,
         _ => 10_000,
     };
     let body = parse_json_body(raw_body, 16, max_keys)?;
     match doc_type {
         "packet" => enforce_allowed_body_keys(&body, &["slug", "documents", "regionalMultiplier"])
             .map_err(map_guardrail)?,
-        "cre" => {
-            enforce_allowed_body_keys(&body, &["slug", "documents", "assetClass", "asset_class"])
-                .map_err(map_guardrail)?
-        }
         _ => enforce_allowed_body_keys(&body, &["slug", "documents"]).map_err(map_guardrail)?,
     }
 
@@ -5050,13 +4736,6 @@ async fn handle_doc_review_post(
         .map_err(map_guardrail)?;
     let docs = parse_uploaded_docs(&body).map_err(map_guardrail)?;
     let regional_mult = body.get("regionalMultiplier").and_then(|v| v.as_f64());
-    let explicit_ac = body
-        .get("assetClass")
-        .or_else(|| body.get("asset_class"))
-        .and_then(|v| v.as_str())
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(String::from);
     drop(body);
 
     let rec = authorize_cached_report(state, &slug, headers, "", false)
@@ -5091,27 +4770,6 @@ async fn handle_doc_review_post(
         )
         .await
         .map_err(map_anyhow)?,
-        "cre" => {
-            let mut report_with_cre = rec.report.clone();
-            let missing_cre = report_with_cre
-                .get("cre")
-                .filter(|v| !v.is_null())
-                .is_none();
-            attach_cre_section_if_applicable(
-                &mut report_with_cre,
-                explicit_ac.as_deref(),
-                missing_cre,
-            );
-            analyze_cre_documents(
-                &state.http,
-                &state.env,
-                &report_with_cre,
-                docs,
-                Some(&llm_cache),
-            )
-            .await
-            .map_err(map_anyhow)?
-        }
         _ => {
             let ai_prompts = state.db.load_ai_prompt_settings().await;
             analyze_inspection_with_prompt(
@@ -5154,562 +4812,6 @@ async fn handle_doc_review_post(
             "warnings": out.warnings,
         }),
     ))
-}
-
-const ALLOWED_CRE_UNDERWRITE_KEYS: &[&str] = &[
-    "slug",
-    "address",
-    "facts",
-    "geo",
-    "overrides",
-    "assetClass",
-    "asset_class",
-    "leaseStructure",
-    "lease_structure",
-    "leaseType",
-    "purchasePrice",
-    "purchase_price",
-    "askingPrice",
-    "price",
-    "grossSqft",
-    "gross_sqft",
-    "sqft",
-    "rentableSqft",
-    "lotSqft",
-    "lot_sqft",
-    "units",
-    "unit_count",
-    "yearBuilt",
-    "year_built",
-    "state",
-    "metroTier",
-    "metro_tier",
-    "grossPotentialRentAnnual",
-    "gross_potential_rent_annual",
-    "gpr",
-    "rentPerSqftYr",
-    "rent_per_sqft_yr",
-    "monthlyRentPerUnit",
-    "monthly_rent_per_unit",
-    "otherIncomeAnnual",
-    "other_income_annual",
-    "reimbursementsAnnual",
-    "reimbursements_annual",
-    "vacancyPct",
-    "vacancy_pct",
-    "inPlacePropertyTaxAnnual",
-    "in_place_property_tax_annual",
-    "propertyTaxRatePct",
-    "property_tax_rate_pct",
-    "insuranceAnnual",
-    "insurance_annual",
-    "managementPct",
-    "management_pct",
-    "utilitiesCamAnnual",
-    "utilities_cam_annual",
-    "repairsMaintenanceAnnual",
-    "repairs_maintenance_annual",
-    "capexReservePerUnitYr",
-    "capex_reserve_per_unit_yr",
-    "capexReservePerSqftYr",
-    "capex_reserve_per_sqft_yr",
-    "marketCapRatePct",
-    "market_cap_rate_pct",
-    "conventionalRatePct",
-    "conventional_rate_pct",
-    "interestRatePct",
-    "conventionalLtvPct",
-    "conventional_ltv_pct",
-    "ltvPct",
-    "conventionalAmortYears",
-    "conventional_amort_years",
-    "conventionalTermYears",
-    "conventional_term_years",
-    "minDscr",
-    "min_dscr",
-    "sba504BankRatePct",
-    "sba_504_bank_rate_pct",
-    "sba504CdcRatePct",
-    "sba_504_cdc_rate_pct",
-    "sba7aRatePct",
-    "sba_7a_rate_pct",
-    "agencyRatePct",
-    "agency_rate_pct",
-    "ownerOccupancyPct",
-    "owner_occupancy_pct",
-    "selectedLoanProgram",
-    "selected_loan_program",
-    "valueAddCapex",
-    "value_add_capex",
-    "stabilizedRentUpsidePct",
-    "stabilized_rent_upside_pct",
-    "annualRentGrowthPct",
-    "annual_rent_growth_pct",
-    "annualExpenseGrowthPct",
-    "annual_expense_growth_pct",
-    "exitCapSpreadBps",
-    "exit_cap_spread_bps",
-    "closingCostPct",
-    "closing_cost_pct",
-    "acreage",
-    "acres",
-    "lotAcres",
-    "lot_acres",
-    "farmingMode",
-    "farming_mode",
-    "agMode",
-    "ag_mode",
-    "allowableFar",
-    "allowable_far",
-    "far",
-    "targetUse",
-    "target_use",
-    "highestAndBestUse",
-    "highest_and_best_use",
-    "concept",
-    "selectedConcept",
-    "selected_concept",
-    "conceptCode",
-    "concept_code",
-    "storeSqft",
-    "store_sqft",
-    "sizeSqft",
-    "annualBaseRentPsf",
-    "annual_base_rent_psf",
-    "baseRentPsf",
-    "rentPsfYr",
-    "nnnCamPsf",
-    "nnn_cam_psf",
-    "camPsf",
-    "nnnPsf",
-    "cam_per_sqft_yr",
-    "targetPricePoint",
-    "target_price_point",
-    "pricePoint",
-    "tier",
-];
-
-const ALLOWED_CRE_BUSINESS_EVAL_KEYS: &[&str] = &[
-    "slug",
-    "evalMode",
-    "eval_mode",
-    "concept",
-    "selectedConcept",
-    "selected_concept",
-    "conceptCode",
-    "concept_code",
-    "storeSqft",
-    "store_sqft",
-    "sqft",
-    "sizeSqft",
-    "rentableSqft",
-    "annualBaseRentPsf",
-    "annual_base_rent_psf",
-    "baseRentPsf",
-    "rentPsfYr",
-    "rent_per_sqft_yr",
-    "nnnCamPsf",
-    "nnn_cam_psf",
-    "camPsf",
-    "nnnPsf",
-    "cam_per_sqft_yr",
-    "targetPricePoint",
-    "target_price_point",
-    "pricePoint",
-    "tier",
-    "plazaName",
-    "plaza_name",
-    "acreage",
-    "acres",
-    "lotAcres",
-    "lot_acres",
-    "farmingMode",
-    "farming_mode",
-    "agMode",
-    "ag_mode",
-    "allowableFar",
-    "allowable_far",
-    "far",
-    "targetUse",
-    "target_use",
-    "highestAndBestUse",
-    "highest_and_best_use",
-    "askingPrice",
-    "asking_price",
-    "purchasePrice",
-    "purchase_price",
-    "price",
-    "persist",
-];
-
-async fn handle_cre_underwrite(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    raw_body: std::result::Result<Bytes, BytesRejection>,
-) -> ApiResult {
-    let req_host = req_host_str(&headers);
-    verify_same_origin(&headers, req_host, &state.env).map_err(map_guardrail)?;
-    let body = parse_json_body(raw_body, 12, 2_000)?;
-    enforce_allowed_body_keys(&body, ALLOWED_CRE_UNDERWRITE_KEYS).map_err(map_guardrail)?;
-
-    let raw_slug = body
-        .get("slug")
-        .and_then(|v| v.as_str())
-        .map(str::trim)
-        .filter(|s| !s.is_empty());
-    let raw_addr = body
-        .get("address")
-        .and_then(|v| v.as_str())
-        .map(str::trim)
-        .filter(|s| !s.is_empty());
-
-    let mut resolved_slug: Option<String> = None;
-    let base_report = if let Some(rs) = raw_slug {
-        let slug = validate_slug_param(rs).map_err(map_guardrail)?;
-        match authorize_cached_report(&state, &slug, &headers, "", false).await {
-            Ok(auth) => {
-                let rec = auth.record;
-                resolved_slug = Some(rec.slug);
-                rec.report
-            }
-            Err(err_resp) if err_resp.status() != StatusCode::NOT_FOUND => return Ok(err_resp),
-            Err(_)
-                if body.get("facts").is_some()
-                    || body.get("purchasePrice").is_some()
-                    || body.get("purchase_price").is_some()
-                    || body.get("askingPrice").is_some()
-                    || body.get("overrides").is_some() =>
-            {
-                resolved_slug = Some(slug);
-                json!({
-                    "geo": body.get("geo").cloned().unwrap_or_else(|| json!({})),
-                    "facts": body.get("facts").cloned().unwrap_or_else(|| json!({})),
-                    "modules": {},
-                })
-            }
-            Err(_) => {
-                return Ok(json_response(
-                    StatusCode::NOT_FOUND,
-                    json!({ "ok": false, "code": "NOT_FOUND", "error": "Verified property report not found for slug." }),
-                ));
-            }
-        }
-    } else if let Some(ra) = raw_addr {
-        let clean_addr = validate_street_address_input(ra).map_err(map_guardrail)?;
-        let candidate_slug = slugify(&clean_addr);
-        match authorize_cached_report(&state, &candidate_slug, &headers, "", false).await {
-            Ok(auth) => {
-                let rec = auth.record;
-                resolved_slug = Some(rec.slug);
-                rec.report
-            }
-            Err(err_resp) if err_resp.status() != StatusCode::NOT_FOUND => return Ok(err_resp),
-            Err(_) => {
-                resolved_slug = Some(candidate_slug);
-                json!({
-                    "meta": { "displayAddress": clean_addr },
-                    "geo": body.get("geo").cloned().unwrap_or_else(|| json!({})),
-                    "facts": body.get("facts").cloned().unwrap_or_else(|| json!({})),
-                    "modules": {},
-                })
-            }
-        }
-    } else {
-        json!({
-            "geo": body.get("geo").cloned().unwrap_or_else(|| json!({})),
-            "facts": body.get("facts").cloned().unwrap_or_else(|| json!({})),
-            "modules": {},
-        })
-    };
-
-    // Merge top-level override fields with optional nested `overrides` object
-    let mut merged_ov = serde_json::Map::new();
-    if let Some(top_obj) = body.as_object() {
-        for (k, v) in top_obj {
-            if !matches!(
-                k.as_str(),
-                "slug" | "address" | "facts" | "geo" | "overrides"
-            ) {
-                merged_ov.insert(k.clone(), v.clone());
-            }
-        }
-    }
-    if let Some(nested_obj) = body.get("overrides").and_then(|v| v.as_object()) {
-        for (k, v) in nested_obj {
-            merged_ov.insert(k.clone(), v.clone());
-        }
-    }
-    let overrides: CreUnderwritingOverrides = serde_json::from_value(Value::Object(merged_ov))
-        .map_err(|_| {
-            map_guardrail(GuardrailError::new(
-                "INVALID_UNDERWRITING_PARAMETERS",
-                "Invalid numeric or string type in CRE underwriting parameters.",
-                400,
-            ))
-        })?;
-
-    let out = build_cre_report_section_live(
-        &state.http,
-        &state.env,
-        &base_report,
-        Some(&overrides),
-        true,
-    )
-    .await;
-    Ok(json_response(
-        StatusCode::OK,
-        json!({
-            "ok": true,
-            "slug": resolved_slug,
-            "classification": out.data.get("classification"),
-            "underwriting": out.data.get("underwriting"),
-            "landAndFarm": out.data.get("landAndFarm"),
-            "businessProfit": out.data.get("businessProfit"),
-            "tradeArea": out.data.get("tradeArea"),
-            "disclaimer": out.data.get("disclaimer"),
-            "warnings": out.warnings,
-            "sources": out.sources,
-        }),
-    ))
-}
-
-async fn handle_cre_business_eval(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    raw_body: std::result::Result<Bytes, BytesRejection>,
-) -> ApiResult {
-    let req_host = req_host_str(&headers);
-    verify_same_origin(&headers, req_host, &state.env).map_err(map_guardrail)?;
-    let body = parse_json_body(raw_body, 10, 500)?;
-    enforce_allowed_body_keys(&body, ALLOWED_CRE_BUSINESS_EVAL_KEYS).map_err(map_guardrail)?;
-
-    let raw_slug = body
-        .get("slug")
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .trim();
-    let clean_slug = validate_slug_param(raw_slug).map_err(map_guardrail)?;
-    let mut rec = authorize_cached_report(&state, &clean_slug, &headers, "", false)
-        .await?
-        .record;
-
-    let raw_eval_mode = body
-        .get("evalMode")
-        .or_else(|| body.get("eval_mode"))
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .unwrap_or("all");
-    let norm_mode = match raw_eval_mode.to_ascii_lowercase().as_str() {
-        "store" | "business" | "store_profit" | "retail_store" => "store",
-        "commercial_land" | "land" | "pad_site" | "entitled_land" => "commercial_land",
-        "farmland" | "agricultural_farm" | "farm" | "ag_land" | "agricultural" | "ranch" => {
-            "farmland"
-        }
-        "all" | "both" | "full" => "all",
-        _ => {
-            return Err(map_guardrail(GuardrailError::new(
-                "INVALID_EVAL_MODE",
-                "evalMode must be one of: store, commercial_land, farmland, all.",
-                400,
-            )));
-        }
-    };
-
-    let store_req: StoreEvalRequest = serde_json::from_value(body.clone()).map_err(|_| {
-        map_guardrail(GuardrailError::new(
-            "INVALID_BUSINESS_EVAL_PARAMETERS",
-            "Invalid numeric or string type in store evaluation parameters.",
-            400,
-        ))
-    })?;
-    let lf_opts: LandFarmEvalOptions = serde_json::from_value(body.clone()).map_err(|_| {
-        map_guardrail(GuardrailError::new(
-            "INVALID_BUSINESS_EVAL_PARAMETERS",
-            "Invalid numeric or string type in land/farm evaluation parameters.",
-            400,
-        ))
-    })?;
-
-    let parcel_cls = classify_cre_asset(
-        rec.report.get("facts").unwrap_or(&Value::Null),
-        rec.report.get("geo"),
-        None,
-        false,
-    );
-    let trade_area_ac = parcel_cls.asset_class.unwrap_or(match norm_mode {
-        "farmland" => CreAssetClass::AgriculturalFarmLand,
-        "commercial_land" => CreAssetClass::CommercialLand,
-        _ => CreAssetClass::Retail,
-    });
-
-    // Ensure tradeArea context (frontage street AADT, visibility, 1mi/3mi demographics) is present
-    // even when evaluating opening a store or land feasibility on a non-CRE parcel.
-    let mut ctx_report = rec.report.clone();
-    if ctx_report
-        .pointer("/cre/tradeArea")
-        .filter(|v| v.is_object())
-        .is_none()
-    {
-        let ta = analyze_cre_trade_area(&ctx_report, trade_area_ac);
-        if !ctx_report.get("cre").map(Value::is_object).unwrap_or(false) {
-            ctx_report["cre"] = json!({});
-        }
-        ctx_report["cre"]["tradeArea"] = serde_json::to_value(&ta).unwrap_or(Value::Null);
-    }
-
-    let run_land_farm = matches!(norm_mode, "commercial_land" | "farmland" | "all");
-    let run_store = matches!(norm_mode, "store" | "all");
-
-    let mut warnings: Vec<String> = Vec::new();
-    let mut sources: Vec<crate::shared::SourceItem> = Vec::new();
-
-    let land_and_farm_val = if run_land_farm {
-        let is_farmland = match norm_mode {
-            "farmland" => true,
-            "commercial_land" => false,
-            _ => {
-                lf_opts.farming_mode.is_some()
-                    || parcel_cls.asset_class == Some(CreAssetClass::AgriculturalFarmLand)
-            }
-        };
-        let lf_out =
-            evaluate_land_and_farm(Some(&state.http), &ctx_report, is_farmland, Some(&lf_opts))
-                .await;
-        warnings.extend(lf_out.warnings);
-        sources.extend(lf_out.sources);
-        lf_out.data
-    } else {
-        Value::Null
-    };
-
-    let business_profit_val = if run_store {
-        let coords = ctx_report
-            .pointer("/geo/lat")
-            .and_then(Value::as_f64)
-            .zip(ctx_report.pointer("/geo/lon").and_then(Value::as_f64))
-            .or_else(|| {
-                ctx_report
-                    .pointer("/facts/lat")
-                    .and_then(Value::as_f64)
-                    .zip(ctx_report.pointer("/facts/lon").and_then(Value::as_f64))
-            })
-            .filter(|(la, lo)| la.is_finite() && lo.is_finite() && la.abs() >= 0.001);
-
-        let live_pois = if let Some((lat, lon)) = coords {
-            fetch_osm_plaza_pois(&state.http, &state.env, lat, lon).await
-        } else {
-            Vec::new()
-        };
-        let observed_slice = if live_pois.is_empty() {
-            None
-        } else {
-            Some(live_pois.as_slice())
-        };
-        let bp_out =
-            analyze_location_business_profit(&ctx_report, observed_slice, Some(&store_req));
-        warnings.extend(bp_out.warnings);
-        sources.extend(bp_out.sources);
-        bp_out.data
-    } else {
-        Value::Null
-    };
-
-    let should_persist = body.get("persist").and_then(Value::as_bool).unwrap_or(true);
-    if should_persist {
-        if !rec.report.get("cre").map(Value::is_object).unwrap_or(false) {
-            rec.report["cre"] = json!({
-                "classification": parcel_cls,
-                "tradeArea": ctx_report.pointer("/cre/tradeArea").cloned().unwrap_or(Value::Null),
-            });
-        }
-        if run_land_farm {
-            rec.report["cre"]["landAndFarm"] = land_and_farm_val.clone();
-            if let Some(mdata) = rec
-                .report
-                .pointer_mut("/modules/cre/data")
-                .and_then(Value::as_object_mut)
-            {
-                mdata.insert("landAndFarm".into(), land_and_farm_val.clone());
-            }
-        }
-        if run_store {
-            rec.report["cre"]["businessProfit"] = business_profit_val.clone();
-            if let Some(mdata) = rec
-                .report
-                .pointer_mut("/modules/cre/data")
-                .and_then(Value::as_object_mut)
-            {
-                mdata.insert("businessProfit".into(), business_profit_val.clone());
-            }
-        }
-        let mut persisted_narrow = false;
-        if let Some(hdr) = state.db.get_report_header(&rec.slug).await.ok().flatten() {
-            if hdr.report_id > 0 {
-                let cre_val = rec.report["cre"].clone();
-                let m_cre_opt = rec.report.pointer("/modules/cre").cloned();
-                let mut mod_entries: Vec<(&str, &Value)> = Vec::new();
-                if let Some(ref m_cre) = m_cre_opt {
-                    mod_entries.push(("cre", m_cre));
-                }
-                if let Ok(cre_env) = make_report_section_envelope(
-                    ReportSectionKind::ReportSectionCre,
-                    &[("cre", &cre_val)],
-                    &mod_entries,
-                    now_unix_secs(),
-                ) {
-                    if state
-                        .db
-                        .put_report_section(
-                            hdr.report_id,
-                            ReportSectionKind::ReportSectionCre,
-                            &cre_env,
-                        )
-                        .await
-                        .is_ok()
-                    {
-                        persisted_narrow = true;
-                    }
-                }
-            }
-        }
-        if !persisted_narrow {
-            let _ = state
-                .db
-                .put_cached_report(&rec.slug, &rec.report, None)
-                .await;
-        }
-        if static_mirror_config_from_env(&state.env).is_some() {
-            let html = render_report_html_with_brand(
-                &rec.report,
-                &state.env.brand_name(),
-                &state.env.brand_domain(),
-            );
-            spawn_static_export_if_configured(&state.env, &rec.slug, &rec.report, html);
-        }
-    }
-
-    Ok(json_response(
-        StatusCode::OK,
-        json!({
-            "ok": true,
-            "slug": rec.slug,
-            "evalMode": norm_mode,
-            "landAndFarm": land_and_farm_val,
-            "businessProfit": business_profit_val,
-            "warnings": warnings,
-            "sources": sources,
-        }),
-    ))
-}
-
-async fn handle_cre_review_post(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    extensions: Extensions,
-    raw_body: std::result::Result<Bytes, BytesRejection>,
-) -> ApiResult {
-    handle_doc_review_post(&state, &headers, &extensions, raw_body, "cre").await
 }
 
 async fn handle_repair_addendum_post(
@@ -6310,34 +5412,6 @@ async fn require_operator_or_cron_access(
     ))
 }
 
-async fn require_batch_scan_access(
-    state: &AppState,
-    headers: &HeaderMap,
-    extensions: &Extensions,
-) -> std::result::Result<(), GuardrailError> {
-    let require_token = crate::shared::is_truthy_flag(
-        state.env.get("OPEN_ESTATE_BATCH_REQUIRE_TOKEN").unwrap_or("false"),
-    ) || internal_auth_required(&state.env);
-    if !require_token {
-        return Ok(());
-    }
-    if has_valid_batch_or_internal_key(headers, &state.env) {
-        return Ok(());
-    }
-    if let Ok(auth) =
-        crate::web::admin_console::verify_admin_access(state, headers, extensions).await
-    {
-        if auth.via_token || auth.actor.starts_with("proxy:") {
-            return Ok(());
-        }
-    }
-    Err(GuardrailError::new(
-        "BATCH_AUTH_REQUIRED",
-        "Batch scanning requires a valid X-OpenEstate-Batch-Token, OPEN_ESTATE_INTERNAL_API_KEY, or admin token.",
-        401,
-    ))
-}
-
 async fn handle_listings_shop(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -6542,12 +5616,9 @@ async fn handle_listings_shop(
 
     let limit = qp.limit.unwrap_or(48).clamp(1, 120);
     let dialect = state.db.dialect();
-    let rapid_hint = state
-        .db
-        .rapid_query_hint_for_scan(filters.zips.len(), !filters.cities.is_empty());
     let sql_preview = compile_filters_to_sql(&filters, dialect, false, None, limit).sql_preview;
     let (page_sql, page_params, cnt_sql, cnt_params) =
-        build_shop_v3_page_and_count_sql(&filters, dialect, rapid_hint, limit);
+        build_shop_v3_page_and_count_sql(&filters, dialect, "", limit);
 
     let (cores, total_opt, facets) = tokio::try_join!(
         state.db.search_listing_cores(&page_sql, &page_params),
@@ -6593,56 +5664,6 @@ async fn handle_listings_shop(
             "listings": listings,
         }),
     ))
-}
-
-async fn handle_listings_ingest(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    extensions: Extensions,
-    raw_body: std::result::Result<Bytes, BytesRejection>,
-) -> ApiResult {
-    require_operator_or_cron_access(&state, &headers, &extensions)
-        .await
-        .map_err(map_guardrail)?;
-    let body = parse_json_body(raw_body, 16, 250_000)?;
-    enforce_allowed_body_keys(&body, &["zip", "listings", "csv", "triggerAlerts"])
-        .map_err(map_guardrail)?;
-
-    let zip = match body.get("zip") {
-        Some(Value::String(s)) if !s.trim().is_empty() => Some(s.trim().to_string()),
-        Some(Value::Number(n)) => Some(n.to_string()),
-        _ => None,
-    };
-    let listings = body
-        .get("listings")
-        .and_then(|v| v.as_array())
-        .cloned()
-        .unwrap_or_default();
-    let csv = body.get("csv").and_then(|v| v.as_str()).map(String::from);
-    let trigger_alerts = body
-        .get("triggerAlerts")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(true);
-    let base_origin = resolve_base_origin(&state, &headers);
-
-    let out = ingest_listings(
-        &state.db,
-        &state.http,
-        &state.env,
-        IngestListingsRequest {
-            zip,
-            listings,
-            csv,
-            trigger_alerts,
-            base_origin,
-        },
-    )
-    .await
-    .map_err(map_anyhow)?;
-
-    let _ = backfill_missing_shopping_facets(&state.db).await;
-
-    Ok(json_response(StatusCode::OK, out))
 }
 
 async fn handle_sync(
@@ -7250,538 +6271,6 @@ async fn handle_unsubscribe_post(
 }
 
 // =================================================================================================
-// 10,000-Home Concurrent Batch Scanner Endpoints
-// =================================================================================================
-
-async fn handle_scan_batch_submit(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    extensions: Extensions,
-    raw_body: std::result::Result<Bytes, BytesRejection>,
-) -> ApiResult {
-    require_batch_scan_access(&state, &headers, &extensions)
-        .await
-        .map_err(map_guardrail)?;
-    let body = parse_json_body(raw_body, 16, 250_000)?;
-    enforce_allowed_body_keys(
-        &body,
-        &[
-            "addresses",
-            "tasks",
-            "forceRefresh",
-            "force_refresh",
-            "skipAi",
-            "skip_ai",
-            "label",
-        ],
-    )
-    .map_err(map_guardrail)?;
-
-    let mut req: BatchScanRequest = serde_json::from_value(body).map_err(|_| {
-        map_guardrail(GuardrailError::new(
-            "INVALID_JSON_BODY",
-            "Invalid batch scan request payload.",
-            400,
-        ))
-    })?;
-
-    let total_count = req.addresses.len() + req.tasks.len();
-    if total_count == 0 {
-        return Err(map_guardrail(GuardrailError::new(
-            "EMPTY_BATCH",
-            "Batch scan request must include at least one US street address.",
-            400,
-        )));
-    }
-
-    let ip = resolve_client_ip_from_req(&state, &headers, &extensions);
-    let _batch_permit = state
-        .shield
-        .acquire_batch_scan(&ip, &headers, total_count, &state.env)
-        .map_err(map_guardrail)?;
-
-    let mut clean_addrs = Vec::with_capacity(req.addresses.len());
-    for raw in &req.addresses {
-        clean_addrs.push(validate_street_address_input(raw).map_err(map_guardrail)?);
-    }
-    req.addresses = clean_addrs;
-
-    for task in &mut req.tasks {
-        if !task.address.trim().is_empty() {
-            task.address = validate_street_address_input(&task.address).map_err(map_guardrail)?;
-        }
-    }
-
-    let accepted = state.scan_engine.enqueue_batch(req).map_err(map_anyhow)?;
-    let val = serde_json::to_value(accepted).map_err(|e| map_anyhow(e.into()))?;
-    Ok(json_response(StatusCode::ACCEPTED, val))
-}
-
-#[derive(Deserialize, Default)]
-#[serde(rename_all = "camelCase")]
-struct BatchStatusQuery {
-    include_items: Option<String>,
-    offset: Option<usize>,
-    limit: Option<usize>,
-}
-
-async fn handle_scan_batch_status(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    extensions: Extensions,
-    AxumPath(id): AxumPath<String>,
-    Query(q): Query<BatchStatusQuery>,
-) -> ApiResult {
-    require_batch_scan_access(&state, &headers, &extensions)
-        .await
-        .map_err(map_guardrail)?;
-    let include_items = !matches!(
-        q.include_items.as_deref().map(str::trim),
-        Some("0") | Some("false")
-    );
-    let offset = q.offset.unwrap_or(0);
-    let limit = if include_items {
-        q.limit.unwrap_or(100).min(10_000)
-    } else {
-        0
-    };
-
-    let Some(status) = state.scan_engine.get_batch_status(&id, offset, limit) else {
-        return Ok(json_response(
-            StatusCode::NOT_FOUND,
-            json!({ "ok": false, "code": "BATCH_NOT_FOUND", "error": "Batch not found" }),
-        ));
-    };
-
-    let mut val = serde_json::to_value(status).map_err(|e| map_anyhow(e.into()))?;
-    if let Some(obj) = val.as_object_mut() {
-        obj.insert("ok".to_string(), json!(true));
-    }
-    Ok(json_response(StatusCode::OK, val))
-}
-
-async fn handle_scan_batch_cancel(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    extensions: Extensions,
-    AxumPath(id): AxumPath<String>,
-) -> ApiResult {
-    require_batch_scan_access(&state, &headers, &extensions)
-        .await
-        .map_err(map_guardrail)?;
-    let cancelled = state.scan_engine.cancel_batch(&id);
-    if cancelled {
-        return Ok(json_response(
-            StatusCode::OK,
-            json!({
-                "ok": true,
-                "batchId": id,
-                "cancelled": true,
-                "status": "cancelled",
-            }),
-        ));
-    }
-
-    if let Some(st) = state.scan_engine.get_batch_status(&id, 0, 0) {
-        return Ok(json_response(
-            StatusCode::OK,
-            json!({
-                "ok": true,
-                "batchId": id,
-                "cancelled": false,
-                "status": st.status,
-            }),
-        ));
-    }
-
-    Ok(json_response(
-        StatusCode::NOT_FOUND,
-        json!({ "ok": false, "code": "BATCH_NOT_FOUND", "error": "Batch not found" }),
-    ))
-}
-
-async fn handle_scan_metrics(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    extensions: Extensions,
-) -> Response {
-    if let Err(ge) = require_batch_scan_access(&state, &headers, &extensions).await {
-        return map_guardrail(ge);
-    }
-    json_response(StatusCode::OK, state.scan_engine.metrics_json())
-}
-
-async fn handle_marketplace_quotes_get(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Query(q): Query<crate::modules::deed_title_marketplace::MarketplaceQuotesQuery>,
-) -> ApiResult {
-    execute_marketplace_quotes(&state, &headers, q, Value::Null).await
-}
-
-async fn handle_marketplace_quotes_post(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    raw_body: std::result::Result<Bytes, BytesRejection>,
-) -> ApiResult {
-    use crate::modules::deed_title_marketplace::{
-        MarketplaceQuotesQuery, MARKETPLACE_QUOTES_ALLOWED_KEYS,
-    };
-
-    let req_host = req_host_str(&headers);
-    verify_same_origin(&headers, req_host, &state.env).map_err(map_guardrail)?;
-    let body = parse_json_body(raw_body, 12, 2_000)?;
-    enforce_allowed_body_keys(&body, MARKETPLACE_QUOTES_ALLOWED_KEYS).map_err(map_guardrail)?;
-
-    let q: MarketplaceQuotesQuery = serde_json::from_value(body.clone()).map_err(|_| {
-        map_guardrail(GuardrailError::new(
-            "INVALID_JSON_BODY",
-            "Malformed marketplace quotes request parameters.",
-            400,
-        ))
-    })?;
-    execute_marketplace_quotes(&state, &headers, q, body).await
-}
-
-async fn execute_marketplace_quotes(
-    state: &AppState,
-    headers: &HeaderMap,
-    q: crate::modules::deed_title_marketplace::MarketplaceQuotesQuery,
-    body: Value,
-) -> ApiResult {
-    use crate::modules::deed_title_marketplace::{
-        build_deed_title_and_marketplace_with_options, build_synthetic_quotes_report,
-        parse_marketplace_query_options, price_tier_for_price,
-    };
-
-    let opts = parse_marketplace_query_options(&q, &body).map_err(map_guardrail)?;
-    let raw_slug = q
-        .slug
-        .as_deref()
-        .or_else(|| body.get("slug").and_then(|v| v.as_str()))
-        .unwrap_or("")
-        .trim();
-
-    let (report, resolved_slug): (Value, Option<String>) = if !raw_slug.is_empty() {
-        let slug = validate_slug_param(raw_slug).map_err(map_guardrail)?;
-        match authorize_cached_report(state, &slug, headers, "", false).await {
-            Ok(auth) => (auth.record.report, Some(auth.record.slug)),
-            Err(err_resp) => return Ok(err_resp),
-        }
-    } else if let Some(rep_obj) = body.get("report").filter(|v| v.is_object()) {
-        (rep_obj.clone(), None)
-    } else {
-        (
-            build_synthetic_quotes_report(&q, &body, opts.price_override).map_err(map_guardrail)?,
-            None,
-        )
-    };
-
-    let out = build_deed_title_and_marketplace_with_options(&report, &state.env, &opts);
-    let eff_zip = out
-        .marketplace
-        .get("zip")
-        .and_then(|v| v.as_str())
-        .filter(|z| z.len() == 5 && z.chars().all(|c| c.is_ascii_digit()))
-        .unwrap_or("");
-    let eff_price = out
-        .marketplace
-        .get("propertyPrice")
-        .and_then(|v| v.as_f64())
-        .unwrap_or(0.0);
-    let price_tier = price_tier_for_price(eff_price);
-
-    if q.track_impressions.unwrap_or(true) {
-        state.marketplace_clicks.record_impressions_for_marketplace(
-            &out.marketplace,
-            eff_zip,
-            price_tier,
-        );
-    }
-
-    let counters = state
-        .marketplace_clicks
-        .stats_for_zip_tier(eff_zip, Some(price_tier));
-
-    Ok(json_response(
-        StatusCode::OK,
-        json!({
-            "ok": true,
-            "slug": resolved_slug,
-            "titleInsuranceAndDeed": out.title_insurance_and_deed,
-            "marketplace": out.marketplace,
-            "counters": counters,
-        }),
-    ))
-}
-
-async fn handle_marketplace_click(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    raw_body: std::result::Result<Bytes, BytesRejection>,
-) -> ApiResult {
-    use crate::modules::deed_title_marketplace::{
-        validate_marketplace_click_input, COMPENSATION_MODEL, MARKETPLACE_CLICK_ALLOWED_KEYS,
-    };
-
-    let req_host = req_host_str(&headers);
-    verify_same_origin(&headers, req_host, &state.env).map_err(map_guardrail)?;
-    let body = parse_json_body(raw_body, 6, 64)?;
-    enforce_allowed_body_keys(&body, MARKETPLACE_CLICK_ALLOWED_KEYS).map_err(map_guardrail)?;
-
-    let cached_report = if let Some(raw_slug) = body.get("slug").and_then(|v| v.as_str()) {
-        if !raw_slug.trim().is_empty() {
-            let clean_slug = validate_slug_param(raw_slug).map_err(map_guardrail)?;
-            match authorize_cached_report(&state, &clean_slug, &headers, "", false).await {
-                Ok(auth) => Some(auth.record),
-                Err(err_resp) if err_resp.status() == StatusCode::NOT_FOUND => None,
-                Err(err_resp) => return Ok(err_resp),
-            }
-        } else {
-            None
-        }
-    } else {
-        None
-    };
-
-    let clk = validate_marketplace_click_input(
-        &body,
-        cached_report.as_ref().map(|r| &r.report),
-        &state.env,
-    )
-    .map_err(map_guardrail)?;
-
-    // Privacy-safe counter: stores ONLY (vertical, partner_id, zip, price_tier) — NO PII, NO IP.
-    let (impressions, clicks) = state
-        .marketplace_clicks
-        .try_record_event(
-            &clk.vertical,
-            &clk.partner_id,
-            &clk.zip,
-            &clk.price_tier,
-            clk.is_click,
-        )
-        .ok_or_else(|| {
-            map_guardrail(GuardrailError::new(
-                "COUNTER_CAPACITY_REACHED",
-                "Marketplace counter store capacity reached.",
-                429,
-            ))
-        })?;
-
-    Ok(json_response(
-        StatusCode::OK,
-        json!({
-            "ok": true,
-            "privacy": "no_pii_no_ip_stored",
-            "compensationModel": COMPENSATION_MODEL,
-            "key": {
-                "vertical": clk.vertical,
-                "partnerId": clk.partner_id,
-                "zip": clk.zip,
-                "priceTier": clk.price_tier,
-            },
-            "eventType": clk.event_type,
-            "impressions": impressions,
-            "clicks": clicks,
-        }),
-    ))
-}
-
-#[derive(Debug, Deserialize, Default)]
-struct AgentMatchRecommendationsQuery {
-    slug: Option<String>,
-    state: Option<String>,
-    zip: Option<String>,
-    city: Option<String>,
-    price: Option<f64>,
-}
-
-async fn handle_agent_match_recommendations_get(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    RawQuery(raw_query): RawQuery,
-    Query(q): Query<AgentMatchRecommendationsQuery>,
-) -> ApiResult {
-    let raw_q_str = raw_query.as_deref().unwrap_or("");
-    let report =
-        if let Some(ref raw_slug) = q.slug.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-            let slug = validate_slug_param(raw_slug).map_err(map_guardrail)?;
-            let private_reports = state
-                .env
-                .get("PRIVATE_REPORTS_REQUIRED")
-                .map(is_truthy_flag)
-                .unwrap_or(false);
-            let mut narrow_rep = None;
-            if !private_reports && !raw_query_has_share_or_api_key(raw_q_str) {
-                let sec_envs = state
-                    .db
-                    .get_report_sections(
-                        &slug,
-                        &[
-                            ReportSectionKind::ReportSectionGeo,
-                            ReportSectionKind::ReportSectionFacts,
-                            ReportSectionKind::ReportSectionValuation,
-                            ReportSectionKind::ReportSectionSources,
-                        ],
-                    )
-                    .await
-                    .unwrap_or_default();
-                if !sec_envs.is_empty() {
-                    let partial = assemble_partial_report_from_envelopes(&sec_envs);
-                    narrow_rep = Some(
-                        authorize_narrow_report(
-                            &state,
-                            &slug,
-                            None,
-                            partial,
-                            &headers,
-                            raw_q_str,
-                            false,
-                        )
-                        .await?
-                        .record
-                        .report,
-                    );
-                }
-            }
-            if let Some(rep) = narrow_rep {
-                rep
-            } else if let Some(rec) = get_cached_or_disk_report(&state, &slug).await {
-                state
-                    .hooks
-                    .authorize_report(&state, &slug, Some(rec), &headers, raw_q_str, false)
-                    .await
-                    .map_err(|resp| resp)?
-                    .record
-                    .report
-            } else {
-                json!({
-                    "geo": { "state": q.state, "zip": q.zip, "city": q.city },
-                    "facts": { "price": q.price }
-                })
-            }
-        } else {
-            json!({
-                "geo": { "state": q.state, "zip": q.zip, "city": q.city },
-                "facts": { "price": q.price }
-            })
-        };
-
-    let mut data =
-        crate::modules::agent_recommend::build_agent_recommendations(&state.db, &report).await;
-    if let Some(mr) = data
-        .get_mut("mailtoRequest")
-        .and_then(Value::as_object_mut)
-    {
-        mr.insert(
-            "smtpDisabled".to_string(),
-            json!(!state.env.smtp_feature_enabled()),
-        );
-    }
-    Ok(json_response(
-        StatusCode::OK,
-        json!({
-            "ok": true,
-            "data": data,
-        }),
-    ))
-}
-
-async fn handle_agent_match_request_post(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    raw_body: std::result::Result<Bytes, BytesRejection>,
-) -> ApiResult {
-    let req_host = req_host_str(&headers);
-    verify_same_origin(&headers, req_host, &state.env).map_err(map_guardrail)?;
-    let body = parse_json_body(raw_body, 6, 4_096)?;
-    enforce_allowed_body_keys(
-        &body,
-        crate::modules::agent_recommend::AGENT_MATCH_REQUEST_ALLOWED_KEYS,
-    )
-    .map_err(map_guardrail)?;
-
-    let raw_slug = body
-        .get("slug")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|s| !s.is_empty());
-    let mut validated_slug: Option<String> = None;
-    let mut cached_report_opt: Option<Value> = None;
-    if let Some(rs) = raw_slug {
-        let s = validate_slug_param(rs).map_err(map_guardrail)?;
-        let private_reports = state
-            .env
-            .get("PRIVATE_REPORTS_REQUIRED")
-            .map(is_truthy_flag)
-            .unwrap_or(false);
-        if !private_reports {
-            if let Some(hdr) = state.db.get_report_header(&s).await.ok().flatten() {
-                let sec_envs = state
-                    .db
-                    .get_report_sections(
-                        &hdr.slug,
-                        &[
-                            ReportSectionKind::ReportSectionMeta,
-                            ReportSectionKind::ReportSectionGeo,
-                            ReportSectionKind::ReportSectionFacts,
-                            ReportSectionKind::ReportSectionValuation,
-                        ],
-                    )
-                    .await
-                    .unwrap_or_default();
-                if !sec_envs.is_empty() {
-                    let partial = assemble_partial_report_from_envelopes(&sec_envs);
-                    let auth = match authorize_narrow_report(
-                        &state,
-                        &hdr.slug,
-                        Some(&hdr),
-                        partial,
-                        &headers,
-                        "",
-                        false,
-                    )
-                    .await
-                    {
-                        Ok(a) => a,
-                        Err(err_resp) => return Ok(err_resp),
-                    };
-                    cached_report_opt = Some(auth.record.report);
-                    validated_slug = Some(auth.record.slug);
-                }
-            }
-        }
-        if cached_report_opt.is_none() {
-            match authorize_cached_report(&state, &s, &headers, "", false).await {
-                Ok(auth) => {
-                    cached_report_opt = Some(auth.record.report);
-                    validated_slug = Some(auth.record.slug);
-                }
-                Err(err_resp) if err_resp.status() == StatusCode::NOT_FOUND => {
-                    validated_slug = Some(s);
-                }
-                Err(err_resp) => return Ok(err_resp),
-            }
-        }
-    }
-
-    let cid = resolve_trusted_client_id(&state, &headers).await;
-    let out = crate::modules::agent_recommend::submit_agent_match_request(
-        &state.db,
-        &state.env,
-        cached_report_opt.as_ref(),
-        validated_slug.as_deref(),
-        &body,
-        cid,
-    )
-    .await
-    .map_err(map_guardrail)?;
-
-    Ok(json_response(StatusCode::OK, out))
-}
-
-// =================================================================================================
 // Property Refresh Status, Likes & Cross-Platform Engagement Handlers
 // =================================================================================================
 
@@ -8082,234 +6571,6 @@ async fn handle_property_platform_signals_post(
     ))
 }
 
-async fn require_server_admin_mutation(
-    state: &AppState,
-    headers: &HeaderMap,
-    extensions: &Extensions,
-) -> std::result::Result<crate::web::ops_dashboard::AdminAuthContext, Response> {
-    let auth = crate::web::admin_console::verify_admin_access(state, headers, extensions)
-        .await
-        .map_err(|e| crate::web::ops_dashboard::admin_auth_error_json_response(&e))?;
-    crate::web::admin_console::verify_admin_csrf(&state.env, headers, &auth)?;
-    Ok(auth)
-}
-
-async fn handle_admin_reports_export_static(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    extensions: Extensions,
-    raw_body: std::result::Result<Bytes, BytesRejection>,
-) -> ApiResult {
-    let auth = require_server_admin_mutation(&state, &headers, &extensions)
-        .await
-        .map_err(|resp| resp)?;
-    let body = parse_json_body(raw_body, 6, 64)?;
-    enforce_allowed_body_keys(
-        &body,
-        &["slug", "dir", "maxFiles", "maxMb", "limit", "allowPrivate"],
-    )
-    .map_err(map_guardrail)?;
-
-    let private_reports = state
-        .env
-        .get("PRIVATE_REPORTS_REQUIRED")
-        .map(is_truthy_flag)
-        .unwrap_or(false);
-    let allow_private = body
-        .get("allowPrivate")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    if private_reports && !allow_private {
-        return Err(map_guardrail(GuardrailError::new(
-            "PRIVATE_REPORTS_EXPORT_BLOCKED",
-            "Refusing static public mirror export while PRIVATE_REPORTS_REQUIRED=true unless allowPrivate=true.",
-            403,
-        )));
-    }
-
-    let root_dir_str = body
-        .get("dir")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .or_else(|| {
-            state
-                .env
-                .get("REPORT_STATIC_MIRROR_DIR")
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-        })
-        .ok_or_else(|| {
-            map_guardrail(GuardrailError::new(
-                "STATIC_MIRROR_DIR_REQUIRED",
-                "Configure REPORT_STATIC_MIRROR_DIR or pass {\"dir\": \"...\"} in request body.",
-                400,
-            ))
-        })?
-        .to_string();
-    let root_dir = PathBuf::from(&root_dir_str);
-
-    let max_files = body
-        .get("maxFiles")
-        .and_then(Value::as_u64)
-        .map(|n| n as usize)
-        .or_else(|| {
-            state
-                .env
-                .get("REPORT_STATIC_MAX_FILES")
-                .and_then(|s| s.trim().parse::<usize>().ok())
-        })
-        .unwrap_or(DEFAULT_REPORT_STATIC_MAX_FILES);
-    let max_mb = body
-        .get("maxMb")
-        .and_then(Value::as_u64)
-        .or_else(|| {
-            state
-                .env
-                .get("REPORT_STATIC_MAX_MB")
-                .and_then(|s| s.trim().parse::<u64>().ok())
-        })
-        .unwrap_or(DEFAULT_REPORT_STATIC_MAX_MB);
-
-    let target_slugs: Vec<String> = if let Some(raw_slug) = body
-        .get("slug")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
-        vec![validate_slug_param(raw_slug).map_err(map_guardrail)?]
-    } else {
-        let limit = body
-            .get("limit")
-            .and_then(Value::as_i64)
-            .unwrap_or(500)
-            .clamp(1, 500);
-        state
-            .db
-            .list_cached_report_slugs(limit)
-            .await
-            .map_err(map_anyhow)?
-    };
-
-    let mut bundles: Vec<(String, Value, String)> = Vec::new();
-    let mut skipped_pending = 0usize;
-    let mut missing = 0usize;
-    let brand_name = state.env.brand_name();
-    let brand_domain = state.env.brand_domain();
-    for sl in target_slugs {
-        let Some(rec) = get_cached_or_disk_report(&state, &sl).await else {
-            missing += 1;
-            continue;
-        };
-        if report_ai_pending(&rec.report) {
-            skipped_pending += 1;
-            continue;
-        }
-        let html = render_report_html_with_brand(&rec.report, &brand_name, &brand_domain);
-        bundles.push((rec.slug, rec.report, html));
-    }
-
-    let root_for_task = root_dir.clone();
-    let (exported_slugs, evicted_slugs, total_files, total_bytes) =
-        tokio::task::spawn_blocking(move || -> Result<(Vec<String>, Vec<String>, usize, u64)> {
-            let mut exported_slugs = Vec::with_capacity(bundles.len());
-            let mut all_evicted = Vec::new();
-            let mut total_files = 0usize;
-            let mut total_bytes = 0u64;
-            for (sl, rep, html) in bundles {
-                let res = export_static_report_bundle_with_limits(
-                    &root_for_task,
-                    &sl,
-                    &rep,
-                    &html,
-                    max_files,
-                    max_mb,
-                )?;
-                exported_slugs.push(res.slug);
-                all_evicted.extend(res.evicted_slugs);
-                total_files = res.total_files;
-                total_bytes = res.total_bytes;
-            }
-            Ok((exported_slugs, all_evicted, total_files, total_bytes))
-        })
-        .await
-        .map_err(|e| map_anyhow(anyhow::anyhow!("Static export worker failed: {e}")))?
-        .map_err(map_anyhow)?;
-
-    let _ = state
-        .db
-        .append_admin_audit_log(
-            &auth.actor,
-            "export_static_reports",
-            "static_mirror",
-            &root_dir_str,
-            &json!({
-                "exported": exported_slugs.len(),
-                "skippedPending": skipped_pending,
-                "evicted": evicted_slugs.len(),
-            }),
-        )
-        .await;
-
-    Ok(json_response(
-        StatusCode::OK,
-        json!({
-            "ok": true,
-            "dir": root_dir_str,
-            "exported": exported_slugs.len(),
-            "exportedSlugs": exported_slugs,
-            "skippedPending": skipped_pending,
-            "missing": missing,
-            "evictedSlugs": evicted_slugs,
-            "totalFiles": total_files,
-            "totalBytes": total_bytes,
-            "maxFiles": max_files,
-            "maxMb": max_mb,
-        }),
-    ))
-}
-
-async fn handle_admin_subscriptions_retranslate(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    extensions: Extensions,
-    raw_body: std::result::Result<Bytes, BytesRejection>,
-) -> ApiResult {
-    let auth = require_server_admin_mutation(&state, &headers, &extensions)
-        .await
-        .map_err(|resp| resp)?;
-    let body = parse_json_body(raw_body, 4, 16)?;
-    enforce_allowed_body_keys(&body, &["maxBatch"]).map_err(map_guardrail)?;
-    let max_batch = body
-        .get("maxBatch")
-        .and_then(Value::as_u64)
-        .unwrap_or(50)
-        .clamp(1, 200) as usize;
-
-    let summary = retranslate_stale_subscriptions(&state.db, &state.http, &state.env, max_batch)
-        .await
-        .map_err(map_anyhow)?;
-
-    let _ = state
-        .db
-        .append_admin_audit_log(
-            &auth.actor,
-            "retranslate_subscriptions",
-            "subscriptions",
-            "batch",
-            &summary,
-        )
-        .await;
-
-    Ok(json_response(
-        StatusCode::OK,
-        json!({
-            "ok": true,
-            "summary": summary,
-        }),
-    ))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -8340,7 +6601,15 @@ mod tests {
         let db = DbStore::connect(&env).await.unwrap();
         db.ensure_schema().await.unwrap();
         let shield = HttpDefenseShield::new(&env);
-        let state = AppState::with_components(env, http, db, shield, reports_dir, None);
+        let state = AppState::with_components_and_hub(
+            env,
+            http,
+            db,
+            shield,
+            reports_dir,
+            None,
+            crate::extensions::ExtensionHub::new_default(),
+        );
         (state, dir)
     }
 
@@ -8675,25 +6944,7 @@ mod tests {
             .unwrap();
         assert_eq!(root_resp.status(), StatusCode::NOT_FOUND);
 
-        // Seed finalized + pending reports and exercise POST /api/admin/reports/export-static
-        let export_slug = format!("synthetic-export-{}", &uuid::Uuid::new_v4().simple().to_string()[..8]);
-        let rep = minimal_report_json(&export_slug, false);
-        state
-            .db
-            .put_cached_report(&export_slug, &rep, Some("<html><body>ok</body></html>"))
-            .await
-            .unwrap();
-        let rep_pend = minimal_report_json("pending-slug", true);
-        state
-            .db
-            .put_cached_report(
-                "pending-slug",
-                &rep_pend,
-                Some("<html><body>p</body></html>"),
-            )
-            .await
-            .unwrap();
-
+        // Verify removed batch static-export & subscription retranslate admin routes are unmounted
         let app = build_router(state.clone());
         let exp_resp = app
             .clone()
@@ -8709,26 +6960,20 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(exp_resp.status(), StatusCode::OK);
-        let exp_body: Value = serde_json::from_slice(
-            &axum::body::to_bytes(exp_resp.into_body(), 16 * 1024)
-                .await
-                .unwrap(),
-        )
-        .unwrap();
-        assert_eq!(exp_body["ok"], true);
-        assert_eq!(exp_body["exported"], 1);
-        assert_eq!(exp_body["skippedPending"], 1);
-        assert!(mirror_dir.join(format!("r/{export_slug}/index.html")).is_file());
-        assert!(mirror_dir.join(format!("r/{export_slug}/report.json")).is_file());
-        assert!(mirror_dir.join("manifest.json").is_file());
+        assert!(
+            matches!(
+                exp_resp.status(),
+                StatusCode::NOT_FOUND | StatusCode::METHOD_NOT_ALLOWED
+            ),
+            "export-static must be unmounted, got {}",
+            exp_resp.status()
+        );
 
-        // Exercise POST /api/admin/subscriptions/retranslate
         let retr_resp = app
             .oneshot(
                 Request::builder()
                     .method(Method::POST)
-                    .uri("/api/admin/subscriptions/retranslate")
+                    .uri("/api/admin/subscriptions/nonexistent/retranslate")
                     .header(header::HOST, "127.0.0.1:8080")
                     .header(header::ORIGIN, "http://127.0.0.1:8080")
                     .header(header::CONTENT_TYPE, "application/json")
@@ -8737,14 +6982,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(retr_resp.status(), StatusCode::OK);
-        let retr_body: Value = serde_json::from_slice(
-            &axum::body::to_bytes(retr_resp.into_body(), 16 * 1024)
-                .await
-                .unwrap(),
-        )
-        .unwrap();
-        assert_eq!(retr_body["ok"], true);
+        assert_eq!(retr_resp.status(), StatusCode::NOT_FOUND);
 
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&mirror_dir);

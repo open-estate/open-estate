@@ -6,7 +6,7 @@
 // preserving licensed contractor business names, permit numbers, job valuations & work scopes.
 
 use crate::ai::llm::{responses_json, LlmCacheBackend, LlmCallOptions, LlmInput};
-use crate::ai::title_review::redact_title_pii;
+use crate::ai::pdf::redact_title_pii;
 use crate::guardrails::{clean_untrusted_text, wrap_untrusted_block};
 use crate::property::facts::strip_pii_keys;
 use crate::property::public_records::resolve_official_record_links;

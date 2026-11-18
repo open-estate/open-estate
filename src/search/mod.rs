@@ -43,7 +43,8 @@ pub use matcher::{
 };
 pub use rank::{
     get_rank_job, rank_area, rank_area_with_registry, AreaCity, AreaCommuteEstimate,
-    AreaRankRequest, AreaRankResult, RankJobRegistry, RankStage, RankedListingMeta,
+    AreaRankRequest, AreaRankResult, DeepReportRefiner, RankJobRegistry, RankStage,
+    RankedListingMeta,
 };
 pub use sync::{
     assign_schools_to_listing, backfill_missing_shopping_facets, extract_listings_from_report,

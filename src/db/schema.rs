@@ -1,13 +1,10 @@
-// Clean-slate Protobuf-first (`openestate.db.v1`) dual-dialect DDL (SQLite WAL + MySQL 8.4 /
-// OCI HeatWave Rapid `26.10.0-u1-cloud`), Rapid-safe bitmask predicates, narrow Q0–Q6 view types,
-// and compatibility row types for Open Estate.
+// Clean-slate Protobuf-first (`openestate.db.v1`) dual-dialect DDL (SQLite WAL + MySQL 8.4),
+// bitmask predicates, narrow Q0–Q6 view types, and compatibility row types for Open Estate.
 //
 // Strict invariants:
 // - 0 `JSON` columns across all 44 tables.
 // - 0 `LONGTEXT` columns across all 44 tables.
 // - 0 legacy `*_UPGRADE_COLS` `ALTER TABLE` shims.
-// - All 8 HeatWave Rapid tables (`RAPID_TABLE_NAMES`) have explicit `BIGINT` / composite PKs
-//   and 0 `BLOB`/`TEXT`/`JSON` columns.
 
 use crate::db::proto::{
     ListingCoreProto, ListingDescriptionsProto, ListingEngagementProto, ListingFeaturesProto,
@@ -71,19 +68,6 @@ pub const TABLE_NAMES: &[&str] = &[
     "admin_audit_log",
     "llm_cache",
     "client_doc_reviews",
-];
-
-/// Analytical tables loaded into `HeatWave.Free` (`SECONDARY_ENGINE = RAPID`) when
-/// `OCI_HEATWAVE_ENABLE_RAPID` is enabled and `rapid_service_status == 'ONLINE'`.
-pub const RAPID_TABLE_NAMES: &[&str] = &[
-    "listings",
-    "listing_factors",
-    "listing_utilities",
-    "listing_hazards",
-    "listing_schools",
-    "listing_features",
-    "listing_tags",
-    "school_metrics",
 ];
 
 const SQLITE_DDL_STMTS: &[&str] = &[

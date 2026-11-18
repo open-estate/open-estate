@@ -2016,9 +2016,9 @@ mod tests {
             }),
         ];
 
-        let out = run_amenities(&http, &env, 37.2839, -121.9317, &geo, Some(&vicinity))
+        let out = run_amenities_with_db(&http, &env, None, 37.2839, -121.9317, &geo, Some(&vicinity))
             .await
-            .expect("run_amenities");
+            .expect("run_amenities_with_db");
         let emerg = out.data["mobilityHub"]["emergencyMedical"]
             .as_array()
             .expect("emergencyMedical array");

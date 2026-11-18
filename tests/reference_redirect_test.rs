@@ -1,12 +1,12 @@
-//! End-to-end integration tests for `GET /redirect` & `GET /api/ops/telemetry/redirects`:
+//! End-to-end integration tests for stateless `GET /redirect` & `ServerExtensionHooks::on_reference_redirect`:
 //! 1. Dynamic `ExtensionHub` live manifest `reference_url_template` & catalog `rule_id` resolution
 //! 2. Built-in canonical agency / county / civic reference IDs + `epa_echo_sdwis` / `fcc_broadband_bdc_live` aliases
 //! 3. Slug hydration (`slug=<cached_slug>`) resolving `apn`, `county_fips`, `tract`, `lat`, `lon` from SQLite
 //! 4. Legacy broken URL healing (`sccassessor.org`, `campbellca.gov/161/Building`, `epa.gov/ejscreen`,
 //!    disabled ArcGIS `f=html`) and bogus `#:~:text=` fragment stripping
 //! 5. Strict open-redirect & SSRF defense (`400 Bad Request` on untrusted domains, non-HTTPS, or private IPs)
-//! 6. Click telemetry persistence (`reference_redirect_clicks`), `ServerExtensionHooks::on_reference_redirect`
-//!    + `extra_extension_packages`, and admin-protected `GET /api/ops/telemetry/redirects`.
+//! 6. Stateless redirect telemetry hook (`ServerExtensionHooks::on_reference_redirect`) + `extra_extension_packages`,
+//!    with persistent telemetry endpoint `GET /api/ops/telemetry/redirects` unmounted (`404`) in Personal OSS.
 
 mod common;
 
@@ -17,7 +17,7 @@ use open_estate::shared::{EnvConfig, HttpClient};
 use open_estate::web::hooks::{BoxFuture, ReferenceRedirectEvent, ServerExtensionHooks};
 use open_estate::web::server::{build_router, AppState};
 use reqwest::{redirect::Policy, Client, StatusCode};
-use serde_json::{json, Value};
+use serde_json::json;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
@@ -510,48 +510,35 @@ async fn reference_redirect_resolves_heals_rejects_untrusted_and_records_telemet
         );
     }
 
-    // 8. Admin-protected `GET /api/ops/telemetry/redirects` + hook event verification
-    let unauth_tel = client
-        .get(format!("{base_url}/api/ops/telemetry/redirects"))
-        .send()
-        .await
-        .expect("GET unauthenticated telemetry");
-    assert_eq!(unauth_tel.status(), StatusCode::UNAUTHORIZED);
-
-    let auth_tel = client
+    // 8. Stateless Personal Edition: `/api/ops/telemetry/redirects` is unmounted (`404`),
+    // while `ServerExtensionHooks::on_reference_redirect` fires for every valid 302 redirect.
+    let tel_resp = client
         .get(format!("{base_url}/api/ops/telemetry/redirects?limit=50"))
         .header("Authorization", format!("Bearer {TEST_OPS_TOKEN}"))
         .send()
         .await
-        .expect("GET authenticated telemetry");
-    assert_eq!(auth_tel.status(), StatusCode::OK);
-    let tel_json: Value = auth_tel.json().await.expect("parse telemetry JSON");
-    assert_eq!(tel_json["ok"], json!(true));
-    let total_clicks = tel_json["totalClicks"].as_u64().unwrap_or(0);
-    assert_eq!(total_clicks, 31, "all 31 valid redirects should be counted");
-
-    let items = tel_json["items"].as_array().expect("items array");
-    let legacy_bucket = items
-        .iter()
-        .find(|row| row["dataId"] == "legacy_test_ref" && row["section"] == "legacy")
-        .expect("legacy_test_ref bucket present");
-    assert_eq!(legacy_bucket["clickCount"], json!(17));
-
-    let county_bucket = items
-        .iter()
-        .find(|row| row["dataId"] == "county_assessor" && row["section"] == "overview")
-        .expect("county_assessor overview bucket present");
-    assert_eq!(county_bucket["clickCount"], json!(1));
+        .expect("GET /api/ops/telemetry/redirects");
     assert_eq!(
-        county_bucket["lastSlug"],
-        json!(common::SYNTH_SECONDARY_SLUG)
+        tel_resp.status(),
+        StatusCode::NOT_FOUND,
+        "persistent redirect telemetry route must not exist in Personal Edition"
     );
 
-    let recorded_events = hook_events.lock().expect("lock hook_events").len();
+    let events = hook_events.lock().expect("lock hook_events");
     assert_eq!(
-        recorded_events, 31,
+        events.len(),
+        31,
         "ServerExtensionHooks::on_reference_redirect must fire for every valid 302 redirect"
     );
+    assert!(
+        events
+            .iter()
+            .any(|ev| ev.data_id == "county_assessor"
+                && ev.section == "overview"
+                && ev.slug.as_deref() == Some(common::SYNTH_SECONDARY_SLUG)),
+        "hook events must carry resolved data_id, section, and slug"
+    );
+    drop(events);
 
     let _ = shutdown_tx.send(());
     let _ = std::fs::remove_dir_all(&temp_dir);

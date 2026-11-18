@@ -1,4 +1,4 @@
-//! Dynamic Reference Redirect & Click Telemetry Layer (`GET /redirect` & `GET /api/ops/telemetry/redirects`).
+//! Stateless Dynamic Reference Redirect Layer (`GET /redirect`).
 //!
 //! Routes external property/extension/module reference links through `/redirect?type=extension_reference&data_id=...`
 //! so that:
@@ -6,12 +6,9 @@
 //!    heal all previously cached reports without regenerating them.
 //! 2. Legacy broken URLs (`sccassessor.org`, disabled ArcGIS `f=html`, retired EJScreen/NFHL/SDWIS links,
 //!    and bogus `#:~:text=` fragments) are transparently upgraded on click.
-//! 3. Aggregate click telemetry (`reference_redirect_clicks`) records which data sources buyers inspect most,
+//! 3. Downstream hosts can observe redirect events via `ServerExtensionHooks::on_reference_redirect`,
 //!    with strict open-redirect defense against untrusted domains, non-HTTPS schemes, and private IPs.
 
-use crate::db::metering_store::{
-    query_top_reference_redirect_clicks, record_reference_redirect_click,
-};
 use crate::extensions::proto::ExtensionQueryProto;
 use crate::guardrails::apply_security_headers;
 use crate::property::public_records::{parse_street, resolve_official_record_links};
@@ -21,9 +18,8 @@ use crate::web::http_util::json_response;
 use crate::web::server::AppState;
 use axum::{
     extract::{Query, State},
-    http::{header, Extensions, HeaderMap, HeaderValue, StatusCode},
+    http::{header, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
-    Json,
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -55,11 +51,6 @@ pub struct RedirectQuery {
     pub address: Option<String>,
     #[serde(rename = "ref", alias = "url", alias = "fallback_url")]
     pub fallback_ref: Option<String>,
-}
-
-#[derive(Debug, Default, Clone, Deserialize)]
-pub struct RedirectTelemetryQuery {
-    pub limit: Option<i64>,
 }
 
 /// Trusted non-`.gov`/`.us`/`.edu`/`.mil` host suffixes allowed as redirect destinations.
@@ -1044,16 +1035,6 @@ pub async fn handle_reference_redirect(
     let section = clean_opt(&q.section).unwrap_or_else(|| "general".to_string());
     let slug_str = clean_opt(&q.slug).unwrap_or_default();
 
-    let _ = record_reference_redirect_click(
-        &state.db,
-        &link_type,
-        &telemetry_data_id,
-        &section,
-        &slug_str,
-        &validated_target,
-    )
-    .await;
-
     let hook_event = ReferenceRedirectEvent {
         link_type: link_type.clone(),
         data_id: telemetry_data_id,
@@ -1067,78 +1048,6 @@ pub async fn handle_reference_redirect(
 
     let mut resp = StatusCode::FOUND.into_response();
     resp.headers_mut().insert(header::LOCATION, loc_header);
-    resp.headers_mut().insert(
-        header::CACHE_CONTROL,
-        HeaderValue::from_static("no-store, max-age=0"),
-    );
-    apply_security_headers(resp.headers_mut());
-    resp
-}
-
-/// Admin/ops-protected JSON endpoint (`GET /api/ops/telemetry/redirects`) returning top clicked
-/// `(type, data_id, section, click_count, last_target_url, updated_at)` entries.
-pub async fn handle_ops_redirect_telemetry_json(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    extensions: Extensions,
-    Query(q): Query<RedirectTelemetryQuery>,
-) -> Response {
-    if let Err(auth_err) =
-        crate::web::admin_console::verify_admin_access(&state, &headers, &extensions).await
-    {
-        let status = auth_err.status;
-        let mut resp = json_response(
-            status,
-            json!({
-                "ok": false,
-                "code": auth_err.code,
-                "error": auth_err.message,
-            }),
-        );
-        resp.headers_mut().insert(
-            header::CACHE_CONTROL,
-            HeaderValue::from_static("no-store, max-age=0"),
-        );
-        apply_security_headers(resp.headers_mut());
-        return resp;
-    }
-
-    let limit = q.limit.unwrap_or(100).clamp(1, 500);
-    let rows = query_top_reference_redirect_clicks(&state.db, limit)
-        .await
-        .unwrap_or_default();
-    let total_clicks: u64 = rows.iter().map(|r| r.click_count).sum();
-    let items: Vec<serde_json::Value> = rows
-        .into_iter()
-        .map(|r| {
-            json!({
-                "type": r.link_type,
-                "linkType": r.link_type,
-                "data_id": r.data_id,
-                "dataId": r.data_id,
-                "section": r.section,
-                "click_count": r.click_count,
-                "clickCount": r.click_count,
-                "last_slug": r.last_slug,
-                "lastSlug": r.last_slug,
-                "last_target_url": r.last_target_url,
-                "lastTargetUrl": r.last_target_url,
-                "updated_at": r.updated_at,
-                "updatedAt": r.updated_at,
-            })
-        })
-        .collect();
-
-    let mut resp = (
-        StatusCode::OK,
-        Json(json!({
-            "ok": true,
-            "totalClicks": total_clicks,
-            "distinctTargets": items.len(),
-            "items": items,
-        })),
-    )
-        .into_response();
     resp.headers_mut().insert(
         header::CACHE_CONTROL,
         HeaderValue::from_static("no-store, max-age=0"),

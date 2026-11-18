@@ -241,7 +241,7 @@ fn connector_catalog_never_exposes_secrets_or_tokens() {
     ]));
 
     let catalog = build_connector_catalog(&env);
-    assert!(catalog.len() >= 15);
+    assert!(catalog.len() >= 13);
 
     let serialized = serde_json::to_string(&catalog).expect("serialize connectors");
     for forbidden in [
@@ -568,13 +568,13 @@ async fn ops_endpoints_return_live_telemetry_and_responsive_html() {
     assert_eq!(v["securityAndEgress"]["guardrailsActive"], json!(true));
 
     let conns = v["connectors"].as_array().expect("connectors array");
-    assert!(conns.len() >= 15);
+    assert!(conns.len() >= 13);
     assert!(conns
         .iter()
         .any(|c| c["id"] == "attom_data" && c["configured"] == json!(true)));
     assert!(conns
         .iter()
-        .any(|c| c["id"] == "shovels_permits" && c["configured"] == json!(true)));
+        .any(|c| c["id"] == "zoneomics_zoning" && c["configured"] == json!(true)));
 
     // 2. Validate GET /ops HTML response
     let page_resp = app

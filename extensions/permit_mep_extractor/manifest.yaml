@@ -23,7 +23,6 @@ provenance: live_verified
 depends_on:
   - campbell_mgo_permits
   - municipal_open_data_permits
-  - shovels_permits
 input_from_domains:
   - permits
 upstream_require_mode: any

@@ -597,44 +597,40 @@ async fn test_3_cross_platform_likes_portal_extraction_hotness_and_migration() {
     assert_eq!(post_a_unlike["likesCount"], json!(1));
     assert_eq!(post_a_unlike["likedByViewer"], json!(false));
 
-    // 3. Ingest portal engagement via `/api/listings/ingest` fails closed without Bearer, succeeds with Bearer
-    let ingest_unauth = client
+    // 3. Batch `/api/listings/ingest` is unmounted (404) in Personal Edition; seed listing directly via `upsert_listings_batch`
+    let ingest_unmounted = client
         .post(format!("{}/api/listings/ingest", srv.base_url))
         .header("Origin", &srv.base_url)
         .json(&json!({ "zip": "95118", "listings": [] }))
         .send()
         .await
         .unwrap();
-    assert_eq!(ingest_unauth.status(), reqwest::StatusCode::UNAUTHORIZED);
+    assert_eq!(ingest_unmounted.status(), reqwest::StatusCode::NOT_FOUND);
 
-    let ingest_resp = client
-        .post(format!("{}/api/listings/ingest", srv.base_url))
-        .header("Authorization", "Bearer test-cron-ux-999")
-        .json(&json!({
+    let ingested = ListingInput::from_json(
+        &json!({
+            "address": address,
+            "city": "San Jose",
+            "state": "CA",
             "zip": "95118",
-            "triggerAlerts": false,
-            "listings": [{
-                "address": address,
-                "city": "San Jose",
-                "state": "CA",
-                "zip": "95118",
-                "status": "for_sale",
-                "price": 2_150_000,
-                "beds": 4,
-                "baths": 2,
-                "sqft": 2040,
-                "daysOnMarket": 4,
-                "source": "Redfin",
-                "reportSlug": slug,
-                "favoriteCount": 84,
-                "pageViewCount": 1450,
-                "hotHome": true
-            }]
-        }))
-        .send()
+            "status": "for_sale",
+            "price": 2_150_000,
+            "beds": 4,
+            "baths": 2,
+            "sqft": 2040,
+            "daysOnMarket": 4,
+            "source": "Redfin",
+            "reportSlug": slug,
+            "favoriteCount": 84,
+            "pageViewCount": 1450,
+            "hotHome": true
+        }),
+        "95118",
+    )
+    .expect("ListingInput from_json");
+    upsert_listings_batch(&srv.state.db, None, &srv.state.env, &[ingested], false)
         .await
         .unwrap();
-    assert_eq!(ingest_resp.status(), reqwest::StatusCode::OK);
 
     // Fetch live report.json and assert ingested portal engagement + unfabricated null for other portals
     let rj: Value = client

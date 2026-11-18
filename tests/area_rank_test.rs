@@ -12,16 +12,14 @@ use open_estate::db::{
     build_listing_factors_upsert, build_query_listings_in_areas_sql, migrate_database, mysql_ddl,
     sqlite_ddl, DbStore, ListingFactorsRow, LISTING_FACTORS_COLS, TABLE_NAMES,
 };
-use open_estate::scanner::engine::{
-    canonical_address_slug, ScanEngine, ScanEngineConfig, ScanItemOutcome,
-};
+use open_estate::scanner::canonical_address_slug;
 use open_estate::scanner::tile_cache::SpatialTileCache;
 use open_estate::scoring::catalog::{Lang, MatchBand};
 use open_estate::scoring::profile::Profile;
 use open_estate::search::{
     get_rank_job, light_scan_listings, rank_area_with_registry, search_listings_with_llm,
-    sync_areas_on_demand, upsert_listings_batch, AreaCity, AreaRankRequest, LightScanEndpoints,
-    LightScanOptions, ListingInput, RankJobRegistry, RankStage, SearchRequest,
+    sync_areas_on_demand, upsert_listings_batch, AreaCity, AreaRankRequest, DeepReportRefiner,
+    LightScanEndpoints, LightScanOptions, ListingInput, RankJobRegistry, RankStage, SearchRequest,
 };
 use open_estate::shared::{EnvConfig, HttpClient};
 use serde_json::{json, Value};
@@ -683,38 +681,18 @@ async fn test_4_rank_area_deterministic_commute_fixtures_and_tier2_refinement() 
         .await
         .unwrap();
 
-    // `ScanEngine` writes `secondary_rep` on Tier-2 background scan.
-    let engine_tile_cache = Arc::new(SpatialTileCache::new(4_096, Duration::from_secs(3600)));
+    // `DeepReportRefiner` writes `secondary_rep` on Tier-2 background refinement.
     let db_runner = db.clone();
     let secondary_rep_c = secondary_rep.clone();
-    let secondary_overall = secondary_rep["summary"]["scores"]["overall"].as_f64();
-    let secondary_val = secondary_rep
-        .pointer("/modules/valuation/data/estimate/value")
-        .and_then(Value::as_f64);
-    let scan_engine = Arc::new(ScanEngine::from_closures(
-        ScanEngineConfig::default(),
-        Arc::clone(&engine_tile_cache),
-        move |task| {
+    let refiner: Arc<dyn DeepReportRefiner> =
+        Arc::new(move |slug: String, _addr: String| {
             let db_w = db_runner.clone();
             let v_rep = secondary_rep_c.clone();
             async move {
-                db_w.put_cached_report(&task.slug, &v_rep, None).await?;
-                Ok(ScanItemOutcome {
-                    slug: task.slug,
-                    address: task.address,
-                    matched_address: None,
-                    lat: task.lat,
-                    lon: task.lon,
-                    overall_score: secondary_overall,
-                    estimated_value: secondary_val,
-                    cached: false,
-                    duration_ms: 15,
-                    report_summary: Value::Null,
-                })
+                db_w.put_cached_report(&slug, &v_rep, None).await?;
+                Ok(())
             }
-        },
-        |_outcomes| async move { Ok(()) },
-    ));
+        });
 
     let registry = Arc::new(RankJobRegistry::new());
     let mut req = AreaRankRequest::new(test_profile("San Jose Civic Center"));
@@ -734,7 +712,7 @@ async fn test_4_rank_area_deterministic_commute_fixtures_and_tier2_refinement() 
         &db,
         &http,
         &env,
-        Some(&scan_engine),
+        Some(Arc::clone(&refiner)),
         Arc::clone(&registry),
         req.clone(),
     )

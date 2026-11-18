@@ -1824,17 +1824,10 @@ pub async fn search_listings_narrow(
     override_statuses: Option<&[String]>,
     limit: usize,
 ) -> Result<(CompiledSqlQuery, Vec<ListingRow>)> {
-    let uses_non_rapid_descriptions = !relaxed
-        && (!filters.must_have_keywords.is_empty() || !filters.required_tags.is_empty());
-    let rapid_hint = if uses_non_rapid_descriptions {
-        db.innodb_pk_hint()
-    } else {
-        db.rapid_query_hint_for_scan(filters.zips.len(), !filters.cities.is_empty())
-    };
     let compiled = compile_core_filters_to_sql(
         filters,
         db.dialect(),
-        rapid_hint,
+        "",
         relaxed,
         override_statuses,
         limit,

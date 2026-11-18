@@ -5,7 +5,6 @@ pub mod executor;
 pub mod patch;
 pub mod routes;
 pub mod runtime;
-pub mod scheduler_jobs;
 pub mod types;
 
 pub use executor::{
@@ -19,10 +18,6 @@ pub use routes::lazy_routes;
 pub use runtime::{
     claim_next, complete, complete_section_artifact, enqueue, fail, heartbeat, lazy_section_status,
     mark_awaiting_external_response, notify_section_subscribers, patch_cached_report_for_slug,
-};
-pub use scheduler_jobs::{
-    register_lazy_scheduled_jobs, seed_lazy_default_jobs, LAZY_WORKER_POLL_JOB_KIND,
-    SCANNER_PERIODIC_LAZY_SWEEP_JOB_KIND,
 };
 pub use types::{
     humanize_section_label, CompleteLazyJobOutcome, EnqueueLazyJobOutcome, EnqueueLazyJobRequest,

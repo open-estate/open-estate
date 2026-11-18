@@ -19,7 +19,7 @@ use crate::guardrails::{
 use crate::property::{geocode_address, validate_ssrf_safe_public_url};
 use crate::search::{
     backfill_missing_shopping_facets, create_subscription_with_profile_and_provider,
-    parse_requirements_to_query, retranslate_stale_subscriptions, validate_email_input,
+    parse_requirements_to_query, validate_email_input,
     validate_zip_list, CreateSubscriptionRequest, CURRENT_FILTER_SCHEMA_VERSION,
 };
 use crate::shared::{is_truthy_flag, now_iso, round_n, EnvConfig};
@@ -2320,7 +2320,7 @@ pub async fn verify_admin_access(
 // Admin CSRF & Audit Helpers
 // =================================================================================================
 
-pub(crate) fn verify_admin_csrf(
+pub fn verify_admin_csrf(
     env: &EnvConfig,
     headers: &HeaderMap,
     auth: &AdminAuthContext,
@@ -2398,7 +2398,7 @@ pub(crate) fn verify_admin_csrf(
     )))
 }
 
-pub(crate) async fn require_admin(
+pub async fn require_admin(
     state: &AppState,
     headers: &HeaderMap,
     extensions: &Extensions,
@@ -2408,7 +2408,7 @@ pub(crate) async fn require_admin(
         .map_err(|e| admin_auth_error_json_response(&e))
 }
 
-pub(crate) async fn require_admin_mutation(
+pub async fn require_admin_mutation(
     state: &AppState,
     headers: &HeaderMap,
     extensions: &Extensions,
@@ -2418,7 +2418,7 @@ pub(crate) async fn require_admin_mutation(
     Ok(ctx)
 }
 
-pub(crate) fn admin_no_store_json(status: StatusCode, body: Value) -> Response {
+pub fn admin_no_store_json(status: StatusCode, body: Value) -> Response {
     let mut resp = json_response(status, body);
     resp.headers_mut().insert(
         header::CACHE_CONTROL,
@@ -2444,7 +2444,7 @@ fn admin_csv_response(filename: &str, csv_bytes: Vec<u8>) -> Response {
     resp
 }
 
-pub(crate) async fn log_admin_action(
+pub async fn log_admin_action(
     state: &AppState,
     auth: &AdminAuthContext,
     action: &str,
@@ -2551,14 +2551,6 @@ pub fn admin_routes() -> Router<AppState> {
         .route(
             "/api/admin/subscriptions/export.csv",
             get(handle_admin_subscriptions_export_csv),
-        )
-        .route(
-            "/api/admin/subscriptions/retranslate-stale",
-            post(handle_admin_subscriptions_retranslate_stale),
-        )
-        .route(
-            "/api/admin/subscriptions/:id/retranslate",
-            post(handle_admin_subscription_retranslate_one),
         )
         .route(
             "/api/admin/subscriptions/:id/notifications",
@@ -6021,126 +6013,6 @@ pub async fn handle_admin_subscription_update(
     )
 }
 
-pub async fn handle_admin_subscription_retranslate_one(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    extensions: Extensions,
-    AxumPath(sub_id): AxumPath<String>,
-) -> Response {
-    let auth = match require_admin_mutation(&state, &headers, &extensions).await {
-        Ok(c) => c,
-        Err(r) => return r,
-    };
-    let Some(mut row) = (match state.db.fetch_subscription_by_id(&sub_id).await {
-        Ok(r) => r,
-        Err(e) => return map_anyhow(e),
-    }) else {
-        return admin_no_store_json(
-            StatusCode::NOT_FOUND,
-            json!({ "ok": false, "code": "SUBSCRIPTION_NOT_FOUND", "error": "Subscription not found." }),
-        );
-    };
-
-    let sub_zips: Vec<String> = serde_json::from_str(&row.zips_json).unwrap_or_default();
-    let old_filters: Value =
-        serde_json::from_str(&row.parsed_filters_json).unwrap_or_else(|_| json!({}));
-    let parsed = match parse_requirements_to_query(
-        &state.db,
-        &state.http,
-        &state.env,
-        &row.requirements_text,
-        &sub_zips,
-        None,
-    )
-    .await
-    {
-        Ok(p) => p,
-        Err(e) => return map_anyhow(e),
-    };
-    let mut next_filters = parsed.filters;
-    next_filters.schema_version = Some(CURRENT_FILTER_SCHEMA_VERSION);
-    let mut next_val = serde_json::to_value(&next_filters).unwrap_or_else(|_| json!({}));
-    if let (Some(old_obj), Some(next_obj)) = (old_filters.as_object(), next_val.as_object_mut()) {
-        for keep_key in ["profileJson", "profile_json", "profile", "lang"] {
-            if let Some(v) = old_obj.get(keep_key) {
-                next_obj.insert(keep_key.to_string(), v.clone());
-            }
-        }
-    }
-    let next_json = serde_json::to_string(&next_val).unwrap_or_else(|_| "{}".to_string());
-    let cities_json =
-        serde_json::to_string(&next_filters.cities).unwrap_or_else(|_| "[]".to_string());
-    let now = now_iso();
-
-    row.parsed_filters_json = next_json;
-    row.cities_json = Some(cities_json);
-    row.filter_schema_version = CURRENT_FILTER_SCHEMA_VERSION;
-    row.filters_refreshed_at = Some(now.clone());
-    row.updated_at = now;
-
-    if let Err(e) = state.db.upsert_subscription_normalized(&row).await {
-        return map_anyhow(e);
-    }
-
-    log_admin_action(
-        &state,
-        &auth,
-        "subscription.retranslate",
-        "subscription",
-        &row.id,
-        &json!({ "schemaVersion": CURRENT_FILTER_SCHEMA_VERSION }),
-    )
-    .await;
-
-    let mut sub_json = format_admin_subscription_row(&row, None);
-    if let Some(obj) = sub_json.as_object_mut() {
-        obj.insert("parsedFilters".into(), next_val);
-    }
-    admin_no_store_json(
-        StatusCode::OK,
-        json!({ "ok": true, "subscription": sub_json }),
-    )
-}
-
-pub async fn handle_admin_subscriptions_retranslate_stale(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    extensions: Extensions,
-    raw_body: std::result::Result<Bytes, BytesRejection>,
-) -> Response {
-    let auth = match require_admin_mutation(&state, &headers, &extensions).await {
-        Ok(c) => c,
-        Err(r) => return r,
-    };
-    let body = match raw_body {
-        Ok(b) if b.is_empty() => json!({}),
-        other => match parse_json_body(other, 4, 16) {
-            Ok(v) => v,
-            Err(r) => return r,
-        },
-    };
-    let max_batch = body
-        .get("maxBatch")
-        .and_then(Value::as_u64)
-        .unwrap_or(50)
-        .clamp(1, 200) as usize;
-    match retranslate_stale_subscriptions(&state.db, &state.http, &state.env, max_batch).await {
-        Ok(summary) => {
-            log_admin_action(
-                &state,
-                &auth,
-                "subscriptions.retranslate_stale",
-                "subscriptions",
-                "batch",
-                &summary,
-            )
-            .await;
-            admin_no_store_json(StatusCode::OK, json!({ "ok": true, "summary": summary }))
-        }
-        Err(e) => map_anyhow(e),
-    }
-}
-
 #[derive(Debug, Default, Deserialize)]
 pub struct AdminNotifQuery {
     pub limit: Option<i64>,
@@ -6924,7 +6796,6 @@ pre.json-view {
         <a class="btn sm" id="topHomeBtn" href="/">Home</a>
         <a class="btn sm" href="/shop">Shop</a>
         <a class="btn sm" href="/ops">Ops ↗</a>
-        <a class="btn sm" href="/admin/scheduler">Scheduler ↗</a>
         <select id="themeSelect" class="inp" aria-label="Color theme" style="padding:5px 8px;font-size:12px">
           <option value="auto">Theme: Auto (OS)</option>
           <option value="light">Theme: Light</option>
@@ -7295,7 +7166,6 @@ pre.json-view {
         <button type="button" class="btn sm" id="refreshSubsBtn">Apply / Refresh</button>
       </div>
       <div class="toolbar-right">
-        <button type="button" class="btn sm" id="retranslateStaleSubsBtn">Retranslate Stale</button>
         <button type="button" class="btn sm" id="exportSubsCsvBtn">Export CSV</button>
         <button type="button" class="btn primary" id="openCreateSubBtn">+ Create Alert</button>
       </div>
@@ -8757,7 +8627,6 @@ geo_rules:
               <div style="display:flex;gap:4px;flex-wrap:wrap">
                 <button type="button" class="btn sm sub-edit-btn" data-id="${esc(s.id)}">Edit</button>
                 <button type="button" class="btn sm sub-logs-btn" data-id="${esc(s.id)}">Logs</button>
-                <button type="button" class="btn sm sub-retrans-btn" data-id="${esc(s.id)}" title="Re-translate NL criteria">Retranslate</button>
                 <button type="button" class="btn sm sub-toggle-btn" data-id="${esc(s.id)}" data-active="${s.active ? '1' : '0'}">${s.active ? 'Pause' : 'Resume'}</button>
                 <button type="button" class="btn sm danger sub-del-btn" data-id="${esc(s.id)}">Remove</button>
               </div>
@@ -9110,14 +8979,6 @@ geo_rules:
     const qs = buildSubsQueryParams();
     downloadCsv('/api/admin/subscriptions/export.csv' + (qs ? '?' + qs : ''), 'subscriptions-export.csv');
   });
-  document.getElementById('retranslateStaleSubsBtn').addEventListener('click', async () => {
-    try {
-      const res = await apiFetch('/api/admin/subscriptions/retranslate-stale', { method: 'POST', body: { maxBatch: 100 } });
-      const sum = res.summary || {};
-      showToast(`Retranslated ${fmtNum(sum.retranslated || 0)} stale criteria (failed: ${fmtNum(sum.failed || 0)}).`);
-      await loadSubscriptions();
-    } catch (err) { showToast(err.message, true); }
-  });
 
   document.getElementById('usersTableBody').addEventListener('click', async (e) => {
     const inspectBtn = e.target.closest('.user-inspect-btn');
@@ -9166,15 +9027,6 @@ geo_rules:
     const logsBtn = e.target.closest('.sub-logs-btn');
     if (logsBtn) {
       openDeliveryLogDrawer(logsBtn.dataset.id);
-      return;
-    }
-    const retransBtn = e.target.closest('.sub-retrans-btn');
-    if (retransBtn) {
-      try {
-        await apiFetch(`/api/admin/subscriptions/${encodeURIComponent(retransBtn.dataset.id)}/retranslate`, { method: 'POST', body: {} });
-        await loadSubscriptions();
-        showToast('Re-translated NL subscription criteria.');
-      } catch (err) { showToast(err.message, true); }
       return;
     }
     const tog = e.target.closest('.sub-toggle-btn');

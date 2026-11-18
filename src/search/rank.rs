@@ -3,16 +3,14 @@
 // Evaluates candidate homes across up to 10 ZIPs and/or up to 6 cities (optionally triggering
 // bounded multi-area listing sync and Tier-1 light factor scans), computes real driving commute
 // matrices via `RoutingClient`, scores deterministically via `scoring::engine::rank_with`, and
-// optionally kicks off background Tier-2 `ScanEngine` deep reports for the top uncached homes.
+// optionally kicks off bounded background Tier-2 deep reports for the top uncached homes.
 
 use crate::db::{
     sanitize_area_inputs, score_to_school_grade, DbRowExt, DbStore, ListingCoreProto,
     ListingFactorsRow, SqlParam,
 };
 use crate::modules::commute::{LatLon, RoutingClient, RoutingConfig};
-use crate::scanner::engine::{
-    canonical_address_slug, BatchScanRequest, DynScanRunner, ScanEngine, ScanPriority, ScanTask,
-};
+use crate::scanner::{canonical_address_slug, SpatialTileCache};
 use crate::scoring::catalog::Lang;
 use crate::scoring::engine::{
     rank_with, CommuteMatrix, RankOptions, RankResult, ScoredHome,
@@ -233,24 +231,46 @@ impl RankJobRegistry {
     }
 }
 
+pub trait DeepReportRefiner: Send + Sync + 'static {
+    fn refine_one<'a>(
+        &'a self,
+        slug: String,
+        address: String,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>>;
+}
+
+impl<F, Fut> DeepReportRefiner for F
+where
+    F: Fn(String, String) -> Fut + Send + Sync + 'static,
+    Fut: std::future::Future<Output = Result<()>> + Send + 'static,
+{
+    fn refine_one<'a>(
+        &'a self,
+        slug: String,
+        address: String,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>> {
+        Box::pin((self)(slug, address))
+    }
+}
+
 pub fn get_rank_job(job_id: &str) -> Option<AreaRankResult> {
     RankJobRegistry::global().get(job_id)
 }
 
 /// Deterministic multi-area home ranking with Tier-1 light scan, OSRM commute matrix,
-/// optional auto-sync, and optional background Tier-2 `ScanEngine` deep refinement.
+/// optional auto-sync, and optional bounded background Tier-2 deep refinement.
 pub async fn rank_area(
     db: &DbStore,
     http: &HttpClient,
     env: &EnvConfig,
-    scan_engine: Option<&Arc<ScanEngine<DynScanRunner>>>,
+    refiner: Option<Arc<dyn DeepReportRefiner>>,
     req: AreaRankRequest,
 ) -> Result<AreaRankResult> {
     rank_area_with_registry(
         db,
         http,
         env,
-        scan_engine,
+        refiner,
         Arc::clone(RankJobRegistry::global()),
         req,
     )
@@ -261,7 +281,7 @@ pub async fn rank_area_with_registry(
     db: &DbStore,
     http: &HttpClient,
     env: &EnvConfig,
-    scan_engine: Option<&Arc<ScanEngine<DynScanRunner>>>,
+    refiner: Option<Arc<dyn DeepReportRefiner>>,
     registry: Arc<RankJobRegistry>,
     req: AreaRankRequest,
 ) -> Result<AreaRankResult> {
@@ -342,9 +362,9 @@ pub async fn rank_area_with_registry(
 
     let mut ls_opts = req.light_scan_options.clone().unwrap_or_default();
     if ls_opts.tile_cache.is_none() {
-        if let Some(engine) = scan_engine {
-            ls_opts.tile_cache = Some(Arc::clone(engine.tile_cache()));
-        }
+        static PERSONAL_TILE_CACHE: Lazy<Arc<SpatialTileCache>> =
+            Lazy::new(|| Arc::new(SpatialTileCache::default()));
+        ls_opts.tile_cache = Some(Arc::clone(&PERSONAL_TILE_CACHE));
     }
 
     let ls_res = resolve_area_factors_for_cores(db, http, env, &candidates, &ls_opts).await?;
@@ -449,7 +469,7 @@ pub async fn rank_area_with_registry(
     let now = now_iso();
 
     let refine_targets: Vec<(ListingCoreProto, String)> =
-        if req.trigger_deep_scan && scan_engine.is_some() {
+        if req.trigger_deep_scan && refiner.is_some() {
             pick_deep_refine_targets(&rank_res, &candidates, &lf_rows_map, MAX_DEEP_REFINE_TOP_N)
         } else {
             Vec::new()
@@ -476,58 +496,28 @@ pub async fn rank_area_with_registry(
         updated_at: now,
     };
 
-    if let (Some(engine), false) = (scan_engine, refine_targets.is_empty()) {
-        let tasks: Vec<ScanTask> = refine_targets
-            .iter()
-            .map(|(l, slug)| {
-                let row_opt = lf_rows_map.get(&l.external_id);
-                let mut t = ScanTask::new(&l.address);
-                t.slug = slug.clone();
-                t.lat = l.lat.or_else(|| row_opt.and_then(|r| r.lat));
-                t.lon = l.lon.or_else(|| row_opt.and_then(|r| r.lon));
-                t.zip = Some(l.zip.clone()).filter(|z| !z.is_empty());
-                t.skip_ai = true;
-                t.priority = ScanPriority::Bulk;
-                t
-            })
-            .collect();
+    if let (Some(refiner_arc), false) = (refiner, refine_targets.is_empty()) {
+        let batch_id = format!("refine-{}", Uuid::new_v4().simple());
+        out.batch_id = Some(batch_id);
+        registry.insert(out.clone());
 
-        let mut batch_req = BatchScanRequest::from_tasks(tasks);
-        batch_req.skip_ai = true;
-        batch_req.label = Some(format!("area-rank:{job_id}"));
-
-        match engine.enqueue_batch(batch_req) {
-            Ok(accepted) => {
-                let batch_id = accepted.batch_id.clone();
-                out.batch_id = Some(batch_id.clone());
-                registry.insert(out.clone());
-
-                spawn_tier2_refinement_task(
-                    Arc::clone(engine),
-                    db.clone(),
-                    Arc::clone(&registry),
-                    job_id,
-                    batch_id,
-                    refine_targets,
-                    candidates,
-                    factors_map,
-                    lf_rows_map,
-                    score_commute,
-                    commute_meta_by_id,
-                    req.profile,
-                    rank_opts,
-                    lang,
-                    req.limit,
-                );
-                return Ok(out);
-            }
-            Err(e) => {
-                out.stage = RankStage::Complete;
-                out.refining_count = 0;
-                out.warnings
-                    .push(format!("Background Tier-2 scan enqueue failed: {e}"));
-            }
-        }
+        spawn_tier2_refinement_task(
+            refiner_arc,
+            db.clone(),
+            Arc::clone(&registry),
+            job_id,
+            refine_targets,
+            candidates,
+            factors_map,
+            lf_rows_map,
+            score_commute,
+            commute_meta_by_id,
+            req.profile,
+            rank_opts,
+            lang,
+            req.limit,
+        );
+        return Ok(out);
     }
 
     registry.insert(out.clone());
@@ -536,11 +526,10 @@ pub async fn rank_area_with_registry(
 
 #[allow(clippy::too_many_arguments)]
 fn spawn_tier2_refinement_task(
-    engine: Arc<ScanEngine<DynScanRunner>>,
+    refiner: Arc<dyn DeepReportRefiner>,
     db: DbStore,
     registry: Arc<RankJobRegistry>,
     job_id: String,
-    batch_id: String,
     refine_targets: Vec<(ListingCoreProto, String)>,
     candidates: Vec<ListingCoreProto>,
     mut factors_map: HashMap<String, HomeFactors>,
@@ -554,22 +543,44 @@ fn spawn_tier2_refinement_task(
 ) {
     let target_count = refine_targets.len();
     tokio::spawn(async move {
+        use futures::StreamExt;
         let max_wait = Duration::from_secs(120);
-        match tokio::time::timeout(max_wait, engine.wait_for_batch(&batch_id, 0, target_count)).await
-        {
-            Ok(Some(st)) => {
-                let done_now = st.completed.min(target_count);
+        let completed_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let done_ref = Arc::clone(&completed_count);
+        let ref_clone = Arc::clone(&refiner);
+        let pairs: Vec<(String, String)> = refine_targets
+            .iter()
+            .map(|(core, slug)| (slug.clone(), core.address.clone()))
+            .collect();
+
+        let fut = async move {
+            futures::stream::iter(pairs)
+                .for_each_concurrent(2, |(slug, addr)| {
+                    let r = Arc::clone(&ref_clone);
+                    let cnt = Arc::clone(&done_ref);
+                    async move {
+                        if r.refine_one(slug, addr).await.is_ok() {
+                            cnt.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        }
+                    }
+                })
+                .await;
+        };
+
+        match tokio::time::timeout(max_wait, fut).await {
+            Ok(()) => {
+                let done_now = completed_count
+                    .load(std::sync::atomic::Ordering::Relaxed)
+                    .min(target_count);
                 registry.update(&job_id, |job| {
                     job.refined_done = done_now;
                     job.updated_at = now_iso();
                 });
             }
-            Ok(None) => {}
             Err(_) => {
-                let done_now = engine
-                    .get_batch_status(&batch_id, 0, target_count)
-                    .map(|st| st.completed.min(target_count))
-                    .unwrap_or(0);
+                let done_now = completed_count
+                    .load(std::sync::atomic::Ordering::Relaxed)
+                    .min(target_count);
                 registry.update(&job_id, |job| {
                     job.refined_done = done_now;
                     job.updated_at = now_iso();
@@ -674,7 +685,7 @@ fn build_rank_candidate_cores_sql(
     profile: Option<&Profile>,
     limit: usize,
 ) -> (String, Vec<SqlParam>, bool) {
-    let hint = db.rapid_query_hint_for_scan(clean_zips.len(), !clean_cities.is_empty());
+    let hint = "";
     let is_mysql = db.dialect() == "mysql";
     let mut params: Vec<SqlParam> = Vec::new();
     let mut where_parts: Vec<String> = Vec::new();

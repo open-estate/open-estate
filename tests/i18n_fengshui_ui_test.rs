@@ -13,7 +13,6 @@ use axum::{
     http::{header, HeaderMap, HeaderValue, Request, StatusCode},
 };
 use open_estate::ai::build_deterministic_analyst_fallback;
-use open_estate::cre::build_cre_report_section;
 use open_estate::db::DbStore;
 use open_estate::guardrails::{extract_browser_client_id, HttpDefenseShield};
 use open_estate::modules::{
@@ -115,7 +114,6 @@ fn enrich_synth_report_for_ui(slug: &str) -> Value {
     rep["titleInsuranceAndDeed"] = dtm.title_insurance_and_deed;
     rep["marketplace"] = dtm.marketplace;
     rep["engagement"] = build_engagement(slug, &display_address, &rep["facts"], None, &[], None, 3);
-    rep["cre"] = build_cre_report_section(&rep, None, true).data;
     rep["summary"] = summarize_report(&rep);
 
     let fb = build_deterministic_analyst_fallback(&rep);

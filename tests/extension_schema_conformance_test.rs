@@ -203,8 +203,8 @@ fn all_public_extensions_conform_to_proto_schema_and_roundtrip() {
     dirs.sort();
 
     assert!(
-        dirs.len() >= 40,
-        "expected >= 40 public extensions, found {}",
+        dirs.len() >= 35,
+        "expected >= 35 public extensions, found {}",
         dirs.len()
     );
 
@@ -237,12 +237,10 @@ fn all_public_extensions_conform_to_proto_schema_and_roundtrip() {
             "{} must be tier=basic",
             pkg.extension_id
         );
-        assert!(
-            matches!(
-                pkg.license_class_enum,
-                LicenseClass::PublicOpenData | LicenseClass::ByokCommercialApi
-            ),
-            "{} must be license_class=public_open_data or byok_commercial_api, got {:?}",
+        assert_eq!(
+            pkg.license_class_enum,
+            LicenseClass::PublicOpenData,
+            "{} must be license_class=public_open_data in OSS, got {:?}",
             pkg.extension_id,
             pkg.license_class_enum
         );

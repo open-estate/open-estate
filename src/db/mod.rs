@@ -53,8 +53,8 @@ pub use schema::{
     BuildQueueJobView, FactorCol, InstalledExtensionRow, ListingFactorsRow, ListingFullView,
     ListingPriceStatus, ListingRow, MatchFeedbackRow, MatchedSubscriptionCandidate,
     PartialHomeFactors, RecommendedAgentRow, SchoolMetricRow, SystemModuleRow, UserProfileRow,
-    LAZY_TABLE_NAMES, LISTING_FACTORS_COLS, MATCH_FEEDBACK_COLS, RAPID_TABLE_NAMES,
-    SCHOOL_METRICS_COLS, TABLE_NAMES, USER_PROFILES_COLS,
+    LAZY_TABLE_NAMES, LISTING_FACTORS_COLS, MATCH_FEEDBACK_COLS, SCHOOL_METRICS_COLS, TABLE_NAMES,
+    USER_PROFILES_COLS,
 };
 
 use crate::scoring::factors::HomeFactors;
@@ -85,7 +85,6 @@ use std::num::NonZeroU32;
 use std::path::Path;
 use std::pin::Pin;
 use std::str::FromStr;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::OnceCell;
@@ -93,7 +92,7 @@ use tokio::sync::OnceCell;
 #[derive(Clone, Debug)]
 pub enum DbBackend {
     Sqlite(SqlitePool),
-    MySql { pool: MySqlPool, is_heatwave: bool },
+    MySql { pool: MySqlPool },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -406,8 +405,6 @@ pub struct DbStore {
     pub l1_market_snapshots: Cache<String, Value>,
     l1_report_slugs: Cache<i64, String>,
     schema_ready: Arc<OnceCell<()>>,
-    enable_rapid: bool,
-    rapid_online: Arc<AtomicBool>,
 }
 
 impl std::fmt::Debug for DbStore {
@@ -416,8 +413,6 @@ impl std::fmt::Debug for DbStore {
             .field("provider", &self.provider)
             .field("dialect", &self.dialect())
             .field("driver", &self.driver_name())
-            .field("enable_rapid", &self.enable_rapid)
-            .field("rapid_online", &self.rapid_online.load(Ordering::Relaxed))
             .finish()
     }
 }
@@ -572,20 +567,15 @@ fn url_has_explicit_ssl_mode(url: &str) -> bool {
     })
 }
 
-/// Parses MySQL / OCI HeatWave connection options, honoring explicit `MYSQL_SSL_MODE=disabled`
-/// and URL `?ssl-mode=DISABLED` overrides even when `provider == "heatwave"` (required for OCI
-/// MySQL `26.10.0-u1-cloud`'s X.509 v1 cert under `tls-rustls`), while defaulting `heatwave`
-/// connections to `MySqlSslMode::Required` whenever neither is explicitly specified.
+/// Parses MySQL connection options, honoring explicit `MYSQL_SSL_MODE` and URL `?ssl-mode=` overrides.
 pub fn parse_mysql_connect_options(
     url: &str,
-    provider: &str,
+    _provider: &str,
     env: Option<&EnvConfig>,
 ) -> Result<MySqlConnectOptions> {
     let mut opts =
         MySqlConnectOptions::from_str(url).with_context(|| "Failed to parse MySQL connection URL")?;
 
-    let is_heatwave = provider.eq_ignore_ascii_case("heatwave");
-    let url_has_ssl = url_has_explicit_ssl_mode(url);
     let ssl_mode_env = env
         .and_then(|e| e.get("MYSQL_SSL_MODE"))
         .map(|s| s.trim().to_ascii_lowercase())
@@ -602,8 +592,13 @@ pub fn parse_mysql_connect_options(
             "verify_identity" => opts = opts.ssl_mode(MySqlSslMode::VerifyIdentity),
             _ => {}
         }
-    } else if is_heatwave && !url_has_ssl {
-        opts = opts.ssl_mode(MySqlSslMode::Required);
+    } else if !url_has_explicit_ssl_mode(url) {
+        let has_ca = env
+            .and_then(|e| e.get("MYSQL_SSL_CA"))
+            .is_some_and(|c| !c.trim().is_empty());
+        if has_ca || _provider.eq_ignore_ascii_case("heatwave") {
+            opts = opts.ssl_mode(MySqlSslMode::Required);
+        }
     }
 
     if let Some(ca) = env.and_then(|e| e.get("MYSQL_SSL_CA")) {
@@ -616,17 +611,6 @@ pub fn parse_mysql_connect_options(
     }
 
     Ok(opts)
-}
-
-fn parse_enable_rapid_flag(env: Option<&EnvConfig>) -> bool {
-    env.and_then(|e| e.get("OCI_HEATWAVE_ENABLE_RAPID"))
-        .map(|s| {
-            matches!(
-                s.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on"
-            )
-        })
-        .unwrap_or(false)
 }
 
 pub(crate) fn default_sqlite_path() -> String {
@@ -879,7 +863,7 @@ pub(crate) fn mysql_opt_f64(row: &MySqlRow, col: &str) -> Option<f64> {
     mysql_col_f64(row, col)
 }
 
-pub(crate) trait DbRowExt {
+pub trait DbRowExt {
     fn opt_str(&self, col: &str) -> Option<String>;
     fn opt_bytes(&self, col: &str) -> Option<Vec<u8>>;
     fn opt_i64(&self, col: &str) -> Option<i64>;
@@ -1168,8 +1152,6 @@ impl DbStore {
             l1_market_snapshots,
             l1_report_slugs,
             schema_ready: Arc::new(OnceCell::new()),
-            enable_rapid: false,
-            rapid_online: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -1178,8 +1160,6 @@ impl DbStore {
         provider: &str,
         env: Option<&EnvConfig>,
     ) -> Result<Self> {
-        let enable_rapid = parse_enable_rapid_flag(env);
-        let is_heatwave = provider.eq_ignore_ascii_case("heatwave") || enable_rapid;
         let opts = parse_mysql_connect_options(url, provider, env)?;
         let max_conns = env
             .and_then(|e| e.get("DB_MAX_CONNECTIONS"))
@@ -1195,24 +1175,32 @@ impl DbStore {
             .test_before_acquire(true)
             .connect_with(opts)
             .await
-            .context("Failed to connect MySQL / OCI HeatWave pool")?;
+            .context("Failed to connect MySQL pool")?;
 
         let (l1_reports, l1_llm, l1_market_snapshots, l1_report_slugs) = build_l1_caches();
         Ok(Self {
-            backend: DbBackend::MySql { pool, is_heatwave },
-            provider: if provider.eq_ignore_ascii_case("heatwave") {
-                "heatwave".to_string()
-            } else {
-                "mysql".to_string()
-            },
+            backend: DbBackend::MySql { pool },
+            provider: "mysql".to_string(),
             l1_reports,
             l1_llm,
             l1_market_snapshots,
             l1_report_slugs,
             schema_ready: Arc::new(OnceCell::new()),
-            enable_rapid,
-            rapid_online: Arc::new(AtomicBool::new(false)),
         })
+    }
+
+    pub fn mysql_pool(&self) -> Option<&sqlx::MySqlPool> {
+        match &self.backend {
+            DbBackend::MySql { pool } => Some(pool),
+            DbBackend::Sqlite(_) => None,
+        }
+    }
+
+    pub fn sqlite_pool(&self) -> Option<&sqlx::SqlitePool> {
+        match &self.backend {
+            DbBackend::Sqlite(pool) => Some(pool),
+            DbBackend::MySql { .. } => None,
+        }
     }
 
     pub fn dialect(&self) -> &'static str {
@@ -1225,62 +1213,7 @@ impl DbStore {
     pub fn driver_name(&self) -> &'static str {
         match self.backend {
             DbBackend::Sqlite(_) => "rust-sqlx-sqlite",
-            DbBackend::MySql {
-                is_heatwave: true, ..
-            } => "oci-heatwave",
-            DbBackend::MySql {
-                is_heatwave: false, ..
-            } => "rust-sqlx-mysql",
-        }
-    }
-
-    pub fn is_heatwave(&self) -> bool {
-        matches!(
-            self.backend,
-            DbBackend::MySql {
-                is_heatwave: true,
-                ..
-            }
-        )
-    }
-
-    pub fn is_rapid_online(&self) -> bool {
-        self.enable_rapid && self.rapid_online.load(Ordering::Relaxed)
-    }
-
-    /// Pool-safe per-query MySQL optimizer hint forcing HeatWave Rapid execution on analytical
-    /// queries (`compute_shop_facets_sql`, wide multi-ZIP scans) without mutating session state.
-    pub fn rapid_query_hint(&self) -> &'static str {
-        if self.dialect() == "mysql" && self.is_rapid_online() {
-            "/*+ SET_VAR(use_secondary_engine=FORCED) */ "
-        } else {
-            ""
-        }
-    }
-
-    /// Cost/scope-gated HeatWave Rapid optimizer hint for listing scans.
-    /// Forces Rapid ONLY when Rapid is online AND `(zip_count >= 5 || (zip_count == 0 && !has_exact_city))`.
-    /// Narrow `1–4 ZIP` or exact-city queries explicitly emit `use_secondary_engine=OFF` when Rapid is
-    /// online so MySQL keeps them on fast InnoDB B-trees (`~12–16 ms` instead of auto-offloading to 1-core Rapid).
-    pub fn rapid_query_hint_for_scan(&self, zip_count: usize, has_exact_city: bool) -> &'static str {
-        if self.dialect() == "mysql" && self.is_rapid_online() {
-            if zip_count >= 5 || (zip_count == 0 && !has_exact_city) {
-                "/*+ SET_VAR(use_secondary_engine=FORCED) */ "
-            } else {
-                "/*+ SET_VAR(use_secondary_engine=OFF) */ "
-            }
-        } else {
-            ""
-        }
-    }
-
-    /// Explicit InnoDB B-tree hint (`use_secondary_engine=OFF`) for PK/unique-key `IN (...)`
-    /// lookups and non-Rapid child table joins when Rapid is online (`""` otherwise).
-    pub fn innodb_pk_hint(&self) -> &'static str {
-        if self.dialect() == "mysql" && self.is_rapid_online() {
-            "/*+ SET_VAR(use_secondary_engine=OFF) */ "
-        } else {
-            ""
+            DbBackend::MySql { .. } => "rust-sqlx-mysql",
         }
     }
 
@@ -1289,7 +1222,7 @@ impl DbStore {
             DbBackend::Sqlite(pool) => {
                 sqlx::query("SELECT 1").execute(pool).await?;
             }
-            DbBackend::MySql { pool, .. } => {
+            DbBackend::MySql { pool } => {
                 sqlx::query("SELECT 1").execute(pool).await?;
             }
         }
@@ -1302,15 +1235,11 @@ impl DbStore {
             "provider": self.provider,
             "dialect": self.dialect(),
             "driver": self.driver_name(),
-            "heatwaveReady": true,
-            "rapidEnabled": self.enable_rapid,
-            "rapidOnline": self.is_rapid_online(),
             "schemaVersion": 3,
         })
     }
 
-    /// Bootstraps all 44 clean-slate tables + Phase-2 extension tables without loading Rapid (used before bulk `migrate_database`).
-    pub async fn ensure_schema_without_rapid(&self) -> Result<()> {
+    pub async fn ensure_schema_core(&self) -> Result<()> {
         match &self.backend {
             DbBackend::Sqlite(pool) => {
                 let mut conn = pool.acquire().await?;
@@ -1323,9 +1252,8 @@ impl DbStore {
                 }
                 metering_store::ensure_metering_schema_sqlite_conn(&mut *conn).await?;
                 shared_cache_store::ensure_shared_cache_schema_sqlite_conn(&mut *conn).await?;
-                crate::scheduler::store::ensure_scheduler_schema_sqlite_conn(&mut *conn).await?;
             }
-            DbBackend::MySql { pool, .. } => {
+            DbBackend::MySql { pool } => {
                 for stmt in mysql_ddl()
                     .iter()
                     .chain(lazy_mysql_ddl().iter())
@@ -1335,7 +1263,6 @@ impl DbStore {
                 }
                 metering_store::ensure_metering_schema_mysql_pool(pool).await?;
                 shared_cache_store::ensure_shared_cache_schema_mysql_pool(pool).await?;
-                crate::scheduler::store::ensure_scheduler_schema_mysql_pool(pool).await?;
             }
         }
         Ok(())
@@ -1344,162 +1271,29 @@ impl DbStore {
     pub async fn ensure_schema(&self) -> Result<()> {
         self.schema_ready
             .get_or_try_init(|| async {
-                self.ensure_schema_without_rapid().await?;
-                if self.enable_rapid {
-                    self.ensure_rapid_tables_loaded().await?;
-                }
+                self.ensure_schema_core().await?;
                 Ok::<(), anyhow::Error>(())
             })
             .await?;
         Ok(())
     }
 
-    async fn check_mysql_rapid_service_online(pool: &MySqlPool) -> Result<bool> {
-        let row = sqlx::query(
-            "SELECT VARIABLE_VALUE AS val FROM performance_schema.global_status WHERE VARIABLE_NAME = 'rapid_service_status'",
-        )
-        .fetch_optional(pool)
-        .await;
-        match row {
-            Ok(Some(r)) => Ok(mysql_opt_str(&r, "val")
-                .map(|v| v.eq_ignore_ascii_case("ONLINE"))
-                .unwrap_or(false)),
-            Ok(None) | Err(_) => Ok(false),
-        }
-    }
-
-    /// Idempotently sets `SECONDARY_ENGINE = RAPID` and `SECONDARY_LOAD` on all 8 analytical tables
-    /// when `OCI_HEATWAVE_ENABLE_RAPID` is active and `rapid_service_status == 'ONLINE'`.
-    pub async fn ensure_rapid_tables_loaded(&self) -> Result<bool> {
-        let DbBackend::MySql { ref pool, .. } = self.backend else {
-            return Ok(false);
-        };
-        if !self.enable_rapid {
-            self.rapid_online.store(false, Ordering::Relaxed);
-            return Ok(false);
-        }
-        if !Self::check_mysql_rapid_service_online(pool).await? {
-            self.rapid_online.store(false, Ordering::Relaxed);
-            return Ok(false);
-        }
-
-        let info_rows = sqlx::query(
-            "SELECT TABLE_NAME AS tbl_name, CREATE_OPTIONS AS create_opts
-             FROM INFORMATION_SCHEMA.TABLES
-             WHERE TABLE_SCHEMA = DATABASE()",
-        )
-        .fetch_all(pool)
-        .await
-        .context("Failed to inspect INFORMATION_SCHEMA.TABLES for Rapid setup")?;
-        let mut create_opts_map: HashMap<String, String> = HashMap::with_capacity(info_rows.len());
-        for r in &info_rows {
-            if let Some(t) = mysql_opt_str(r, "tbl_name") {
-                create_opts_map.insert(
-                    t.to_ascii_lowercase(),
-                    mysql_opt_str(r, "create_opts").unwrap_or_default(),
-                );
-            }
-        }
-
-        let rpd_rows = sqlx::query(
-            "SELECT ti.TABLE_NAME AS tbl_name, t.LOAD_STATUS AS load_status
-             FROM performance_schema.rpd_tables t
-             JOIN performance_schema.rpd_table_id ti ON t.ID = ti.ID
-             WHERE ti.SCHEMA_NAME = DATABASE()",
-        )
-        .fetch_all(pool)
-        .await
-        .context("Failed to inspect performance_schema.rpd_tables for Rapid load status")?;
-        let mut load_status_map: HashMap<String, String> = HashMap::with_capacity(rpd_rows.len());
-        for r in &rpd_rows {
-            if let (Some(t), Some(st)) = (mysql_opt_str(r, "tbl_name"), mysql_opt_str(r, "load_status"))
-            {
-                load_status_map.insert(t.to_ascii_lowercase(), st);
-            }
-        }
-
-        for &raw_tbl in RAPID_TABLE_NAMES {
-            let tbl = assert_safe_ident(raw_tbl);
-            let opts_up = create_opts_map
-                .get(tbl)
-                .map(|s| s.to_ascii_uppercase())
-                .unwrap_or_default();
-            if !opts_up.contains("SECONDARY_ENGINE=\"RAPID\"")
-                && !opts_up.contains("SECONDARY_ENGINE=RAPID")
-            {
-                let stmt = format!("ALTER TABLE {tbl} SECONDARY_ENGINE = RAPID");
-                sqlx::query(&stmt)
-                    .execute(pool)
-                    .await
-                    .with_context(|| format!("Failed to set SECONDARY_ENGINE = RAPID on {tbl}"))?;
-            }
-
-            let cur_status = load_status_map.get(tbl).map(String::as_str);
-            if cur_status != Some("AVAIL_RPDGSTABSTATE") {
-                let stmt = format!("ALTER TABLE {tbl} SECONDARY_LOAD");
-                sqlx::query(&stmt)
-                    .execute(pool)
-                    .await
-                    .with_context(|| format!("Failed to SECONDARY_LOAD {tbl} into HeatWave Rapid"))?;
-            }
-        }
-
-        self.rapid_online.store(true, Ordering::Relaxed);
-        Ok(true)
-    }
-
-    /// Unloads loaded Rapid tables prior to bulk `migrate_database` ingestion so batch upserts
-    /// avoid per-row change-propagation overhead.
-    pub async fn unload_rapid_tables_if_loaded(&self) -> Result<()> {
-        let DbBackend::MySql { ref pool, .. } = self.backend else {
-            return Ok(());
-        };
-        if !self.enable_rapid {
-            return Ok(());
-        }
-        self.rapid_online.store(false, Ordering::Relaxed);
-        if !Self::check_mysql_rapid_service_online(pool).await? {
-            return Ok(());
-        }
-        let rpd_rows = sqlx::query(
-            "SELECT ti.TABLE_NAME AS tbl_name, t.LOAD_STATUS AS load_status
-             FROM performance_schema.rpd_tables t
-             JOIN performance_schema.rpd_table_id ti ON t.ID = ti.ID
-             WHERE ti.SCHEMA_NAME = DATABASE()",
-        )
-        .fetch_all(pool)
-        .await?;
-        let mut loaded: HashSet<String> = HashSet::new();
-        for r in &rpd_rows {
-            if mysql_opt_str(r, "load_status").as_deref() == Some("AVAIL_RPDGSTABSTATE") {
-                if let Some(t) = mysql_opt_str(r, "tbl_name") {
-                    loaded.insert(t.to_ascii_lowercase());
-                }
-            }
-        }
-        for &raw_tbl in RAPID_TABLE_NAMES {
-            let tbl = assert_safe_ident(raw_tbl);
-            if loaded.contains(tbl) {
-                let stmt = format!("ALTER TABLE {tbl} SECONDARY_UNLOAD");
-                sqlx::query(&stmt)
-                    .execute(pool)
-                    .await
-                    .with_context(|| format!("Failed to SECONDARY_UNLOAD {tbl}"))?;
-            }
-        }
-        Ok(())
-    }
-
-    /// Runs `ANALYZE TABLE` on all 8 analytical tables after bulk migration/seeding and reloads Rapid.
-    pub async fn analyze_and_reload_rapid_after_bulk(&self) -> Result<()> {
-        if let DbBackend::MySql { ref pool, .. } = self.backend {
-            for &raw_tbl in RAPID_TABLE_NAMES {
+    /// Runs `ANALYZE TABLE` on core listing tables after bulk MySQL migration/seeding.
+    pub async fn analyze_mysql_tables_after_bulk(&self) -> Result<()> {
+        if let DbBackend::MySql { ref pool } = self.backend {
+            for raw_tbl in [
+                "listings",
+                "listing_factors",
+                "listing_utilities",
+                "listing_hazards",
+                "listing_schools",
+                "listing_features",
+                "listing_tags",
+                "school_metrics",
+            ] {
                 let tbl = assert_safe_ident(raw_tbl);
                 let stmt = format!("ANALYZE TABLE {tbl}");
                 let _ = sqlx::query(&stmt).fetch_all(pool).await?;
-            }
-            if self.enable_rapid {
-                self.ensure_rapid_tables_loaded().await?;
             }
         }
         Ok(())
@@ -1550,7 +1344,7 @@ impl DbStore {
         self.execute_params_raw(&sql, &params).await
     }
 
-    pub(crate) async fn fetch_all_mapped_raw<T, F>(
+    pub async fn fetch_all_mapped_raw<T, F>(
         &self,
         sql: &str,
         params: &[SqlParam],
@@ -1576,7 +1370,7 @@ impl DbStore {
         }
     }
 
-    pub(crate) async fn fetch_all_mapped<T, F>(
+    pub async fn fetch_all_mapped<T, F>(
         &self,
         sql: &str,
         params: &[SqlParam],
@@ -1590,7 +1384,7 @@ impl DbStore {
         self.fetch_all_mapped_raw(eff_sql, params, map_fn).await
     }
 
-    pub(crate) async fn fetch_optional_mapped<T, F>(
+    pub async fn fetch_optional_mapped<T, F>(
         &self,
         sql: &str,
         params: &[SqlParam],
@@ -1612,7 +1406,7 @@ impl DbStore {
         }
     }
 
-    pub(crate) async fn fetch_scalar_i64(
+    pub async fn fetch_scalar_i64(
         &self,
         sql: &str,
         params: &[SqlParam],
@@ -4444,9 +4238,7 @@ impl DbStore {
             return Ok(None);
         }
         self.ensure_schema().await?;
-        let hint = self.innodb_pk_hint();
-        let sql = format!(
-            "SELECT {hint}l.listing_sk, l.status, l.days_on_market,
+        let sql = "SELECT l.listing_sk, l.status, l.days_on_market,
                     le.listing_sk AS le_sk, le.mls_number, le.source_platform, le.source_label, le.listing_url, le.photo_url,
                     lps.platform AS lps_platform, lps.likes_count AS lps_likes_count, lps.views_count AS lps_views_count,
                     lps.is_hot_home AS lps_is_hot_home, lps.hot_tag AS lps_hot_tag, lps.portal_url AS lps_portal_url, lps.updated_ts AS lps_updated_ts
@@ -4457,11 +4249,10 @@ impl DbStore {
                  (SELECT listing_sk FROM listings WHERE external_id = ? LIMIT 1),
                  (SELECT listing_sk FROM listings WHERE report_slug = ? LIMIT 1)
              )
-             ORDER BY lps.platform ASC"
-        );
+             ORDER BY lps.platform ASC";
         let rows = self
             .fetch_all_mapped_raw(
-                &sql,
+                sql,
                 &[SqlParam::from(clean), SqlParam::from(clean)],
                 |r| {
                     let sk = r.opt_i64("listing_sk").unwrap_or(0);
@@ -4788,11 +4579,10 @@ impl DbStore {
             return Ok(HashMap::new());
         }
         let cols = LISTING_FACTORS_COLS.join(", ");
-        let hint = self.innodb_pk_hint();
         let futs = valid.chunks(500).map(|chunk| {
             let placeholders = vec!["?"; chunk.len()].join(", ");
             let sql = format!(
-                "SELECT {hint}{cols} FROM listing_factors WHERE listing_sk IN ({placeholders})"
+                "SELECT {cols} FROM listing_factors WHERE listing_sk IN ({placeholders})"
             );
             let params: Vec<SqlParam> = chunk.iter().map(|&k| SqlParam::I64(k)).collect();
             async move {
@@ -5064,36 +4854,12 @@ impl DbStore {
         Ok(out)
     }
 
-    // ---------------------------------------------------------------- Narrow Search, Hydration & Rapid Facets (`Q1` & `Q2`)
+    // ---------------------------------------------------------------- Narrow Search, Hydration & Facets (`Q1` & `Q2`)
     pub async fn search_listing_cores(
         &self,
         sql: &str,
         params: &[SqlParam],
     ) -> Result<Vec<ListingCoreProto>> {
-        if self.dialect() == "mysql"
-            && self.is_rapid_online()
-            && !sql.contains("use_secondary_engine")
-        {
-            let trimmed = sql.trim_start();
-            if trimmed
-                .get(..7)
-                .map(|p| p.eq_ignore_ascii_case("SELECT "))
-                .unwrap_or(false)
-                && (sql.contains("listing_sk IN")
-                    || sql.contains("zip =")
-                    || sql.contains("report_slug =")
-                    || sql.contains("external_id ="))
-            {
-                let hinted = format!(
-                    "SELECT {} {}",
-                    self.innodb_pk_hint(),
-                    &trimmed[7..]
-                );
-                return self
-                    .fetch_all_mapped_raw(&hinted, params, decode_listing_core_row)
-                    .await;
-            }
-        }
         self.fetch_all_mapped_raw(sql, params, decode_listing_core_row)
             .await
     }
@@ -5116,7 +4882,6 @@ impl DbStore {
             .map(|c| c.listing_sk)
             .filter(|&k| seen.insert(k))
             .collect();
-        let hint = self.innodb_pk_hint();
 
         let mut sch_map: HashMap<i64, ListingSchoolsProto> = HashMap::with_capacity(sks.len());
         let mut utl_map: HashMap<i64, ListingUtilitiesProto> = HashMap::with_capacity(sks.len());
@@ -5131,7 +4896,7 @@ impl DbStore {
             let params: Vec<SqlParam> = chunk.iter().map(|&k| SqlParam::I64(k)).collect();
 
             let join_sql = format!(
-                "SELECT {hint}l.listing_sk AS base_sk,
+                "SELECT l.listing_sk AS base_sk,
                         ls.listing_sk AS ls_sk, ls.school_score AS ls_school_score, ls.school_grade AS ls_school_grade,
                         ls.elem_name AS ls_elem_name, ls.elem_rating AS ls_elem_rating,
                         ls.mid_name AS ls_mid_name, ls.mid_rating AS ls_mid_rating,
@@ -5171,7 +4936,7 @@ impl DbStore {
                  WHERE l.listing_sk IN ({placeholders})"
             );
             let tag_sql = format!(
-                "SELECT {hint}listing_sk, tag_code FROM listing_tags WHERE listing_sk IN ({placeholders}) ORDER BY tag_code ASC"
+                "SELECT listing_sk, tag_code FROM listing_tags WHERE listing_sk IN ({placeholders}) ORDER BY tag_code ASC"
             );
 
             let (joined_rows, tag_rows) = tokio::try_join!(
@@ -5317,7 +5082,7 @@ impl DbStore {
         f: &crate::search::matcher::SearchFilters,
     ) -> Result<Value> {
         self.ensure_schema().await?;
-        let hint = self.rapid_query_hint_for_scan(0, false);
+        let hint = "";
 
         let status_codes: Vec<i64> = {
             let raw: Vec<i64> = f
@@ -6832,12 +6597,9 @@ impl DbStore {
     }
 
     pub async fn count_listings_by_status_for_zip(&self, zip: &str) -> Result<(i64, i64)> {
-        let hint = self.rapid_query_hint_for_scan(1, false);
-        let sql = format!(
-            "SELECT {hint}status, COUNT(*) AS cnt FROM listings WHERE zip = ? GROUP BY status"
-        );
+        let sql = "SELECT status, COUNT(*) AS cnt FROM listings WHERE zip = ? GROUP BY status";
         let pairs: Vec<(i64, i64)> = self
-            .fetch_all_mapped_raw(&sql, &[SqlParam::from(zip)], |r| {
+            .fetch_all_mapped_raw(sql, &[SqlParam::from(zip)], |r| {
                 (
                     r.opt_i64("status").unwrap_or(0),
                     r.opt_i64("cnt").unwrap_or(0),
@@ -6857,10 +6619,9 @@ impl DbStore {
     }
 
     pub async fn count_listings_global_totals(&self) -> Result<(i64, i64, i64)> {
-        let hint = self.rapid_query_hint_for_scan(0, false);
-        let sql = format!("SELECT {hint}status, COUNT(*) AS cnt FROM listings GROUP BY status");
+        let sql = "SELECT status, COUNT(*) AS cnt FROM listings GROUP BY status";
         let pairs: Vec<(i64, i64)> = self
-            .fetch_all_mapped_raw(&sql, &[], |r| {
+            .fetch_all_mapped_raw(sql, &[], |r| {
                 (
                     r.opt_i64("status").unwrap_or(0),
                     r.opt_i64("cnt").unwrap_or(0),
@@ -12785,7 +12546,6 @@ mod tests {
             .count();
         assert_eq!(sqlite_table_count, TABLE_NAMES.len());
         assert_eq!(mysql_table_count, TABLE_NAMES.len());
-        assert_eq!(RAPID_TABLE_NAMES.len(), 8);
 
         for stmt in mysql_ddl() {
             let up = stmt.to_ascii_uppercase();
@@ -12802,23 +12562,10 @@ mod tests {
                 "MySQL DDL must use utf8mb4_0900_ai_ci: {stmt}"
             );
         }
-
-        for &rapid_tbl in RAPID_TABLE_NAMES {
-            let needle = format!("CREATE TABLE IF NOT EXISTS {rapid_tbl} (");
-            let ddl = mysql_ddl()
-                .iter()
-                .find(|s| s.contains(&needle))
-                .unwrap_or_else(|| panic!("Missing MySQL DDL for Rapid table {rapid_tbl}"));
-            let up = ddl.to_ascii_uppercase();
-            assert!(
-                !up.contains(" TEXT") && !up.contains("BLOB") && !up.contains("JSON"),
-                "HeatWave Rapid analytical table {rapid_tbl} must contain ZERO TEXT/BLOB/JSON columns: {ddl}"
-            );
-        }
     }
 
     #[test]
-    fn test_parse_mysql_connect_options_honors_explicit_ssl_disabled_on_heatwave() {
+    fn test_parse_mysql_connect_options_honors_explicit_ssl_disabled() {
         let url = "mysql://user:pass@127.0.0.1:3306/openestate";
         let env_from = |pairs: &[(&str, &str)]| {
             EnvConfig::from_map(
@@ -12829,44 +12576,21 @@ mod tests {
             )
         };
 
-        // 1. Default `heatwave` with no env or URL override -> Required
-        let env_default = env_from(&[]);
-        let opts_req = parse_mysql_connect_options(url, "heatwave", Some(&env_default)).unwrap();
-        assert_eq!(
-            format!("{:?}", opts_req.get_ssl_mode()),
-            format!("{:?}", MySqlSslMode::Required)
-        );
-
-        // 2. Explicit `MYSQL_SSL_MODE=disabled` on `heatwave` -> Disabled (critical for OCI X.509 v1 cert)
         let env_disabled = env_from(&[("MYSQL_SSL_MODE", "disabled")]);
-        let opts_dis = parse_mysql_connect_options(url, "heatwave", Some(&env_disabled)).unwrap();
+        let opts_dis = parse_mysql_connect_options(url, "mysql", Some(&env_disabled)).unwrap();
         assert_eq!(
             format!("{:?}", opts_dis.get_ssl_mode()),
             format!("{:?}", MySqlSslMode::Disabled)
         );
 
-        // 3. Explicit URL `?ssl-mode=DISABLED` on `heatwave` -> Disabled
+        let env_default = env_from(&[]);
         let url_dis = "mysql://user:pass@127.0.0.1:3306/openestate?ssl-mode=DISABLED";
         let opts_url_dis =
-            parse_mysql_connect_options(url_dis, "heatwave", Some(&env_default)).unwrap();
+            parse_mysql_connect_options(url_dis, "mysql", Some(&env_default)).unwrap();
         assert_eq!(
             format!("{:?}", opts_url_dis.get_ssl_mode()),
             format!("{:?}", MySqlSslMode::Disabled)
         );
-
-        // 4. `OCI_HEATWAVE_ENABLE_RAPID` accepts both `"1"` and `"true"`
-        assert!(parse_enable_rapid_flag(Some(&env_from(&[(
-            "OCI_HEATWAVE_ENABLE_RAPID",
-            "1"
-        )]))));
-        assert!(parse_enable_rapid_flag(Some(&env_from(&[(
-            "OCI_HEATWAVE_ENABLE_RAPID",
-            "true"
-        )]))));
-        assert!(!parse_enable_rapid_flag(Some(&env_from(&[(
-            "OCI_HEATWAVE_ENABLE_RAPID",
-            "0"
-        )]))));
     }
 
     #[test]
@@ -12930,13 +12654,7 @@ mod tests {
             );
         }
 
-        // 2. Verify `rapid_query_hint_for_scan` never emits hints on SQLite
-        assert_eq!(db.rapid_query_hint_for_scan(0, false), "");
-        assert_eq!(db.rapid_query_hint_for_scan(1, false), "");
-        assert_eq!(db.rapid_query_hint_for_scan(5, false), "");
-        assert_eq!(db.innodb_pk_hint(), "");
-
-        // 3. Verify `put_report_section` invalidates L1 via `l1_report_slugs` & updates totals/mask
+        // 2. Verify `put_report_section` invalidates L1 via `l1_report_slugs` & updates totals/mask
         let report_val = json!({
             "meta": { "displayAddress": "700 Synthpolish Ln, San Jose, CA 95118", "generatedAt": "2026-04-10T12:00:00Z" },
             "geo": { "lat": 37.2512, "lon": -121.8901, "zip": "95118", "city": "San Jose", "state": "CA" },
@@ -13175,385 +12893,6 @@ mod tests {
         let roundtrip = db.get_listing_by_id(&row.id).await.unwrap().unwrap();
         assert_eq!(roundtrip.address, row.address);
         assert_eq!(roundtrip.electric_carrier, row.electric_carrier);
-    }
-
-    #[tokio::test]
-    async fn test_live_oci_heatwave_rapid_q0_q6_and_migration_when_configured() {
-        use futures::FutureExt;
-
-        let Ok(raw_admin_url) = std::env::var("HEATWAVE_SMOKE_ADMIN_URL") else {
-            return;
-        };
-        let trimmed = raw_admin_url.trim();
-        if trimmed.is_empty() {
-            return;
-        }
-
-        let ssl_env = EnvConfig::from_map(HashMap::from([(
-            "MYSQL_SSL_MODE".to_string(),
-            "disabled".to_string(),
-        )]));
-        let admin_opts = parse_mysql_connect_options(trimmed, "heatwave", Some(&ssl_env))
-            .expect("parse admin mysql options")
-            .database("information_schema");
-        let admin_pool = sqlx::mysql::MySqlPoolOptions::new()
-            .max_connections(2)
-            .connect_with(admin_opts)
-            .await
-            .expect("connect admin pool to OCI MySQL");
-
-        sqlx::query("DROP DATABASE IF EXISTS openestate_protodb_smoke")
-            .execute(&admin_pool)
-            .await
-            .expect("drop stale openestate_protodb_smoke");
-        sqlx::query(
-            "CREATE DATABASE openestate_protodb_smoke CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci",
-        )
-        .execute(&admin_pool)
-        .await
-        .expect("create openestate_protodb_smoke");
-
-        // Build URL targeting `openestate_protodb_smoke` without touching `openestate` or `openestate`
-        let smoke_url = {
-            let (base_part, query_part) = match trimmed.split_once('?') {
-                Some((b, q)) => (b, Some(q)),
-                None => (trimmed, None),
-            };
-            let scheme_end = base_part.find("://").map(|i| i + 3).unwrap_or(0);
-            let host_end = base_part[scheme_end..]
-                .find('/')
-                .map(|i| scheme_end + i)
-                .unwrap_or(base_part.len());
-            let prefix = &base_part[..host_end];
-            match query_part {
-                Some(q) => format!("{prefix}/openestate_protodb_smoke?{q}"),
-                None => format!("{prefix}/openestate_protodb_smoke"),
-            }
-        };
-
-        let outcome = std::panic::AssertUnwindSafe(async {
-            // 1. Populate a SQLite source DB with rich v3 data across listings, factors, 27-section reports,
-            //    shared zip_market_snapshots, subscriptions, llm_cache, client_doc_reviews, and user_profiles.
-            let src = DbStore::connect_url(":memory:", Some("sqlite"))
-                .await
-                .unwrap();
-            src.ensure_schema().await.unwrap();
-            let mut row = ListingRow {
-                id: "hw-smoke-95118-1".to_string(),
-                address: "500 Synthrapid Way, San Jose, CA 95118".to_string(),
-                street: Some("500 Synthrapid Way".to_string()),
-                city: Some("San Jose".to_string()),
-                state: Some("CA".to_string()),
-                zip: "95118".to_string(),
-                lat: Some(37.2520),
-                lon: Some(-121.8890),
-                status: "for_sale".to_string(),
-                price: Some(1_450_000),
-                list_price: Some(1_450_000),
-                sold_price: None,
-                estimated_value: Some(1_490_000),
-                price_per_sqft: Some(690),
-                beds: Some(4.0),
-                baths: Some(3.0),
-                sqft: Some(2_100),
-                lot_sqft: Some(6_800),
-                year_built: Some(2004),
-                stories: Some(2.0),
-                property_type: Some("Single-Family Detached".to_string()),
-                hoa_monthly: Some(0),
-                days_on_market: Some(5),
-                listed_date: Some("2026-04-01".to_string()),
-                sold_date: None,
-                school_score: Some(8.8),
-                school_grade: Some("A".to_string()),
-                school_elem_name: Some("Almaden Elementary".to_string()),
-                school_elem_rating: Some(8.5),
-                school_mid_name: None,
-                school_mid_rating: None,
-                school_high_name: None,
-                school_high_rating: None,
-                school_district: Some("San Jose Unified".to_string()),
-                walk_score: Some(71.0),
-                flood_zone: Some("X".to_string()),
-                wildfire_zone: Some("Moderate".to_string()),
-                overall_score: Some(87.5),
-                verdict: Some("HeatWaveRapidVerified".to_string()),
-                mls_number: Some("ML820500".to_string()),
-                source: Some("rentcast".to_string()),
-                url: None,
-                photo_url: None,
-                report_slug: Some("500-heatwave-rapid-way-san-jose-ca-95118".to_string()),
-                features_text: Some("pool solar owned EV charger cul-de-sac".to_string()),
-                raw_json: None,
-                electric_carrier: Some("PG&E".to_string()),
-                electric_utility_type: Some("iou".to_string()),
-                electric_rate_kwh: Some(0.38),
-                gas_carrier: Some("PG&E".to_string()),
-                gas_rate_therm: Some(2.10),
-                water_carrier: Some("San Jose Water".to_string()),
-                water_source_type: Some("municipal".to_string()),
-                sewer_type: Some("municipal".to_string()),
-                est_monthly_utilities: Some(290),
-                internet_tier: Some("fiber_multi_gig".to_string()),
-                fiber_available: Some(1),
-                high_speed_internet: Some(1),
-                internet_carriers: Some("AT&T Fiber, Sonic".to_string()),
-                fiber_carriers: Some("Sonic 10G".to_string()),
-                max_download_mbps: Some(2_000),
-                max_upload_mbps: Some(2_000),
-                all_in_monthly: Some(8_100),
-                property_tax_rate: Some(0.0122),
-                has_special_tax: Some(0),
-                has_solar: Some(1),
-                has_ev_charger: Some(1),
-                has_heat_pump: Some(0),
-                has_adu: Some(1),
-                adu_feasible: Some(1),
-                has_pool: Some(1),
-                garage_spaces: Some(2.0),
-                architectural_style: Some("Contemporary".to_string()),
-                safety_score: Some(85.0),
-                has_hardwood_floors: Some(1),
-                has_updated_kitchen: Some(1),
-                has_remodeled: Some(1),
-                quiet_street: Some(1),
-                noise_max_db: Some(45.0),
-                seismic_pga: Some(0.41),
-                tags_json: Some(r#"["pool","solar","adu","fiber"]"#.to_string()),
-                first_seen_at: "2026-04-01T00:00:00Z".to_string(),
-                last_seen_at: "2026-04-12T00:00:00Z".to_string(),
-                status_changed_at: "2026-04-01T00:00:00Z".to_string(),
-                price_changed_at: None,
-            };
-            let sk = src.upsert_listing_vertical_row(&row).await.unwrap();
-            let hf = HomeFactors::from_listing_row(&row);
-            let (hf_proto, prov_proto) = proto::home_factors_to_proto(
-                sk,
-                &row.id,
-                "listing",
-                86.5,
-                row.walk_score,
-                row.school_score,
-                Some("Contemporary"),
-                row.wildfire_zone.as_deref(),
-                Some("95118"),
-                row.lat,
-                row.lon,
-                1_775_000_000,
-                1_775_000_000,
-                &hf,
-            );
-            src.upsert_home_factors_proto_batch(&[(hf_proto, Some(prov_proto))])
-                .await
-                .unwrap();
-
-            let big_series: Vec<Value> = (0..120)
-                .map(|i| json!({"month": format!("2020-{:02}", (i % 12) + 1), "zhvi": 1_200_000 + i * 2500}))
-                .collect();
-            let report_val = json!({
-                "meta": { "displayAddress": "500 Synthrapid Way, San Jose, CA 95118", "generatedAt": "2026-04-12T00:00:00Z" },
-                "geo": { "lat": 37.2520, "lon": -121.8890, "zip": "95118", "city": "San Jose", "state": "CA" },
-                "summary": { "scores": { "overall": 87.5 }, "verdict": "HeatWaveRapidVerified" },
-                "facts": { "propertyType": "Single-Family Detached", "beds": 4, "baths": 3.0, "sqft": 2100, "listPrice": 1450000 },
-                "modules": {
-                    "market": { "data": { "zhvi": 1520000, "zori": 4400, "series": big_series } },
-                    "valuation": { "data": { "estimate": { "value": 1490000 } } }
-                }
-            });
-            src.put_cached_report("500-heatwave-rapid-way-san-jose-ca-95118", &report_val, None)
-                .await
-                .unwrap();
-            src.put_llm_cache("hw:llm:key", &json!({"ok": true}), 3600)
-                .await
-                .unwrap();
-            src.put_client_doc_review(
-                "inspect",
-                "500-heatwave-rapid-way-san-jose-ca-95118",
-                "browser-1",
-                &json!({"items": 2}),
-                3600,
-            )
-            .await
-            .unwrap();
-            let sub_filters = crate::search::SearchFilters {
-                on_topic: true,
-                zips: vec!["95118".to_string()],
-                max_price: Some(1_600_000),
-                min_beds: Some(4.0),
-                has_pool: true,
-                ..Default::default()
-            };
-            let sub_row = SubscriptionRow {
-                id: "sub-hw-smoke-1".to_string(),
-                email: "buyer@open-estate.local".to_string(),
-                name: Some("Buyer".to_string()),
-                zips_json: r#"["95118"]"#.to_string(),
-                cities_json: Some(r#"["San Jose"]"#.to_string()),
-                requirements_text: "4 bed pool solar in 95118 under 1.6M".to_string(),
-                parsed_filters_json: serde_json::to_string(&sub_filters).unwrap(),
-                notify_on_new: 1,
-                notify_on_sold: 0,
-                active: 1,
-                unsubscribe_token: "tok-hw-smoke-1".to_string(),
-                last_notified_at: None,
-                match_count: 0,
-                filter_schema_version: 2,
-                plan_tier: Some("free".to_string()),
-                filters_refreshed_at: None,
-                frequency: "daily_digest".to_string(),
-                digest_pending_json: None,
-                created_at: "2026-04-12T00:00:00Z".to_string(),
-                updated_at: "2026-04-12T00:00:00Z".to_string(),
-            };
-            src.upsert_subscription_normalized(&sub_row).await.unwrap();
-
-            // 2. Connect to live OCI MySQL 26.10.0-u1-cloud + HeatWave.Free with Rapid enabled!
-            let hw_env = EnvConfig::from_map(HashMap::from([
-                ("DATABASE_URL".to_string(), smoke_url.clone()),
-                ("DATABASE_PROVIDER".to_string(), "heatwave".to_string()),
-                ("MYSQL_SSL_MODE".to_string(), "disabled".to_string()),
-                ("OCI_HEATWAVE_ENABLE_RAPID".to_string(), "1".to_string()),
-            ]));
-            let hw = DbStore::connect(&hw_env)
-                .await
-                .expect("connect live HeatWave");
-            assert_eq!(hw.dialect(), "mysql");
-            hw.ensure_schema()
-                .await
-                .expect("initial ensure_schema + Rapid SECONDARY_LOAD on live HeatWave");
-            assert!(
-                hw.is_rapid_online(),
-                "HeatWave Rapid must be online and all 8 analytical tables loaded"
-            );
-
-            // Second `ensure_rapid_tables_loaded()` must be 100% idempotent when Rapid tables are already AVAIL_RPDGSTABSTATE
-            assert!(
-                hw.ensure_rapid_tables_loaded()
-                    .await
-                    .expect("idempotent second ensure_rapid_tables_loaded on HeatWave Rapid")
-            );
-            assert!(hw.is_rapid_online());
-
-            // 3. Stream-migrate SQLite -> live HeatWave (exercises Rapid unload -> bulk insert -> ANALYZE -> SECONDARY_LOAD)
-            let mig_report = migrate::migrate_database_with_batch(&src, &hw, 100)
-                .await
-                .expect("migrate_database_with_batch SQLite -> live HeatWave Rapid");
-            assert!(mig_report.total_rows >= 8);
-            assert!(
-                hw.is_rapid_online(),
-                "Rapid must be reloaded after bulk migration"
-            );
-
-            // 4. Verify HeatWave Rapid `/*+ SET_VAR(use_secondary_engine=FORCED) */` + DIV/MOD bitmask pushdown!
-            let facet_filters = crate::search::SearchFilters {
-                on_topic: true,
-                zips: vec!["95118".to_string()],
-                has_pool: true,
-                ..Default::default()
-            };
-            let facets = hw
-                .compute_shop_facets_sql(&facet_filters)
-                .await
-                .expect("compute_shop_facets_sql on HeatWave Rapid");
-            assert_eq!(
-                facets.pointer("/hardware/pool").and_then(Value::as_i64),
-                Some(1)
-            );
-            assert_eq!(
-                facets.pointer("/hardware/solar").and_then(Value::as_i64),
-                Some(1)
-            );
-            assert_eq!(
-                facets.pointer("/hardware/hasAdu").and_then(Value::as_i64),
-                Some(1)
-            );
-
-            // Also verify `sql_bitmask_all_set_expr` (MySQL DIV/MOD bit test without `&`!) executes cleanly on MySQL + Rapid!
-            let (req_bits, _) = proto::build_search_filter_tag_masks(
-                true,  // fiber_only
-                false, // high_speed_internet_only
-                false, // municipal_electric_only
-                false, // municipal_water_only
-                false, // municipal_sewer_only
-                true,  // has_solar
-                false, // has_ev_charger
-                false, // has_heat_pump
-                true,  // has_adu
-                false, // adu_feasible
-                true,  // has_pool
-                false, // exclude_special_tax
-                &[],
-            );
-            let bit_pred = sql_bitmask_all_set_expr("mysql", "l.tag_bits", req_bits);
-            assert!(!bit_pred.contains('&'));
-            let rapid_sql = format!(
-                "SELECT {} l.* FROM listings l WHERE l.zip = ? AND ({bit_pred})",
-                hw.rapid_query_hint()
-            );
-            let cores = hw
-                .search_listing_cores(&rapid_sql, &[SqlParam::from("95118")])
-                .await
-                .expect("search_listing_cores with Rapid hint + DIV/MOD bitmask on HeatWave");
-            assert_eq!(cores.len(), 1);
-            let cards = hw.hydrate_listing_cards(&cores).await.unwrap();
-            assert_eq!(cards.len(), 1);
-            assert_eq!(
-                cards[0]
-                    .utilities
-                    .as_ref()
-                    .and_then(|u| u.electric_carrier.as_deref()),
-                Some("PG&E")
-            );
-
-            // 5. Verify 27-section report single-RTT JOIN + BINARY(32) zip_market_snapshots/caches + Q4 subscription pushdown on MySQL
-            let hw_rpt = hw
-                .get_cached_report("500-heatwave-rapid-way-san-jose-ca-95118")
-                .await
-                .unwrap()
-                .expect("migrated report on HeatWave");
-            assert_eq!(
-                hw_rpt.report.pointer("/summary/verdict").and_then(Value::as_str),
-                Some("HeatWaveRapidVerified")
-            );
-            assert_eq!(
-                hw_rpt
-                    .report
-                    .pointer("/modules/market/data/series")
-                    .and_then(Value::as_array)
-                    .map(Vec::len),
-                Some(120)
-            );
-            assert_eq!(
-                hw.get_llm_cache("hw:llm:key").await.unwrap(),
-                Some(json!({"ok": true}))
-            );
-
-            let matched = hw
-                .match_subscriptions_for_events(&[crate::search::sync::ListingChangeEvent {
-                    event_type: "new".to_string(),
-                    old_status: None,
-                    old_price: None,
-                    listing: row.clone(),
-                    listing_json: json!({}),
-                }])
-                .await
-                .unwrap();
-            assert_eq!(matched.len(), 1);
-            assert_eq!(matched[0].subscription.public_id, sub_row.id);
-
-            row.raw_json = None;
-            let _ = row;
-        })
-        .catch_unwind()
-        .await;
-
-        let _ = sqlx::query("DROP DATABASE IF EXISTS openestate_protodb_smoke")
-            .execute(&admin_pool)
-            .await;
-
-        if let Err(panic_payload) = outcome {
-            std::panic::resume_unwind(panic_payload);
-        }
     }
 
     #[tokio::test]

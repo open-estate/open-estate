@@ -1080,14 +1080,15 @@ async fn admin_subscriptions_crud_frequency_retranslate_delivery_logs_and_csv() 
     assert_eq!(ed_res["subscription"]["notifyOnNew"], false);
     assert_eq!(ed_res["subscription"]["notifyOnSold"], true);
 
-    // 6. Force both subscriptions to stale filter_schema_version = 0 and test single + batch retranslate
+    // 6. Force both subscriptions to stale filter_schema_version = 0, verify retranslate routes return 404 in Personal Edition,
+    //    and invoke `retranslate_stale_subscriptions` helper directly.
     state
         .db
         .execute_params("UPDATE subscriptions SET filter_schema_version = 0", &[])
         .await
         .unwrap();
 
-    let (st_rt1, _, rt1_res) = send_json_req(
+    let (st_rt1, _, _) = send_json_req(
         &app,
         "POST",
         &format!("/api/admin/subscriptions/{sub1_id}/retranslate"),
@@ -1095,22 +1096,17 @@ async fn admin_subscriptions_crud_frequency_retranslate_delivery_logs_and_csv() 
         Some(json!({})),
     )
     .await;
-    assert_eq!(st_rt1, StatusCode::OK, "single retranslate: {rt1_res}");
-    assert_eq!(
-        rt1_res["subscription"]["filterSchemaVersion"],
-        CURRENT_FILTER_SCHEMA_VERSION
-    );
+    assert_eq!(st_rt1, StatusCode::NOT_FOUND, "single retranslate route must be unmounted in Personal Edition");
 
-    let (st_rtb, _, rtb_res) = send_json_req(
-        &app,
-        "POST",
-        "/api/admin/subscriptions/retranslate-stale",
-        &hdrs,
-        Some(json!({ "maxBatch": 50 })),
+    let rtb_res = open_estate::search::retranslate_stale_subscriptions(
+        &state.db,
+        &state.http,
+        &state.env,
+        50,
     )
-    .await;
-    assert_eq!(st_rtb, StatusCode::OK, "batch stale retranslate: {rtb_res}");
-    assert!(rtb_res["summary"]["retranslated"].as_u64().unwrap_or(0) >= 1);
+    .await
+    .expect("retranslate_stale_subscriptions");
+    assert!(rtb_res["retranslated"].as_u64().unwrap_or(0) >= 2);
 
     let sub2_after = state
         .db

@@ -455,7 +455,7 @@ async fn test_4_privacy_safe_click_store_capacity_and_http_marketplace_endpoints
         .build()
         .expect("reqwest client");
 
-    // A) GET /api/marketplace/quotes?slug=<SYNTH_PRIMARY_SLUG>
+    // A) Marketplace brokerage routes are unmounted (404) in Personal Edition
     let q_res = client
         .get(format!(
             "{base_url}/api/marketplace/quotes?slug={}",
@@ -464,32 +464,14 @@ async fn test_4_privacy_safe_click_store_capacity_and_http_marketplace_endpoints
         .send()
         .await
         .expect("GET /api/marketplace/quotes");
-    assert_eq!(q_res.status(), StatusCode::OK);
+    assert_eq!(q_res.status(), StatusCode::NOT_FOUND);
     for &(hname, hexp) in SECURITY_RESPONSE_HEADERS {
         assert_eq!(
             q_res.headers().get(hname).and_then(|v| v.to_str().ok()),
             Some(hexp)
         );
     }
-    let q_json: Value = q_res.json().await.expect("quotes json");
-    assert_eq!(q_json["ok"], json!(true));
-    assert_eq!(q_json["slug"], json!(common::SYNTH_PRIMARY_SLUG));
-    assert_eq!(q_json["marketplace"]["zip"], json!("95118"));
-    assert!(q_json["marketplace"]["verticals"]["mortgage"].is_object());
-    assert!(q_json["marketplace"]["verticals"]["insurance"].is_object());
-    assert!(q_json["marketplace"]["verticals"]["title"].is_object());
 
-    // B) Unknown slug returns 404 NOT_FOUND
-    let nf_res = client
-        .get(format!(
-            "{base_url}/api/marketplace/quotes?slug=999-nonexistent-slug-00000"
-        ))
-        .send()
-        .await
-        .expect("GET unknown slug");
-    assert_eq!(nf_res.status(), StatusCode::NOT_FOUND);
-
-    // C) POST /api/marketplace/quotes with same-origin headers for Campbell report
     let pq_res = client
         .post(format!("{base_url}/api/marketplace/quotes"))
         .header("Host", &host_hdr)
@@ -501,13 +483,8 @@ async fn test_4_privacy_safe_click_store_capacity_and_http_marketplace_endpoints
         .send()
         .await
         .expect("POST /api/marketplace/quotes");
-    assert_eq!(pq_res.status(), StatusCode::OK);
-    let pq_json: Value = pq_res.json().await.expect("post quotes json");
-    assert_eq!(pq_json["marketplace"]["zip"], json!("95008"));
-    assert!(pq_json["marketplace"]["verticals"]["title"].is_object());
-    assert!(pq_json["marketplace"]["verticals"]["mortgage"].is_null());
+    assert_eq!(pq_res.status(), StatusCode::NOT_FOUND);
 
-    // D) POST /api/marketplace/click records privacy-safe benchmark click (no PII, no IP stored)
     let clk_res = client
         .post(format!("{base_url}/api/marketplace/click"))
         .header("Host", &host_hdr)
@@ -521,59 +498,7 @@ async fn test_4_privacy_safe_click_store_capacity_and_http_marketplace_endpoints
         .send()
         .await
         .expect("POST /api/marketplace/click");
-    assert_eq!(clk_res.status(), StatusCode::OK);
-    let clk_json: Value = clk_res.json().await.expect("click json");
-    assert_eq!(clk_json["ok"], json!(true));
-    let clk_str = serde_json::to_string(&clk_json).unwrap();
-    assert!(
-        !clk_str.contains("127.0.0.1"),
-        "click response/storage must never echo or persist client IP"
-    );
-
-    // E) Guardrail rejections: unknown partnerId (400), extra PII key (400), cross-origin (403)
-    let bad_partner = client
-        .post(format!("{base_url}/api/marketplace/click"))
-        .header("Host", &host_hdr)
-        .header("Origin", &base_url)
-        .json(&json!({
-            "slug": common::SYNTH_PRIMARY_SLUG,
-            "vertical": "mortgage",
-            "partnerId": "unregistered-third-party",
-            "event": "click"
-        }))
-        .send()
-        .await
-        .expect("POST unknown partner");
-    assert_eq!(bad_partner.status(), StatusCode::BAD_REQUEST);
-
-    let bad_pii = client
-        .post(format!("{base_url}/api/marketplace/click"))
-        .header("Host", &host_hdr)
-        .header("Origin", &base_url)
-        .json(&json!({
-            "slug": common::SYNTH_PRIMARY_SLUG,
-            "vertical": "mortgage",
-            "partnerId": "benchmark-30yr-fixed",
-            "email": "buyer@example.com"
-        }))
-        .send()
-        .await
-        .expect("POST PII field");
-    assert_eq!(bad_pii.status(), StatusCode::BAD_REQUEST);
-
-    let bad_origin = client
-        .post(format!("{base_url}/api/marketplace/click"))
-        .header("Host", &host_hdr)
-        .header("Origin", "https://evil-cross-site.example")
-        .json(&json!({
-            "slug": common::SYNTH_PRIMARY_SLUG,
-            "vertical": "mortgage",
-            "partnerId": "benchmark-30yr-fixed"
-        }))
-        .send()
-        .await
-        .expect("POST cross-origin");
-    assert_eq!(bad_origin.status(), StatusCode::FORBIDDEN);
+    assert_eq!(clk_res.status(), StatusCode::NOT_FOUND);
 
     let _ = shutdown_tx.send(());
     let _ = std::fs::remove_dir_all(&temp_dir);

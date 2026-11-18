@@ -131,6 +131,10 @@ a{color:var(--blue);text-decoration:none}a:hover{text-decoration:underline}
 /* [feat/report-ux-likes] Header refresh button, Like button & cross-platform engagement strip */
 .hdrbtn{display:inline-flex;align-items:center;gap:5px;border:1px solid var(--line);background:#fff;color:var(--ink2);border-radius:999px;padding:5px 10px;font:700 12px var(--font);cursor:pointer;white-space:nowrap;text-decoration:none;transition:border-color .15s,background .15s,color .15s}
 .hdrbtn[hidden]{display:none!important}
+html:not([data-cloud-marketplace="1"]) #openAgentRecBtn,
+html:not([data-cloud-marketplace="1"]) #openInspectorRecBtn,
+html:not([data-cloud-marketplace="1"]) .agent-rec-btn-cloud,
+html:not([data-cloud-marketplace="1"]) #agentRecDrawer { display: none !important; }
 .hdrbtn:hover:not(:disabled):not(.cooling){border-color:var(--brand2);color:var(--brand);background:var(--brandsoft);text-decoration:none}
 .hdrbtn:disabled,.hdrbtn.cooling{opacity:.72;cursor:not-allowed;background:#f9fafb;color:var(--muted)}
 .hdrbtn.cooling{cursor:help}
@@ -7436,7 +7440,7 @@ function renderCountyRecords() {
           <div class="dr-box">
             <div style="font-weight:800;font-size:13px;color:var(--brand);margin-bottom:5px">📋 ${tr3('Inspection & Disclosure Packet', '验房报告与披露文件包', 'Paquete de Inspección y Divulgaciones')}</div>
             <div class="small" style="margin-bottom:6px">${esc(iss.summary || '')}</div>
-            ${docs.length ? `<div class="pill good" style="margin-bottom:7px">✓ ${esc(docs.length + ' ' + tr3('report(s) on file — ready to review', '份报告已就绪 · 无需重复上传', 'informe(s) disponibles · listos para revisar'))} · <a href="#inspection" style="color:inherit;text-decoration:underline">${tr3('View analysis ↘', '查看审阅结果 ↘', 'Ver análisis ↘')}</a></div><div style="margin-bottom:8px">${docs.map((d) => `<div style="padding:5px 0;border-top:1px solid var(--line);font-size:12.2px"><div style="display:flex;justify-content:space-between;gap:6px"><b>📄 ${esc(d.title || d.documentType || 'Public Document')}</b>${factSourceLink({ name: d.sourceName || 'Public PDF', url: d.sourceUrl }, 'Open ↗')}</div>${(d.highlights || []).length ? `<div class="small">${d.highlights.map(esc).join(' · ')}</div>` : ''}</div>`).join('')}</div>` : `<div style="margin-bottom:8px;padding:7px 9px;border-radius:9px;background:var(--soft);border:1px solid var(--line);font-size:12px"><span class="pill watch" style="margin-right:5px">${esc(tr3('Agent or Upload', '可索取或上传', 'Solicitar o subir'))}</span> ${tr3('May be obtained via your buyer’s agent (MLS disclosure portal). Don’t have an agent yet? We can recommend one.', '可通过买方经纪人向挂牌方调取；若您尚无经纪人，我们可以为您推荐。', 'Puede obtenerlo vía su agente comprador; si aún no tiene uno, podemos recomendarle uno.')} <button type="button" class="copybtn" style="margin-left:6px;padding:2px 8px;font-size:11.5px" onclick="window.openAgentRecommender&&window.openAgentRecommender('buyer_agent')">🤝 ${TKEY('docs.recommendAgentBtn')}</button></div>`}
+            ${docs.length ? `<div class="pill good" style="margin-bottom:7px">✓ ${esc(docs.length + ' ' + tr3('report(s) on file — ready to review', '份报告已就绪 · 无需重复上传', 'informe(s) disponibles · listos para revisar'))} · <a href="#inspection" style="color:inherit;text-decoration:underline">${tr3('View analysis ↘', '查看审阅结果 ↘', 'Ver análisis ↘')}</a></div><div style="margin-bottom:8px">${docs.map((d) => `<div style="padding:5px 0;border-top:1px solid var(--line);font-size:12.2px"><div style="display:flex;justify-content:space-between;gap:6px"><b>📄 ${esc(d.title || d.documentType || 'Public Document')}</b>${factSourceLink({ name: d.sourceName || 'Public PDF', url: d.sourceUrl }, 'Open ↗')}</div>${(d.highlights || []).length ? `<div class="small">${d.highlights.map(esc).join(' · ')}</div>` : ''}</div>`).join('')}</div>` : `<div style="margin-bottom:8px;padding:7px 9px;border-radius:9px;background:var(--soft);border:1px solid var(--line);font-size:12px"><span class="pill watch" style="margin-right:5px">${esc(tr3('Agent or Upload', '可索取或上传', 'Solicitar o subir'))}</span> ${tr3('May be obtained via your buyer’s agent (MLS disclosure portal). Don’t have an agent yet? We can recommend one.', '可通过买方经纪人向挂牌方调取；若您尚无经纪人，我们可以为您推荐。', 'Puede obtenerlo vía su agente comprador; si aún no tiene uno, podemos recomendarle uno.')} <button type="button" class="copybtn agent-rec-btn-cloud" style="margin-left:6px;padding:2px 8px;font-size:11.5px" onclick="window.openAgentRecommender&&window.openAgentRecommender('buyer_agent')">🤝 ${TKEY('docs.recommendAgentBtn')}</button></div>`}
             <div class="small"><b>${tr3('Request from Listing Agent / Escrow', '向挂牌经纪/托管行索取清单', 'Solicitar al agente / escrow')}:</b></div>
             ${list(iss.buyerRequestChecklist || [], 'watch', '◆')}
             <div style="display:flex;flex-wrap:wrap;gap:5px;margin-top:7px">${(iss.verificationLinks || []).map((l) => safeHttpUrl(l.sourceUrl) ? `<a class="src-chip" href="${esc(l.sourceUrl)}" target="_blank" rel="noopener noreferrer">${esc(l.name)} ↗</a>` : '').join('')}</div>
@@ -12695,6 +12699,13 @@ function renderCreStoreProfitSimulator(cre) {
 function renderCre() {
   const el = $('#cre');
   if (!el) return;
+  const creAllowed = window.__CLOUD_CRE_ENABLED__ === true || !!(R && R.modules && R.modules.cre) || !!(R && R.cre);
+  if (!creAllowed) {
+    el.innerHTML = '';
+    el.style.display = 'none';
+    return;
+  }
+  el.style.display = '';
   const cre = R.cre || D('cre');
   const uw = cre?.underwriting || {}, noi = uw.netOperatingIncome || {}, crm = uw.capRateMatrix || {}, im = uw.investorMetrics || {}, dc = uw.debtComparison || {};
   const enabled = Boolean(cre?.enabled);

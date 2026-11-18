@@ -139,19 +139,14 @@ pub async fn handle_match_areas(
     let needle = raw_q.trim().to_lowercase();
     let limit = q.limit.unwrap_or(50).clamp(1, 200);
 
-    let hint = state.db.rapid_query_hint_for_scan(0, false);
-    let zip_sql = format!(
-        "SELECT {hint} zip, status, COUNT(*) AS cnt, MIN(city) AS city, MIN(state_code) AS state_code \
+    let zip_sql = "SELECT zip, status, COUNT(*) AS cnt, MIN(city) AS city, MIN(state_code) AS state_code \
          FROM listings \
          WHERE zip != '' AND status IN (1, 2, 3) \
-         GROUP BY zip, status"
-    );
-    let city_sql = format!(
-        "SELECT {hint} city, state_code, status, COUNT(*) AS cnt \
+         GROUP BY zip, status";
+    let city_sql = "SELECT city, state_code, status, COUNT(*) AS cnt \
          FROM listings \
          WHERE city IS NOT NULL AND TRIM(city) != '' AND status IN (1, 2, 3) \
-         GROUP BY city, state_code, status"
-    );
+         GROUP BY city, state_code, status";
 
     let (zrows, crows) = tokio::try_join!(
         state.db.fetch_all_mapped_raw(&zip_sql, &[], |r| {
@@ -1173,7 +1168,7 @@ pub async fn handle_match_rank(
         &state.db,
         &state.http,
         &state.env,
-        Some(&state.scan_engine),
+        Some(personal_deep_refiner(&state)),
         req,
     )
     .await
@@ -1433,14 +1428,57 @@ async fn seed_live_forsale_for_zips(state: &AppState, zips: &[String]) {
     }
 }
 
+fn personal_deep_refiner(
+    state: &AppState,
+) -> std::sync::Arc<dyn crate::search::rank::DeepReportRefiner> {
+    let st = state.clone();
+    std::sync::Arc::new(move |slug: String, address: String| {
+        let st_c = st.clone();
+        async move {
+            if st_c.db.get_report_header(&slug).await.ok().flatten().is_some() {
+                return Ok(());
+            }
+            let rep = Box::pin(crate::web::orchestrator::build_full_report_with_hooks(
+                &st_c.http,
+                &st_c.env,
+                &st_c.db,
+                crate::web::orchestrator::BuildReportOptions {
+                    address,
+                    slug_override: None,
+                    pre_geocoded: None,
+                    given_facts: None,
+                    run_ai: false,
+                    data_dir: st_c.data_dir.clone(),
+                },
+                Some(&st_c),
+                |_| {},
+                |_| async {},
+            ))
+            .await?;
+            let c_slug = rep
+                .pointer("/meta/slug")
+                .and_then(|v| v.as_str())
+                .unwrap_or(&slug)
+                .to_string();
+            let _ = st_c.db.put_cached_report(&c_slug, &rep, None).await;
+            let _ = crate::search::ingest_report_into_db(
+                &st_c.db,
+                Some(&st_c.http),
+                &st_c.env,
+                &rep,
+                false,
+            )
+            .await;
+            Ok(())
+        }
+    })
+}
+
 async fn fetch_top_indexed_zips(state: &AppState, limit: usize) -> anyhow::Result<Vec<String>> {
-    let hint = state.db.rapid_query_hint_for_scan(0, false);
-    let sql = format!(
-        "SELECT {hint} zip FROM listings WHERE zip != '' GROUP BY zip ORDER BY COUNT(*) DESC LIMIT 10"
-    );
+    let sql = "SELECT zip FROM listings WHERE zip != '' GROUP BY zip ORDER BY COUNT(*) DESC LIMIT 10";
     let rows = state
         .db
-        .fetch_all_mapped_raw(&sql, &[], |r| r.opt_str("zip"))
+        .fetch_all_mapped_raw(sql, &[], |r| r.opt_str("zip"))
         .await?;
     let mut zips = Vec::new();
     for z in rows.into_iter().flatten() {
@@ -1588,7 +1626,7 @@ pub async fn handle_match_query(
         &state.db,
         &state.http,
         &state.env,
-        Some(&state.scan_engine),
+        Some(personal_deep_refiner(&state)),
         req,
     )
     .await
@@ -1615,7 +1653,7 @@ pub async fn handle_match_query(
             &state.db,
             &state.http,
             &state.env,
-            Some(&state.scan_engine),
+            Some(personal_deep_refiner(&state)),
             fallback_req,
         )
         .await

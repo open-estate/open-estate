@@ -45,17 +45,6 @@ pub const SQLITE_METERING_DDL: &[&str] = &[
         PRIMARY KEY (day_utc, extension_id, tier, trigger_kind)
     )"#,
     "CREATE INDEX IF NOT EXISTS idx_ext_usage_local_day ON extension_usage_rollups_local (day_utc, extension_id)",
-    r#"CREATE TABLE IF NOT EXISTS reference_redirect_clicks (
-        link_type VARCHAR(48) NOT NULL,
-        data_id VARCHAR(120) NOT NULL,
-        section VARCHAR(80) NOT NULL,
-        click_count BIGINT NOT NULL DEFAULT 0,
-        last_slug VARCHAR(180) NOT NULL DEFAULT '',
-        last_target_url VARCHAR(1024) NOT NULL DEFAULT '',
-        updated_at VARCHAR(32) NOT NULL,
-        PRIMARY KEY (link_type, data_id, section)
-    )"#,
-    "CREATE INDEX IF NOT EXISTS idx_ref_redirect_clicks_count ON reference_redirect_clicks (click_count DESC, updated_at DESC)",
 ];
 
 pub const MYSQL_METERING_DDL: &[&str] = &[
@@ -89,17 +78,6 @@ pub const MYSQL_METERING_DDL: &[&str] = &[
         updated_at VARCHAR(32) NOT NULL,
         PRIMARY KEY (day_utc, extension_id, tier, trigger_kind),
         INDEX idx_ext_usage_local_day (day_utc, extension_id)
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci"#,
-    r#"CREATE TABLE IF NOT EXISTS reference_redirect_clicks (
-        link_type VARCHAR(48) NOT NULL,
-        data_id VARCHAR(120) NOT NULL,
-        section VARCHAR(80) NOT NULL,
-        click_count BIGINT NOT NULL DEFAULT 0,
-        last_slug VARCHAR(180) NOT NULL DEFAULT '',
-        last_target_url VARCHAR(1024) NOT NULL DEFAULT '',
-        updated_at VARCHAR(32) NOT NULL,
-        PRIMARY KEY (link_type, data_id, section),
-        INDEX idx_ref_redirect_clicks_count (click_count DESC, updated_at DESC)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci"#,
 ];
 
@@ -435,111 +413,4 @@ pub async fn local_ops_usage_json(db: &DbStore, days: i64) -> Result<Value> {
         "extensions": extensions,
         "dailyRollups": daily,
     }))
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct ReferenceRedirectClickRow {
-    pub link_type: String,
-    pub data_id: String,
-    pub section: String,
-    pub click_count: u64,
-    pub last_slug: String,
-    pub last_target_url: String,
-    pub updated_at: String,
-}
-
-/// Atomically increments click telemetry for `(link_type, data_id, section)`.
-pub async fn record_reference_redirect_click(
-    db: &DbStore,
-    link_type: &str,
-    data_id: &str,
-    section: &str,
-    last_slug: &str,
-    last_target_url: &str,
-) -> Result<()> {
-    ensure_metering_schema(db).await?;
-    let lt: String = link_type.trim().chars().take(48).collect();
-    let did: String = data_id.trim().chars().take(120).collect();
-    let sec: String = section.trim().chars().take(80).collect();
-    let slug: String = last_slug.trim().chars().take(180).collect();
-    let target: String = last_target_url.trim().chars().take(1024).collect();
-    let now = now_iso();
-
-    let sql = if db.dialect() == "mysql" {
-        "INSERT INTO reference_redirect_clicks \
-         (link_type, data_id, section, click_count, last_slug, last_target_url, updated_at) \
-         VALUES (?, ?, ?, 1, ?, ?, ?) AS new_row \
-         ON DUPLICATE KEY UPDATE \
-         click_count = reference_redirect_clicks.click_count + 1, \
-         last_slug = IF(new_row.last_slug <> '', new_row.last_slug, reference_redirect_clicks.last_slug), \
-         last_target_url = new_row.last_target_url, \
-         updated_at = new_row.updated_at"
-    } else {
-        "INSERT INTO reference_redirect_clicks \
-         (link_type, data_id, section, click_count, last_slug, last_target_url, updated_at) \
-         VALUES (?, ?, ?, 1, ?, ?, ?) \
-         ON CONFLICT(link_type, data_id, section) DO UPDATE SET \
-         click_count = reference_redirect_clicks.click_count + 1, \
-         last_slug = CASE WHEN excluded.last_slug <> '' THEN excluded.last_slug ELSE reference_redirect_clicks.last_slug END, \
-         last_target_url = excluded.last_target_url, \
-         updated_at = excluded.updated_at"
-    };
-
-    let params = vec![
-        SqlParam::from(if lt.is_empty() { "extension_reference".to_string() } else { lt }),
-        SqlParam::from(if did.is_empty() { "unknown".to_string() } else { did }),
-        SqlParam::from(sec),
-        SqlParam::from(slug),
-        SqlParam::from(target),
-        SqlParam::from(now),
-    ];
-    db.execute_params(sql, &params).await?;
-    Ok(())
-}
-
-/// Queries top clicked reference redirect entries ordered by `click_count DESC, updated_at DESC`.
-pub async fn query_top_reference_redirect_clicks(
-    db: &DbStore,
-    limit: i64,
-) -> Result<Vec<ReferenceRedirectClickRow>> {
-    ensure_metering_schema(db).await?;
-    let lim = limit.clamp(1, 1_000);
-    let sql = format!(
-        "SELECT link_type, data_id, section, click_count, last_slug, last_target_url, updated_at \
-         FROM reference_redirect_clicks \
-         ORDER BY click_count DESC, updated_at DESC, data_id ASC LIMIT {lim}"
-    );
-    match &db.backend {
-        DbBackend::Sqlite(pool) => {
-            let rows = sqlx::query(&sql).fetch_all(pool).await?;
-            Ok(rows
-                .into_iter()
-                .map(|r| ReferenceRedirectClickRow {
-                    link_type: r.opt_str("link_type").unwrap_or_default(),
-                    data_id: r.opt_str("data_id").unwrap_or_default(),
-                    section: r.opt_str("section").unwrap_or_default(),
-                    click_count: nonneg_u64(r.opt_i64("click_count")),
-                    last_slug: r.opt_str("last_slug").unwrap_or_default(),
-                    last_target_url: r.opt_str("last_target_url").unwrap_or_default(),
-                    updated_at: r.opt_str("updated_at").unwrap_or_default(),
-                })
-                .collect())
-        }
-        DbBackend::MySql { pool, .. } => {
-            let rows = sqlx::query(&sql).fetch_all(pool).await?;
-            Ok(rows
-                .into_iter()
-                .map(|r| ReferenceRedirectClickRow {
-                    link_type: r.opt_str("link_type").unwrap_or_default(),
-                    data_id: r.opt_str("data_id").unwrap_or_default(),
-                    section: r.opt_str("section").unwrap_or_default(),
-                    click_count: nonneg_u64(r.opt_i64("click_count")),
-                    last_slug: r.opt_str("last_slug").unwrap_or_default(),
-                    last_target_url: r.opt_str("last_target_url").unwrap_or_default(),
-                    updated_at: r.opt_str("updated_at").unwrap_or_default(),
-                })
-                .collect())
-        }
-    }
 }

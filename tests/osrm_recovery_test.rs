@@ -12,14 +12,15 @@ use axum::{
     Json, Router,
 };
 use open_estate::db::{report_has_osrm_router_down, DbBackend, DbStore};
+use open_estate::extensions::ExtensionHub;
 use open_estate::guardrails::HttpDefenseShield;
-use open_estate::modules::access::run_access_with_env;
+use open_estate::modules::access::run_access_with_env_and_hub;
 use open_estate::modules::commute::{
     is_router_in_cooldown, RoutingClient, RoutingConfig, ENV_OSRM_FAILURE_COOLDOWN_SECS,
     ENV_OSRM_REGIONS_JSON, ENV_OSRM_TIMEOUT_MS, OSRM_ATTRIBUTION,
 };
 use open_estate::shared::{EnvConfig, HttpClient};
-use open_estate::web::orchestrator::{recompute_report_access, RecomputeAccessStatus};
+use open_estate::web::orchestrator::{recompute_report_access_with_hub, RecomputeAccessStatus};
 use open_estate::web::render::render_report_html_with_brand;
 use open_estate::web::server::{build_router, spawn_startup_background_tasks, AppState};
 use serde_json::{json, Value};
@@ -175,7 +176,15 @@ async fn make_test_state(extra: Vec<(&str, String)>) -> (AppState, PathBuf) {
     let db = DbStore::connect(&env).await.unwrap();
     db.ensure_schema().await.unwrap();
     let shield = HttpDefenseShield::new(&env);
-    let state = AppState::with_components(env, http, db, shield, reports_dir, None);
+    let state = AppState::with_components_and_hub(
+        env,
+        http,
+        db,
+        shield,
+        reports_dir,
+        None,
+        ExtensionHub::new_default(),
+    );
     (state, dir)
 }
 
@@ -328,10 +337,11 @@ async fn osrm_down_fallback_cooldown_and_recompute_recovery_end_to_end() {
         "tags": { "name": "San Jose City Hall" }
     });
 
-    // 1. OSRM is down (slow timeout): `run_access_with_env` falls back to `router_down` and sets cooldown.
-    let down_out = run_access_with_env(
+    // 1. OSRM is down (slow timeout): `run_access_with_env_and_hub` falls back to `router_down` and sets cooldown.
+    let down_out = run_access_with_env_and_hub(
         &state.http,
         Some(&state.env),
+        Some(Arc::clone(&state.extension_hub)),
         lat,
         lon,
         &rep["geo"],
@@ -361,9 +371,10 @@ async fn osrm_down_fallback_cooldown_and_recompute_recovery_end_to_end() {
 
     // Fast-fail second access call during cooldown without waiting for 500ms timeout!
     let t_fast = std::time::Instant::now();
-    let fast_out = run_access_with_env(
+    let fast_out = run_access_with_env_and_hub(
         &state.http,
         Some(&state.env),
+        Some(Arc::clone(&state.extension_hub)),
         lat,
         lon,
         &rep["geo"],
@@ -402,15 +413,21 @@ async fn osrm_down_fallback_cooldown_and_recompute_recovery_end_to_end() {
     assert_eq!(state.db.count_osrm_degraded_reports().await.unwrap(), 1);
     assert!(state.db.get_cached_report(slug).await.unwrap().unwrap().osrm_degraded);
 
-    // `recompute_report_access` while OSRM is still down preserves `osrm_degraded=1`.
-    let still_down = recompute_report_access(&state.http, &state.env, &state.db, slug)
-        .await
-        .unwrap();
+    // `recompute_report_access_with_hub` while OSRM is still down preserves `osrm_degraded=1`.
+    let still_down = recompute_report_access_with_hub(
+        &state.http,
+        &state.env,
+        Some(Arc::clone(&state.extension_hub)),
+        &state.db,
+        slug,
+    )
+    .await
+    .unwrap();
     assert_eq!(still_down.status, RecomputeAccessStatus::StillDegraded);
     assert!(still_down.osrm_degraded_after);
     assert_eq!(state.db.count_osrm_degraded_reports().await.unwrap(), 1);
 
-    // 2. OSRM comes back UP -> `probe_regions` clears cooldown -> `recompute_report_access` recovers report!
+    // 2. OSRM comes back UP -> `probe_regions` clears cooldown -> `recompute_report_access_with_hub` recovers report!
     mock_ca.table_delay_ms.store(0, Ordering::SeqCst);
     mock_ca.up.store(true, Ordering::SeqCst);
 
@@ -421,9 +438,15 @@ async fn osrm_down_fallback_cooldown_and_recompute_recovery_end_to_end() {
     assert_eq!(probes[0].status_code, Some(200));
     assert!(!is_router_in_cooldown(&ca_url));
 
-    let recovered = recompute_report_access(&state.http, &state.env, &state.db, slug)
-        .await
-        .unwrap();
+    let recovered = recompute_report_access_with_hub(
+        &state.http,
+        &state.env,
+        Some(Arc::clone(&state.extension_hub)),
+        &state.db,
+        slug,
+    )
+    .await
+    .unwrap();
     assert_eq!(recovered.status, RecomputeAccessStatus::Updated);
     assert!(recovered.osrm_degraded_before);
     assert!(!recovered.osrm_degraded_after);

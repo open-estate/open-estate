@@ -14,6 +14,7 @@
 use crate::ai::llm::{
     extract_response_text, extract_usage, resolve_llm_spec_for_call, ModelSpec,
 };
+pub use crate::ai::title_review::redact_title_pii;
 use crate::guardrails::{
     scrub_sensitive_text, scrub_untrusted_document_lines, validate_and_scrub_property_document,
     DocumentKind, GuardrailError, IMMUTABLE_SYSTEM_PREAMBLE,
@@ -2363,7 +2364,7 @@ fn finalize_upload_batch(
             (pii.masked_text, pii.pii_redacted_count)
         }
         DocumentKind::Cre => {
-            let pii = crate::cre::redact_cre_document_pii(&scrubbed.sanitized_text);
+            let pii = redact_title_pii(&scrubbed.sanitized_text);
             (pii.masked_text, pii.pii_redacted_count)
         }
         DocumentKind::Hoa | DocumentKind::Packet => {

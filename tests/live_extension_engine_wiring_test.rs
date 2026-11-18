@@ -753,29 +753,17 @@ async fn lazy_mode_skips_eager_waves_enqueues_on_first_visit_runs_worker_and_mer
         )
         .await
         .unwrap();
-    assert_ne!(
+    assert_eq!(
         sched_kinds_probe.status(),
         StatusCode::NOT_FOUND,
-        "/api/admin/scheduler/kinds must be mounted on build_router"
+        "/api/admin/scheduler/kinds must not be mounted in Personal Edition"
     );
 
-    // 4. Start startup LazyWorker + SchedulerRunner via `spawn_startup_background_tasks` and wait for completion.
+    // 4. Start startup LazyWorker via `spawn_startup_background_tasks` and wait for completion.
     spawn_startup_background_tasks(&state, 0);
     assert!(
         state.lazy_worker.lock().await.is_some(),
         "AppState must hold live LazyWorkerHandle after startup"
-    );
-    let mut sched_started = false;
-    for _ in 0..40 {
-        if state.scheduler_handle.lock().await.is_some() {
-            sched_started = true;
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
-    assert!(
-        sched_started,
-        "AppState must hold live SchedulerHandle after startup"
     );
 
     let mut ready = false;
@@ -836,14 +824,10 @@ async fn lazy_mode_skips_eager_waves_enqueues_on_first_visit_runs_worker_and_mer
         "Ready lazy valuation artifact must merge into report.json"
     );
 
-    // Clean shutdown of worker and scheduler handles held on AppState.
+    // Clean shutdown of worker handle held on AppState.
     let lazy_handle = state.lazy_worker.lock().await.take();
     if let Some(handle) = lazy_handle {
         handle.shutdown().await;
-    }
-    let sched_handle = state.scheduler_handle.lock().await.take();
-    if let Some(sh) = sched_handle {
-        sh.shutdown().await;
     }
 }
 

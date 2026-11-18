@@ -29,7 +29,6 @@ use crate::metering::{
     ExtensionTier, ExtensionUsageEvent, InvocationContext, InvocationDecision, InvocationTrigger,
     MeterScope,
 };
-use crate::scanner::lazy_hook::PeriodicLazyEnqueueSummary;
 use crate::shared::{now_iso, EnvConfig, HttpClient};
 use anyhow::{anyhow, Context, Result};
 use futures::future::join_all;
@@ -38,6 +37,20 @@ use moka::future::Cache;
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LazyEnqueueSummary {
+    pub targets_examined: usize,
+    pub jobs_evaluated: usize,
+    pub queued: usize,
+    pub deduplicated: usize,
+    pub awaiting_approval: usize,
+    pub not_enabled: usize,
+    pub errors: usize,
+}
+
+pub type PeriodicLazyEnqueueSummary = LazyEnqueueSummary;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -160,28 +173,6 @@ const EMBEDDED_BUILTINS: &[EmbeddedBuiltinSpec] = &[
         openapi_yaml: Some(include_str!("../../extensions/osrm_routing/openapi.yaml")),
     },
     EmbeddedBuiltinSpec {
-        id: "mapbox_routing",
-        manifest_yaml: include_str!("../../extensions/mapbox_routing/manifest.yaml"),
-        openapi_yaml: Some(include_str!("../../extensions/mapbox_routing/openapi.yaml")),
-    },
-    EmbeddedBuiltinSpec {
-        id: "locationiq_routing",
-        manifest_yaml: include_str!("../../extensions/locationiq_routing/manifest.yaml"),
-        openapi_yaml: Some(include_str!("../../extensions/locationiq_routing/openapi.yaml")),
-    },
-    EmbeddedBuiltinSpec {
-        id: "freeroute_routing",
-        manifest_yaml: include_str!("../../extensions/freeroute_routing/manifest.yaml"),
-        openapi_yaml: Some(include_str!("../../extensions/freeroute_routing/openapi.yaml")),
-    },
-    EmbeddedBuiltinSpec {
-        id: "openrouteservice_routing",
-        manifest_yaml: include_str!("../../extensions/openrouteservice_routing/manifest.yaml"),
-        openapi_yaml: Some(include_str!(
-            "../../extensions/openrouteservice_routing/openapi.yaml"
-        )),
-    },
-    EmbeddedBuiltinSpec {
         id: "campbell_mgo_permits",
         manifest_yaml: include_str!("../../extensions/campbell_mgo_permits/manifest.yaml"),
         openapi_yaml: None,
@@ -189,11 +180,6 @@ const EMBEDDED_BUILTINS: &[EmbeddedBuiltinSpec] = &[
     EmbeddedBuiltinSpec {
         id: "municipal_open_data_permits",
         manifest_yaml: include_str!("../../extensions/municipal_open_data_permits/manifest.yaml"),
-        openapi_yaml: None,
-    },
-    EmbeddedBuiltinSpec {
-        id: "shovels_permits",
-        manifest_yaml: include_str!("../../extensions/shovels_permits/manifest.yaml"),
         openapi_yaml: None,
     },
     EmbeddedBuiltinSpec {
@@ -592,13 +578,11 @@ impl ExtensionHub {
             CampbellMgoPermitsAdapter, MunicipalOpenDataPermitsAdapter,
             PermitCodeEnforcementExtractorAdapter, PermitMepExtractorAdapter,
             PermitRemodelExtractorAdapter, PermitRoofExtractorAdapter, PermitSolarExtractorAdapter,
-            ShovelsPermitsAdapter,
         };
 
-        // Stage-1 Permit Fetchers & Stage-2 Linked Extractors
+        // Stage-1 Open-Data Permit Fetchers & Stage-2 Linked Extractors
         self.register_native_adapter(Arc::new(CampbellMgoPermitsAdapter));
         self.register_native_adapter(Arc::new(MunicipalOpenDataPermitsAdapter));
-        self.register_native_adapter(Arc::new(ShovelsPermitsAdapter));
         self.register_native_adapter(Arc::new(PermitRoofExtractorAdapter));
         self.register_native_adapter(Arc::new(PermitSolarExtractorAdapter));
         self.register_native_adapter(Arc::new(PermitMepExtractorAdapter));
@@ -2048,11 +2032,10 @@ impl ExtensionHub {
             .expect("ExtensionHub self_weak read")
             .upgrade();
 
-        if entry.manifest.builtin
-            && crate::modules::routing_providers::RoutingProviderKind::from_id_or_alias(
-                &entry.extension_id,
-            )
-            .is_some()
+        if crate::modules::routing_providers::RoutingProviderKind::from_id_or_alias(
+            &entry.extension_id,
+        )
+        .is_some()
         {
             return crate::extensions::shared_cache::get_or_fetch(
                 &self.shared_cache,

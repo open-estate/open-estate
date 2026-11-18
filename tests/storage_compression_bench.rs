@@ -9,7 +9,6 @@
 
 mod common;
 
-use open_estate::cre::attach_cre_section_if_applicable;
 use open_estate::db::{
     compress_report_json_zstd, decode_cached_report_json, extract_market_snapshot_bundle,
     DbBackend, DbStore, ListingFactorsRow, SqlParam,
@@ -1537,11 +1536,7 @@ fn build_dict_training_corpus(count: usize) -> Vec<Vec<u8>> {
         rep["modules"]["environment"]["data"]["layers"] = json!({});
 
         rep["modules"]["fengshui"]["data"]["parcelPolygon"] = parcel_poly;
-
-        // Attach CRE / Commercial Land / Agricultural Farmland sections when applicable
-        if let Some(cre_code) = explicit_cre {
-            attach_cre_section_if_applicable(&mut rep, Some(cre_code), true);
-        }
+        let _ = explicit_cre;
 
         // Narrative + AI fallback prose
         let mut paras = Vec::with_capacity(4);

@@ -4,7 +4,7 @@ version = "1.0.0"
 edition = "2021"
 license-file = "LICENSE"
 publish = false
-description = "Open Estate — Self-Hosted US Residential, CRE, Land & Farmland Property Intelligence & AI Home Finder Server (Personal Research & Non-Commercial Edition)"
+description = "Open Estate — Personal Single-User Self-Hosted US Home Research & AI Home Finder Server"
 default-run = "open-estate-server"
 
 [lib]

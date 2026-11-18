@@ -8,12 +8,11 @@ use open_estate::ai::llm::{
 use open_estate::ai::{
     analyze_inspection, ask_property_question_with_config,
     build_agent_system_instructions_with_config, derive_neighborhood_scope,
-    generate_repair_addendum, get_cached_neighborhood_narrative, put_neighborhood_narrative,
-    run_ai_analyst_with_store, translate_report, AskPromptConfig, MemoryLlmCache,
-    RepairAddendumInput, UploadedDocInput, ANALYST_INSTRUCTIONS, ASK_INSTRUCTIONS,
-    DEFAULT_ARTIFACT_INSTRUCTIONS, DEFAULT_CHATBOX_MAX_WORDS, DEFAULT_CHATBOX_STYLE_PROMPT,
-    IMMUTABLE_HOUSING_AGENT_CONSTITUTION, INSPECTION_INSTRUCTIONS, NEIGHBORHOOD_NARRATIVE_TTL_SECS,
-    SLIDES_INSTRUCTIONS,
+    get_cached_neighborhood_narrative, put_neighborhood_narrative, run_ai_analyst_with_store,
+    translate_report, AskPromptConfig, MemoryLlmCache, UploadedDocInput, ANALYST_INSTRUCTIONS,
+    ASK_INSTRUCTIONS, DEFAULT_ARTIFACT_INSTRUCTIONS, DEFAULT_CHATBOX_MAX_WORDS,
+    DEFAULT_CHATBOX_STYLE_PROMPT, IMMUTABLE_HOUSING_AGENT_CONSTITUTION, INSPECTION_INSTRUCTIONS,
+    NEIGHBORHOOD_NARRATIVE_TTL_SECS, SLIDES_INSTRUCTIONS,
 };
 use open_estate::db::shared_cache_store::{ensure_shared_cache_schema, get_shared_data_record};
 use open_estate::db::{DbStore, SETTING_CHATBOX_MAX_WORDS, SETTING_CHATBOX_SYSTEM_PROMPT};
@@ -390,55 +389,7 @@ async fn live_keyed_all_profiles_echo_model_effort_and_record_usage() {
         Some("inspection_analysis")
     );
 
-    // 2. reasoning_standard -> high via real `generate_repair_addendum` code path
-    let addendum_input = RepairAddendumInput {
-        defects: Some(vec![
-            json!({
-                "id": format!("def-{nonce}-1"),
-                "trade": "Electrical",
-                "severity": "major",
-                "title": "Double-tapped breakers in subpanel B",
-                "detail": format!("Verified finding {nonce}: 3 double-tapped circuits require pig-tailing or tandem-approved breakers."),
-                "costLow": 1200,
-                "costHigh": 1800,
-                "docName": "civic-inspection.txt",
-                "page": 2
-            }),
-            json!({
-                "id": format!("def-{nonce}-2"),
-                "trade": "Roofing",
-                "severity": "moderate",
-                "title": "Parapet scupper flashing reseal",
-                "detail": "Localized ponding near east parapet scupper.",
-                "costLow": 2500,
-                "costHigh": 4000,
-                "docName": "civic-inspection.txt",
-                "page": 3
-            }),
-        ]),
-        ..Default::default()
-    };
-    let (add_res, add_ev) = MeterScope::run_result(
-        InvocationContext::new("live_profile_reasoning_standard")
-            .with_trigger(InvocationTrigger::AdminTest),
-        generate_repair_addendum(&http, &env, &report, addendum_input, None),
-    )
-    .await;
-    let add_out = add_res.expect("live generate_repair_addendum must succeed");
-    assert_eq!(add_out.data["model"].as_str(), Some(live_model.as_str()));
-    assert_eq!(add_out.data["effort"].as_str(), Some("high"));
-    assert_eq!(add_ev.outcome, InvocationOutcome::Ok);
-    assert_eq!(add_ev.llm_model.as_deref(), Some(live_model.as_str()));
-    assert_eq!(add_ev.llm_effort.as_deref(), Some("high"));
-    assert!(add_ev.dims.llm_input_tokens > 0);
-    assert!(add_ev.dims.llm_output_tokens > 0);
-    assert_eq!(
-        add_ev.llm_calls[0].profile.as_deref(),
-        Some("reasoning_standard")
-    );
-    assert_eq!(add_ev.llm_calls[0].task.as_deref(), Some("repair_addendum"));
-
-    // 3. writing_light -> low via real `translate_report` code path
+    // 2. writing_light -> low via real `translate_report` code path
     let (tr_res, tr_ev) = MeterScope::run_result(
         InvocationContext::new("live_profile_writing_light")
             .with_trigger(InvocationTrigger::AdminTest),

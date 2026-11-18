@@ -1445,7 +1445,6 @@ fn build_stage2_manifest(
         depends_on: vec![
             "campbell_mgo_permits".into(),
             "municipal_open_data_permits".into(),
-            "shovels_permits".into(),
         ],
         input_from_domains: vec![CapabilityDomain::DomainPermits as i32],
         upstream_require_mode: "any".to_string(),

@@ -408,7 +408,174 @@ pub fn build_copilot_mailto_request(geo: &Value, facts: &Value) -> Value {
         "geo": geo,
         "facts": facts,
     });
-    crate::modules::agent_recommend::build_material_request_mailto(Some(&ctx), display_address)
+    build_material_request_mailto(Some(&ctx), display_address)
+}
+
+fn clean_plain_text(raw: Option<&str>, max_chars: usize) -> Option<String> {
+    let s = raw?.trim();
+    if s.is_empty() {
+        return None;
+    }
+    let mut out = String::with_capacity(s.len().min(max_chars));
+    let mut in_tag = false;
+    for ch in s.chars() {
+        if ch == '<' {
+            in_tag = true;
+            continue;
+        }
+        if ch == '>' {
+            in_tag = false;
+            continue;
+        }
+        if in_tag || (ch.is_control() && ch != '\n' && ch != ' ') {
+            continue;
+        }
+        out.push(ch);
+        if out.chars().count() >= max_chars {
+            break;
+        }
+    }
+    let trimmed = out.trim().to_string();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed)
+    }
+}
+
+fn sanitize_mailto_email(raw: Option<&str>) -> String {
+    let Some(s) = raw.map(str::trim).filter(|s| !s.is_empty()) else {
+        return String::new();
+    };
+    crate::search::validate_email_input(s).unwrap_or_default()
+}
+
+fn extract_report_str(
+    report_opt: Option<&Value>,
+    ptrs: &[&str],
+    max_chars: usize,
+) -> Option<String> {
+    let report = report_opt?;
+    for ptr in ptrs {
+        if let Some(val) = report.pointer(ptr).and_then(Value::as_str) {
+            if let Some(clean) = clean_plain_text(Some(val), max_chars) {
+                return Some(clean);
+            }
+        }
+    }
+    None
+}
+
+fn build_material_request_mailto(report_opt: Option<&Value>, display_address: &str) -> Value {
+    let addr_clean = clean_plain_text(Some(display_address), 240)
+        .filter(|s| s != "Subject Property")
+        .or_else(|| {
+            extract_report_str(
+                report_opt,
+                &[
+                    "/meta/displayAddress",
+                    "/geo/displayAddress",
+                    "/geo/matchedAddress",
+                    "/facts/address",
+                ],
+                240,
+            )
+        })
+        .unwrap_or_else(|| "Subject Property".to_string());
+
+    let recipient_email = extract_report_str(
+        report_opt,
+        &[
+            "/facts/mlsListing/agentEmail",
+            "/facts/mlsListing/listingAgent/email",
+            "/facts/listingAgent/email",
+            "/modules/mls/data/mlsListing/agentEmail",
+            "/modules/mls/data/mlsListing/listingAgent/email",
+        ],
+        200,
+    )
+    .map(|e| sanitize_mailto_email(Some(&e)))
+    .unwrap_or_default();
+
+    let agent_name = extract_report_str(
+        report_opt,
+        &[
+            "/facts/mlsListing/agentName",
+            "/facts/mlsListing/listingAgent/name",
+            "/facts/listingAgent/name",
+            "/modules/mls/data/mlsListing/agentName",
+            "/modules/mls/data/mlsListing/listingAgent/name",
+        ],
+        120,
+    );
+    let office_name = extract_report_str(
+        report_opt,
+        &[
+            "/facts/mlsListing/officeName",
+            "/facts/mlsListing/listingOffice/name",
+            "/modules/mls/data/mlsListing/officeName",
+        ],
+        140,
+    );
+
+    let recipient_label = match (agent_name.as_deref(), office_name.as_deref()) {
+        (Some(n), Some(o)) => format!("Listing Agent — {n} ({o})"),
+        (Some(n), None) => format!("Listing Agent — {n}"),
+        (None, Some(o)) => format!("Listing Brokerage — {o}"),
+        (None, None) => "Listing Agent or Buyer's Agent".to_string(),
+    };
+
+    let apn = extract_report_str(report_opt, &["/facts/apn", "/facts/parcelNumber"], 64);
+    let mls_num = extract_report_str(
+        report_opt,
+        &[
+            "/facts/mlsListing/mlsNumber",
+            "/modules/mls/data/mlsListing/mlsNumber",
+        ],
+        64,
+    );
+
+    let mut meta_lines = vec![format!("Property Address: {addr_clean}")];
+    if let Some(ref a) = apn {
+        meta_lines.push(format!("APN: {a}"));
+    }
+    if let Some(ref m) = mls_num {
+        meta_lines.push(format!("MLS #: {m}"));
+    }
+
+    let subject = format!("Disclosure & Inspection Packet Request — {addr_clean}");
+    let body = format!(
+        "Hello,\n\n\
+         I am evaluating the property below and would appreciate copies of any available disclosure and inspection documents (PDFs or .zip packet):\n\
+         {}\n\n\
+         Priority Documents Requested:\n\
+         1. Home Inspection Report (including Roof, Sewer Lateral & Foundation/Structural)\n\
+         2. Termite / Wood-Destroying Organism (WDO) Inspection Report\n\
+         3. Preliminary Title Report (Schedule A/B, easements & liens)\n\
+         4. Natural Hazard Disclosure (NHD) Report\n\
+         5. HOA Financials, CC&Rs & Reserve Study (if applicable)\n\
+         6. Building Permits & Municipal Records\n\n\
+         Please reply with the .zip packet or PDF files when available. Thank you!",
+        meta_lines.join("\n")
+    );
+
+    let mailto_href = format!(
+        "mailto:{}?subject={}&body={}",
+        recipient_email,
+        urlencoding::encode(&subject),
+        urlencoding::encode(&body)
+    );
+
+    json!({
+        "recipientEmail": recipient_email,
+        "recipientLabel": recipient_label,
+        "apn": apn,
+        "subject": subject,
+        "body": body,
+        "mailtoHref": mailto_href,
+        "uploadFollowUpPrompt": "Once you receive the .zip archive or PDF reports, upload them here in Docs & AI for your one-time private analysis — original files are discarded immediately after analysis.",
+        "smtpDisabled": true,
+    })
 }
 
 fn non_empty_str_ptr<'a>(v: &'a Value, ptr: &str) -> Option<&'a str> {

@@ -24,9 +24,8 @@ use open_estate::ai::{
     pdf::{extract_document_pages, UploadedDocInput},
     title_review::{parse_title_report_text, redact_title_pii},
 };
-use open_estate::db::{migrate_database, mysql_ddl, DbStore, RecommendedAgentRow, TABLE_NAMES};
+use open_estate::db::DbStore;
 use open_estate::guardrails::HttpDefenseShield;
-use open_estate::modules::agent_recommend::build_agent_recommendations;
 use open_estate::property::deep_research::{
     attach_data_point_anchor, run_deep_property_research, validate_ssrf_safe_public_url,
 };
@@ -211,7 +210,6 @@ async fn test_1_deterministic_inspection_title_hoa_synthesis_cached_persistence_
             "packetReview": packet_review
         }
     });
-    report["agentRecommendations"] = build_agent_recommendations(&db, &report).await;
 
     // 3. Verify cached_reports keeps `publicResearch.apiFetchedReviews` while stripping private browser `inspection`.
     let slug = common::SYNTH_PRIMARY_SLUG;
@@ -302,25 +300,10 @@ async fn test_2_api_unavailable_hints_agent_access_and_ssrf_url_helpers() {
     );
 
     report["publicResearch"] = deep_out.data;
-    report["agentRecommendations"] = build_agent_recommendations(&db, &report).await;
-    assert_eq!(
-        report["agentRecommendations"]["recommendedAgents"],
-        json!([]),
-        "default DB must have zero recommended agents"
-    );
-    assert_eq!(
-        report["agentRecommendations"]["recommendedInspectors"],
-        json!([]),
-        "default DB must have zero recommended inspectors"
-    );
-    assert_eq!(report["agentRecommendations"]["isEmpty"], json!(true));
 
     let html = render_report_html(&report);
     assert!(html.contains("id=\"docAgentHintCard\""));
-    assert!(html.contains("id=\"agentRecDrawer\""));
-    assert!(html.contains("id=\"agentMatchForm\""));
-    assert!(html.contains("openAgentRecommender"));
-    assert!(html.contains("data-empty-agents=\"1\""));
+    assert!(html.contains("api-doc-banner") || html.contains("docAgentHintCard"));
 
     // Part B: Verify SSRF public-URL guardrails, W3C text-fragment / PDF anchoring, and MLS connector helpers.
     assert!(
@@ -368,14 +351,8 @@ async fn test_2_api_unavailable_hints_agent_access_and_ssrf_url_helpers() {
 }
 
 #[tokio::test]
-async fn test_3_empty_db_agent_list_match_request_lettre_mime_and_db_migration() {
-    // 0. Schema parity check
-    assert_eq!(mysql_ddl().len(), TABLE_NAMES.len());
-    assert!(TABLE_NAMES.contains(&"agent_match_requests"));
-    assert!(TABLE_NAMES.contains(&"recommended_agents"));
-
-    let src_db_path = temp_sqlite_path("match-src");
-    let dst_db_path = temp_sqlite_path("match-dst");
+async fn test_3_commercial_brokerage_routes_return_404_and_personal_doc_review_with_mime() {
+    let db_path = temp_sqlite_path("personal-scope");
     let reports_dir = std::env::temp_dir().join(format!("openestate-rec-rpts-{}", Uuid::new_v4()));
     std::fs::create_dir_all(&reports_dir).unwrap();
 
@@ -383,42 +360,17 @@ async fn test_3_empty_db_agent_list_match_request_lettre_mime_and_db_migration()
     let env = EnvConfig::from_map(HashMap::from([
         (
             "SMTP_FROM".to_string(),
-            "Open Estate Concierge <concierge@open-estate.local>".to_string(),
-        ),
-        (
-            "AGENT_MATCH_NOTIFY_EMAIL".to_string(),
-            "intake@open-estate.local".to_string(),
+            "Open Estate Alerts <alerts@open-estate.local>".to_string(),
         ),
         ("SYNC_INTERVAL_MIN".to_string(), "0".to_string()),
     ]));
 
-    let db = DbStore::connect_url(&src_db_path.to_string_lossy(), Some("sqlite"))
+    let db = DbStore::connect_url(&db_path.to_string_lossy(), Some("sqlite"))
         .await
         .unwrap();
     db.ensure_schema().await.unwrap();
 
     let primary_report = load_synth_report(true);
-
-    // 1. Fresh DB MUST have 0 agents in `recommended_agents` (even if report has coBranding)
-    assert!(
-        db.list_active_recommended_agents()
-            .await
-            .unwrap()
-            .is_empty(),
-        "recommended_agents table must start completely empty"
-    );
-    let mut cobranded = primary_report.clone();
-    cobranded["coBranding"] = json!({
-        "fullName": "Licensed Buyer Specialist",
-        "brokerage": "Silicon Valley Brokerage",
-        "licenseNumber": "CA DRE #01999999"
-    });
-    let default_recs = build_agent_recommendations(&db, &cobranded).await;
-    assert_eq!(default_recs["recommendedAgents"], json!([]));
-    assert_eq!(default_recs["recommendedInspectors"], json!([]));
-    assert_eq!(default_recs["isEmpty"], json!(true));
-
-    // Seed synthetic primary report into SQLite and spin up Open Estate's own Axum router
     let slug = common::SYNTH_PRIMARY_SLUG;
     db.put_cached_report(slug, &primary_report, None)
         .await
@@ -456,210 +408,81 @@ async fn test_3_empty_db_agent_list_match_request_lettre_mime_and_db_migration()
         .build()
         .unwrap();
 
-    // 2. GET /api/agent-match/recommendations?slug=... returns empty list (`[]`) when DB has no agents
-    let get_res = client
-        .get(format!(
-            "{base_url}/api/agent-match/recommendations?slug={slug}"
-        ))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(get_res.status(), StatusCode::OK);
-    let get_body: Value = get_res.json().await.unwrap();
-    assert_eq!(get_body["ok"], json!(true));
-    assert_eq!(get_body["data"]["recommendedAgents"], json!([]));
-    assert_eq!(get_body["data"]["recommendedInspectors"], json!([]));
-    assert_eq!(get_body["data"]["isEmpty"], json!(true));
+    // 1. Personal `.zip`/PDF document review & condition routes remain mounted (`200 OK`)
+    for get_uri in [
+        format!("{base_url}/api/title-review?slug={slug}"),
+        format!("{base_url}/api/hoa-review?slug={slug}"),
+        format!("{base_url}/api/packet-review?slug={slug}"),
+        format!("{base_url}/api/repair-addendum?slug={slug}"),
+    ] {
+        let r = client.get(&get_uri).send().await.unwrap();
+        assert_eq!(
+            r.status(),
+            StatusCode::OK,
+            "Personal document review GET route {get_uri} must stay mounted"
+        );
+    }
 
-    // 3. POST /api/agent-match/request rejects invalid email & unknown fields
-    let bad_email_res = client
-        .post(format!("{base_url}/api/agent-match/request"))
-        .header("Origin", &base_url)
-        .json(&json!({
-            "slug": slug,
-            "needType": "buyer_agent",
-            "email": "not-an-email"
-        }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(bad_email_res.status(), StatusCode::BAD_REQUEST);
+    // 2. Removed brokerage/marketplace & CRE routes return `404 NOT_FOUND`
+    for removed_get in [
+        format!("{base_url}/api/agent-match/recommendations?slug={slug}"),
+        format!("{base_url}/api/marketplace/quotes?slug={slug}"),
+    ] {
+        let r = client.get(&removed_get).send().await.unwrap();
+        assert_eq!(
+            r.status(),
+            StatusCode::NOT_FOUND,
+            "Removed commercial GET route {removed_get} must return 404"
+        );
+    }
+    for removed_post in [
+        format!("{base_url}/api/agent-match/request"),
+        format!("{base_url}/api/marketplace/click"),
+        format!("{base_url}/api/cre/underwrite"),
+        format!("{base_url}/api/cre/business-eval"),
+        format!("{base_url}/api/cre-review"),
+    ] {
+        let r = client
+            .post(&removed_post)
+            .header("Origin", &base_url)
+            .json(&json!({ "slug": slug }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            r.status(),
+            StatusCode::NOT_FOUND,
+            "Removed commercial POST route {removed_post} must return 404"
+        );
+    }
 
-    let unknown_key_res = client
-        .post(format!("{base_url}/api/agent-match/request"))
-        .header("Origin", &base_url)
-        .json(&json!({
-            "slug": slug,
-            "needType": "buyer_agent",
-            "email": "buyer@example.com",
-            "unexpectedField": 123
-        }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(unknown_key_res.status(), StatusCode::BAD_REQUEST);
-
-    // 4. Valid POST /api/agent-match/request with empty agent table -> saves request to SQLite cleanly
-    let ok_res = client
-        .post(format!("{base_url}/api/agent-match/request"))
-        .header("Origin", &base_url)
-        .header("X-OpenEstate-Client-Id", "browser-client-abc12345")
-        .json(&json!({
-            "slug": slug,
-            "needType": "both",
-            "docNeeded": "inspection_and_disclosures",
-            "email": "buyer.alex@example.com",
-            "name": "Alex Buyer",
-            "phone": "408-555-0123",
-            "notes": "Need help pulling disclosure packet and booking sewer lateral scope."
-        }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(ok_res.status(), StatusCode::OK);
-    let ok_json: Value = ok_res.json().await.unwrap();
-    assert_eq!(ok_json["ok"], json!(true));
-    assert_eq!(ok_json["needType"], json!("both"));
-    assert_eq!(ok_json["smtpStatus"], json!("skipped"));
-    assert_eq!(ok_json["recommendedAgents"], json!([]));
-    assert_eq!(ok_json["isEmpty"], json!(true));
-
-    let saved_rows = db.list_agent_match_requests(None, 10).await.unwrap();
-    assert_eq!(saved_rows.len(), 1);
-    assert_eq!(saved_rows[0].buyer_email, "buyer.alex@example.com");
-    assert_eq!(saved_rows[0].need_type, "both");
-    assert_eq!(saved_rows[0].smtp_status, "skipped");
-    assert_eq!(saved_rows[0].zip.as_deref(), Some("95118"));
-
-    // 5. Direct inspection of `lettre::Message::formatted()` RFC 5322 / 8058 MIME bytes (zero fake SMTP listener)
+    // 3. Direct inspection of `lettre::Message::formatted()` RFC 5322 / 8058 MIME bytes
     let (mime_msg, rcpts, _subj) = build_lettre_message(
         &env,
         &EmailRequest {
-            to: vec!["intake@open-estate.local".to_string()],
-            subject: format!(
-                "[Open Estate] Local Buyer's Agent + Licensed Home Inspector Match Request — {}",
-                saved_rows[0].display_address
-            ),
-            text: Some(format!(
-                "Request ID: {}\nProperty: {}\nBuyer Email: {}\nRequested Role: {}\n",
-                saved_rows[0].id,
-                saved_rows[0].display_address,
-                saved_rows[0].buyer_email,
-                saved_rows[0].need_type
-            )),
+            to: vec!["buyer@example.com".to_string()],
+            subject: format!("[Open Estate] Alert Match — {}", common::SYNTH_PRIMARY_ADDRESS),
+            text: Some(format!("Property: {}\n", common::SYNTH_PRIMARY_ADDRESS)),
             html: None,
-            reply_to: Some(saved_rows[0].buyer_email.clone()),
+            reply_to: Some("buyer@example.com".to_string()),
             unsubscribe_url: Some(
                 "https://openestate.org/api/alerts/unsubscribe/tok123".to_string(),
             ),
         },
     )
     .expect("build_lettre_message");
-    assert_eq!(rcpts, vec!["intake@open-estate.local".to_string()]);
+    assert_eq!(rcpts, vec!["buyer@example.com".to_string()]);
     let raw_mime = String::from_utf8(mime_msg.formatted()).expect("valid UTF-8 MIME message");
     assert!(
-        raw_mime.contains("Open Estate Concierge")
-            && raw_mime.contains("<concierge@open-estate.local>"),
+        raw_mime.contains("Open Estate Alerts")
+            && raw_mime.contains("<alerts@open-estate.local>"),
         "unexpected From header in raw_mime:\n{raw_mime}"
     );
-    assert!(raw_mime.contains("To: intake@open-estate.local"));
-    assert!(raw_mime.contains("Reply-To: buyer.alex@example.com"));
     assert!(raw_mime
         .contains("List-Unsubscribe: <https://openestate.org/api/alerts/unsubscribe/tok123>"));
     assert!(raw_mime.contains("List-Unsubscribe-Post: List-Unsubscribe=One-Click"));
-    assert!(raw_mime.contains("100 Synthparcelalpha Ln"));
-    assert!(raw_mime.contains("buyer.alex@example.com"));
-
-    // 6. Verify DB onboarding (`upsert_recommended_agent`) filters by state/ZIP/license & migrates 1:1
-    db.upsert_recommended_agent(&RecommendedAgentRow {
-        id: "ag-ca-95118".to_string(),
-        role: "buyer_agent".to_string(),
-        full_name: "Elena Vance".to_string(),
-        firm_name: Some("Cambrian Valley Realty".to_string()),
-        license_number: "CA DRE #02044119".to_string(),
-        states_json: Some("[\"CA\"]".to_string()),
-        zips_json: Some("[\"95118\"]".to_string()),
-        cities_json: None,
-        min_price: Some(900_000),
-        max_price: Some(4_000_000),
-        specialties_json: Some("[\"MLS Disclosure Packet\"]".to_string()),
-        languages_json: Some("[\"English\"]".to_string()),
-        phone: Some("408-555-0144".to_string()),
-        email: Some("elena@cambrianrealty.example".to_string()),
-        website_url: Some("https://cambrianrealty.example/elena".to_string()),
-        notes: None,
-        is_sponsored: false,
-        active: true,
-        created_at: "2026-11-12T16:00:00Z".to_string(),
-        updated_at: "2026-11-12T16:00:00Z".to_string(),
-    })
-    .await
-    .unwrap();
-    db.upsert_recommended_agent(&RecommendedAgentRow {
-        id: "ag-wa-98103".to_string(),
-        role: "buyer_agent".to_string(),
-        full_name: "Seattle Specialist".to_string(),
-        firm_name: None,
-        license_number: "WA DOL #112233".to_string(),
-        states_json: Some("[\"WA\"]".to_string()),
-        zips_json: Some("[\"98103\"]".to_string()),
-        cities_json: None,
-        min_price: None,
-        max_price: None,
-        specialties_json: None,
-        languages_json: None,
-        phone: None,
-        email: None,
-        website_url: None,
-        notes: None,
-        is_sponsored: false,
-        active: true,
-        created_at: "2026-11-12T16:00:00Z".to_string(),
-        updated_at: "2026-11-12T16:00:00Z".to_string(),
-    })
-    .await
-    .unwrap();
-
-    let after_insert: Value = client
-        .get(format!(
-            "{base_url}/api/agent-match/recommendations?slug={slug}"
-        ))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    assert_eq!(after_insert["data"]["isEmpty"], json!(false));
-    assert_eq!(
-        after_insert["data"]["recommendedAgents"]
-            .as_array()
-            .unwrap()
-            .len(),
-        1
-    );
-    assert_eq!(
-        after_insert["data"]["recommendedAgents"][0]["partnerId"],
-        json!("ag-ca-95118")
-    );
-
-    // 7. Verify `migrate_database` migrates both `agent_match_requests` and `recommended_agents` cleanly
-    let dst_db = DbStore::connect_url(&dst_db_path.to_string_lossy(), Some("sqlite"))
-        .await
-        .unwrap();
-    dst_db.ensure_schema().await.unwrap();
-    let mig = migrate_database(&db, &dst_db)
-        .await
-        .expect("migrate_database");
-    assert_eq!(mig.tables.len(), TABLE_NAMES.len());
-    let migrated_reqs = dst_db.list_agent_match_requests(None, 10).await.unwrap();
-    assert_eq!(migrated_reqs.len(), 1);
-    assert_eq!(migrated_reqs[0].id, saved_rows[0].id);
-    let migrated_agents = dst_db.list_active_recommended_agents().await.unwrap();
-    assert_eq!(migrated_agents.len(), 2);
 
     let _ = tx.send(());
-    cleanup_sqlite_files(&src_db_path);
-    cleanup_sqlite_files(&dst_db_path);
+    cleanup_sqlite_files(&db_path);
     let _ = std::fs::remove_dir_all(&reports_dir);
 }

@@ -2306,13 +2306,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cloud_fallback_failure_without_osrm_emits_cloud_fallback_unavailable() {
+    async fn unconfigured_osrm_without_cloud_extensions_emits_router_unset() {
         let unused = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind");
         let closed_addr = unused.local_addr().expect("addr");
         drop(unused);
 
+        // Even if commercial env vars are present, Personal Edition has no BYOK cloud routing
+        // extensions registered on default ExtensionHub, so it cleanly emits RouterUnset.
         let env = EnvConfig::from_map(std::collections::HashMap::from([
             (
                 crate::modules::routing_providers::ENV_FREEROUTE_ALLOW_KEYLESS.to_string(),
@@ -2332,18 +2334,10 @@ mod tests {
         let dst = [LatLon::new(37.3382, -121.8863)];
         let matrix = client.drive_matrix(&src, &dst).await;
         let cell = matrix.cells[0][0].expect("estimate cell");
-        assert_eq!(cell.reason, Some(EstimateReason::RouterDown));
+        assert_eq!(cell.reason, Some(EstimateReason::RouterUnset));
         assert_eq!(
             cell.fallback_reason,
-            Some(FallbackReason::CloudFallbackUnavailable)
-        );
-        assert!(
-            matrix
-                .warnings
-                .iter()
-                .any(|w| w.contains("Cloud routing fallback unavailable")),
-            "expected cloud fallback warning, got: {:?}",
-            matrix.warnings
+            Some(FallbackReason::NoOsrmRegionConfigured)
         );
         assert!(
             !matrix

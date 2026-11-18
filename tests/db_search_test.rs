@@ -13,8 +13,7 @@ mod common;
 
 use open_estate::db::{
     build_mysql_upsert, listing_slug, migrate_database, migrate_database_with_batch, mysql_ddl,
-    parse_mysql_connect_options, BuildQueueJobInput, DbBackend, DbStore, SqlParam,
-    RAPID_TABLE_NAMES, TABLE_NAMES,
+    parse_mysql_connect_options, BuildQueueJobInput, DbBackend, DbStore, SqlParam, TABLE_NAMES,
 };
 use open_estate::search::{
     build_lettre_message, build_match_alert_email, compile_filters_to_sql, create_subscription,
@@ -468,12 +467,6 @@ async fn test_2_oci_mysql_heatwave_ddl_and_upsert_compliance() {
             !up.contains(" JSON"),
             "Clean-slate v3 schema must contain ZERO JSON columns ({table_name})"
         );
-        if RAPID_TABLE_NAMES.contains(&table_name) {
-            assert!(
-                !up.contains(" TEXT") && !up.contains("BLOB"),
-                "HeatWave Rapid analytical table {table_name} must contain ZERO TEXT/BLOB columns"
-            );
-        }
     }
 
     // Verify MySQL 8.4/9.0 & OCI HeatWave `AS new_row ON DUPLICATE KEY UPDATE col = new_row.col` syntax

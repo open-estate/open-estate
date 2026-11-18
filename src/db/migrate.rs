@@ -1,10 +1,9 @@
-// Live streaming database migration engine (`SQLite WAL <-> OCI MySQL 8.4 / HeatWave Rapid`)
+// Live streaming database migration engine (`SQLite WAL <-> MySQL 8.4`)
 // for the clean-slate 44-table `openestate.db.v1` Protobuf schema.
 //
 // Streams all 44 tables in deterministic PK-ordered batches idempotently via
-// `ON CONFLICT` (SQLite) / `AS new_row ON DUPLICATE KEY UPDATE` (MySQL 8.4/9.0).
-// Automatically unloads HeatWave Rapid tables before bulk ingest, runs `ANALYZE TABLE`,
-// and reloads `SECONDARY_ENGINE = RAPID` upon completion.
+// `ON CONFLICT` (SQLite) / `AS new_row ON DUPLICATE KEY UPDATE` (MySQL 8.4/9.0)
+// and refreshes MySQL optimizer statistics (`ANALYZE TABLE`) upon completion.
 
 use crate::db::{
     assert_safe_ident, compress_bytes_zstd_dict, decompress_bytes_zstd_any, mysql_opt_bytes,
@@ -1053,12 +1052,8 @@ pub async fn migrate_database_with_batch(
 ) -> Result<MigrationSummary> {
     let eff_batch = (batch_size.clamp(1, 5_000)) as i64;
     let t0 = now_unix_ms();
-    src.ensure_schema_without_rapid().await?;
-    dst.ensure_schema_without_rapid().await?;
-
-    // Unload Rapid analytical tables on destination before bulk streaming to avoid transactional
-    // change-propagation overhead during batch upserts; reload after `ANALYZE TABLE` at the end.
-    dst.unload_rapid_tables_if_loaded().await?;
+    src.ensure_schema().await?;
+    dst.ensure_schema().await?;
 
     let mut tables = BTreeMap::new();
     let mut total_rows = 0_usize;
@@ -1147,8 +1142,8 @@ pub async fn migrate_database_with_batch(
         dst.recompute_report_compressed_bytes(report_id).await?;
     }
 
-    // Refresh optimizer table statistics and load HeatWave Rapid analytical tables if enabled.
-    dst.analyze_and_reload_rapid_after_bulk().await?;
+    // Refresh MySQL optimizer table statistics after bulk migration.
+    dst.analyze_mysql_tables_after_bulk().await?;
 
     dst.l1_reports.invalidate_all();
     dst.l1_llm.invalidate_all();

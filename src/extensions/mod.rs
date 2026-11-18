@@ -56,10 +56,6 @@ mod tests {
             "us_fiber_carriers",
             "us_cable_wireless_isp",
             "osrm_routing",
-            "mapbox_routing",
-            "locationiq_routing",
-            "freeroute_routing",
-            "openrouteservice_routing",
         ] {
             assert!(
                 hub.is_enabled(id),
@@ -620,9 +616,7 @@ response_mapping:
     fn routing_manifests_use_non_diagonal_matrix_entries_and_no_public_demo_url() {
         let osrm_oas = include_str!("../../extensions/osrm_routing/openapi.yaml");
         assert!(!osrm_oas.contains("project-osrm.org"));
-        let freeroute_m = include_str!("../../extensions/freeroute_routing/manifest.yaml");
-        assert!(freeroute_m.contains("durations[0][1]"));
-        let ors_m = include_str!("../../extensions/openrouteservice_routing/manifest.yaml");
-        assert!(ors_m.contains("durations[0][1]"));
+        let osrm_m = include_str!("../../extensions/osrm_routing/manifest.yaml");
+        assert!(osrm_m.contains("durations[0][1]"));
     }
 }

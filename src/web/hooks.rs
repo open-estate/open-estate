@@ -9,7 +9,7 @@ use crate::metering::{
     default_oss_authorize, ExtensionUsageEvent, InvocationContext, InvocationDecision,
 };
 pub use crate::shared::scrub_rental_source_brands;
-use crate::shared::EnvConfig;
+use crate::shared::{EnvConfig, HttpClient};
 use crate::web::http_util::{html_response, json_response};
 use crate::web::render::safe_inline_js;
 use crate::web::server::AppState;
@@ -418,6 +418,17 @@ pub trait ServerExtensionHooks: Send + Sync + 'static {
         _state: &'a AppState,
     ) -> BoxFuture<'a, anyhow::Result<()>> {
         Box::pin(async { Ok(()) })
+    }
+
+    /// Optional report enrichment hook invoked during report generation after core residential
+    /// scoring/summary assembly (used by downstream overlays to attach commercial/land sections).
+    fn enrich_report<'a>(
+        &'a self,
+        _report: &'a mut serde_json::Value,
+        _http: &'a HttpClient,
+        _env: &'a EnvConfig,
+    ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
+        Box::pin(async {})
     }
 
     /// Optional telemetry hook invoked whenever a report viewer follows a `GET /redirect` reference link.

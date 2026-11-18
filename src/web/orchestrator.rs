@@ -1,15 +1,14 @@
-// Full-speed single-pass parallel Tokio DAG report orchestrator & 10,000-home ScanEngine runner.
+// Full-speed single-pass parallel Tokio DAG report orchestrator.
 // Zero Cloudflare subrequest or 30s wall-clock limits: all 50+ data connectors run concurrently
 // in-process, deterministic HTML renders immediately, and AI synthesis completes in the background.
 
 use crate::ai::run_ai_analyst_with_prompt;
-use crate::cre::attach_cre_section_with_live_hydration; // [feat/cre-mode]
 use crate::db::{
     extract_section_json, report_has_osrm_router_down, BuildQueueJobInput, DbStore,
     ReportHeaderProto, ReportSectionEnvelopeProto, ReportSectionKind,
 };
 use crate::modules::{
-    access::{find_city_hall, run_access_with_env, run_access_with_env_and_hub},
+    access::{find_city_hall, run_access_with_env_and_hub},
     amenities::run_amenities,
     civic::run_civic,
     commute::{
@@ -29,7 +28,6 @@ use crate::property::{
     refresh_derived_fact_summaries, run_market_trends, run_permits_and_condition,
     valuation::run_valuation_with_rental,
 };
-use crate::scanner::engine::{HomeScanRunner, ScanItemOutcome, ScanTask};
 use crate::search::ingest_report_into_db;
 use crate::shared::{
     bbox_around, haversine_mi, humanize_progress_step, now_iso, now_unix_secs, round_n,
@@ -37,10 +35,8 @@ use crate::shared::{
     SourceItem,
 };
 use crate::web::{
-    cdn_cache::{spawn_static_export_if_configured, static_mirror_config_from_env},
     hooks::RentalResearchData,
     house3d_api::{spawn_scene_warmup, SceneDeps},
-    render::render_report_html_with_brand,
     server::AppState,
     summary::{
         apply_native_translations, backfill_facts_schools, build_decision_factors, summarize_report,
@@ -1374,10 +1370,6 @@ where
         report["sources"] = json!(dedupe_sources(combined_srcs));
     }
 
-    let sas_out = crate::modules::seller_agent_suite::build_seller_and_agent_suites(&report);
-    report["sellerSuite"] = sas_out.seller_suite;
-    report["agentSuite"] = sas_out.agent_suite;
-
     report["summary"] = summarize_report(&report);
     apply_native_translations(&mut report, None, true);
     report["factors"] = crate::scoring::factors::HomeFactors::from_report(&report).to_report_json();
@@ -1385,19 +1377,10 @@ where
         crate::property::house_profile::compute_home_quality(&report),
     )?;
 
-    if attach_cre_section_with_live_hydration(http, env, &mut report, None, false).await {
-        // Refresh summary if unimproved land/farmland valuation was backfilled from CRE Land & Farm engine
-        if matches!(
-            report
-                .pointer("/cre/classification/assetClassCode")
-                .and_then(|v| v.as_str()),
-            Some("commercial_land" | "agricultural_farm")
-        ) {
-            report["summary"] = summarize_report(&report);
-        }
+    if let Some(st) = app_state {
+        st.hooks.enrich_report(&mut report, http, env).await;
+        report["summary"] = summarize_report(&report);
     }
-    report["agentRecommendations"] =
-        crate::modules::agent_recommend::build_agent_recommendations(db, &report).await;
 
     let zip_opt = report.pointer("/geo/zip").and_then(|v| v.as_str());
     let engagement = crate::modules::engagement::build_engagement_for_report(
@@ -1845,6 +1828,16 @@ pub async fn recompute_report_access(
     db: &DbStore,
     slug: &str,
 ) -> Result<RecomputeAccessOutcome> {
+    recompute_report_access_with_hub(http, env, None, db, slug).await
+}
+
+pub async fn recompute_report_access_with_hub(
+    http: &HttpClient,
+    env: &EnvConfig,
+    hub: Option<Arc<crate::extensions::ExtensionHub>>,
+    db: &DbStore,
+    slug: &str,
+) -> Result<RecomputeAccessOutcome> {
     let clean_slug = slug.trim();
     if clean_slug.is_empty() {
         return Ok(RecomputeAccessOutcome {
@@ -1908,9 +1901,10 @@ pub async fn recompute_report_access(
         .filter(|v| !v.is_null());
     let city_hall = synthesize_city_hall_from_access(&partial);
 
-    let acc_out = run_access_with_env(
+    let acc_out = run_access_with_env_and_hub(
         http,
         Some(env),
+        hub,
         lat,
         lon,
         &geo,
@@ -2066,17 +2060,6 @@ pub async fn recompute_report_access(
         &acc_env,
     )
     .await?;
-
-    if static_mirror_config_from_env(env).is_some() {
-        if let Ok(Some(full_rec)) = db.get_cached_report(&hdr.slug).await {
-            let html = render_report_html_with_brand(
-                &full_rec.report,
-                &env.brand_name(),
-                &env.brand_domain(),
-            );
-            spawn_static_export_if_configured(env, &hdr.slug, &full_rec.report, html);
-        }
-    }
 
     Ok(RecomputeAccessOutcome {
         slug: hdr.slug,
@@ -3437,110 +3420,4 @@ pub async fn await_or_build_report(
     opts: AwaitReportOptions,
 ) -> Result<Value> {
     job_mgr.await_or_build_report(http, env, db, opts).await
-}
-
-/// Connects the 50-source report builder + `DbStore` into the 10,000-home `ScanEngine`.
-#[derive(Clone)]
-pub struct OpenEstateScanRunner {
-    pub http: HttpClient,
-    pub env: EnvConfig,
-    pub db: DbStore,
-    pub data_dir: Option<PathBuf>,
-}
-
-impl HomeScanRunner for OpenEstateScanRunner {
-    fn scan_one(
-        &self,
-        item: ScanTask,
-    ) -> impl std::future::Future<Output = Result<ScanItemOutcome>> + Send {
-        let http = self.http.clone();
-        let env = self.env.clone();
-        let db = self.db.clone();
-        let data_dir = self.data_dir.clone();
-        async move {
-            let t0 = Instant::now();
-            if !item.force_refresh {
-                if let Ok(Some(hdr)) = db.get_report_header(&item.slug).await {
-                    let summary_val = db
-                        .get_report_section(&hdr.slug, ReportSectionKind::ReportSectionSummary)
-                        .await
-                        .ok()
-                        .flatten()
-                        .and_then(|env| extract_section_json(&env).ok())
-                        .and_then(|v| v.pointer("/root/summary").cloned())
-                        .unwrap_or(Value::Null);
-                    return Ok(ScanItemOutcome {
-                        slug: item.slug,
-                        address: item.address,
-                        matched_address: (!hdr.display_address.trim().is_empty())
-                            .then_some(hdr.display_address),
-                        lat: hdr.lat,
-                        lon: hdr.lon,
-                        overall_score: hdr.overall_score,
-                        estimated_value: hdr.estimated_value.map(|v| v as f64),
-                        cached: true,
-                        duration_ms: t0.elapsed().as_millis() as u64,
-                        report_summary: summary_val,
-                    });
-                }
-            }
-
-            let eff_http = if item.force_refresh {
-                http.with_cache_bypass(true)
-            } else {
-                http.clone()
-            };
-            let rep = Box::pin(build_full_report(
-                &eff_http,
-                &env,
-                &db,
-                BuildReportOptions {
-                    address: item.address.clone(),
-                    slug_override: None,
-                    pre_geocoded: None,
-                    given_facts: None,
-                    run_ai: !item.skip_ai,
-                    data_dir,
-                },
-                |_| {},
-                |_| async {},
-            ))
-            .await?;
-
-            if let Some(err) = rep.get("error").and_then(|v| v.as_str()) {
-                return Err(anyhow!("{err}"));
-            }
-
-            let c_slug = rep
-                .pointer("/meta/slug")
-                .and_then(|v| v.as_str())
-                .unwrap_or(&item.slug)
-                .to_string();
-            let _ = db.put_cached_report(&c_slug, &rep, None).await;
-            if !c_slug.is_empty() {
-                let _ = db.record_report_refresh(&c_slug).await;
-            }
-            let _ = ingest_report_into_db(&db, Some(&eff_http), &env, &rep, false).await;
-
-            Ok(ScanItemOutcome {
-                slug: c_slug,
-                address: item.address,
-                matched_address: rep
-                    .pointer("/meta/displayAddress")
-                    .and_then(|v| v.as_str())
-                    .map(String::from),
-                lat: rep.pointer("/geo/lat").and_then(|v| v.as_f64()),
-                lon: rep.pointer("/geo/lon").and_then(|v| v.as_f64()),
-                overall_score: rep
-                    .pointer("/summary/scores/overall")
-                    .and_then(|v| v.as_f64()),
-                estimated_value: rep
-                    .pointer("/modules/valuation/data/estimate/value")
-                    .and_then(|v| v.as_f64()),
-                cached: false,
-                duration_ms: t0.elapsed().as_millis() as u64,
-                report_summary: rep.get("summary").cloned().unwrap_or(Value::Null),
-            })
-        }
-    }
 }

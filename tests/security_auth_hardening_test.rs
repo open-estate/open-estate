@@ -431,11 +431,6 @@ async fn test_fail_closed_operator_batch_ops_csrf_and_subscription_safeguards() 
         (reqwest::Method::POST, "/api/sync", Some(json!({ "zip": "95118" }))),
         (
             reqwest::Method::POST,
-            "/api/listings/ingest",
-            Some(json!({ "zip": "95118", "listings": [] })),
-        ),
-        (
-            reqwest::Method::POST,
             "/api/property/100-main-st-95118/platform-signals",
             Some(json!({ "zillow": { "saves": 1 } })),
         ),
@@ -444,18 +439,6 @@ async fn test_fail_closed_operator_batch_ops_csrf_and_subscription_safeguards() 
             "/api/listings/shop?zip=95118&syncIfEmpty=true",
             None,
         ),
-        (
-            reqwest::Method::POST,
-            "/api/scan/batch",
-            Some(json!({ "addresses": ["100 Synthbatch St, San Jose, CA 95118"] })),
-        ),
-        (reqwest::Method::GET, "/api/scan/batch/nonexistent", None),
-        (
-            reqwest::Method::POST,
-            "/api/scan/batch/nonexistent/cancel",
-            None,
-        ),
-        (reqwest::Method::GET, "/api/scan/metrics", None),
     ] {
         let mut req = client
             .request(method.clone(), format!("{}{path}", srv.base_url))
@@ -468,6 +451,26 @@ async fn test_fail_closed_operator_batch_ops_csrf_and_subscription_safeguards() 
             resp.status(),
             StatusCode::UNAUTHORIZED,
             "expected fail-closed 401 on {method} {path}"
+        );
+    }
+
+    for (method, path) in [
+        (reqwest::Method::POST, "/api/listings/ingest"),
+        (reqwest::Method::POST, "/api/scan/batch"),
+        (reqwest::Method::GET, "/api/scan/batch/nonexistent"),
+        (reqwest::Method::POST, "/api/scan/batch/nonexistent/cancel"),
+        (reqwest::Method::GET, "/api/scan/metrics"),
+    ] {
+        let resp = client
+            .request(method.clone(), format!("{}{path}", srv.base_url))
+            .header("Origin", &srv.base_url)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::NOT_FOUND,
+            "expected 404 on removed commercial/batch route {method} {path}"
         );
     }
 
@@ -769,10 +772,10 @@ async fn test_verifier_audit_regressions_admin_csrf_auth_exemptions_and_acl() {
     );
     let csrf_app = build_router(csrf_state);
 
-    // Cookie-authenticated ops mutation WITHOUT Origin/Sec-Fetch-Site MUST fail 403 CSRF
+    // Cookie-authenticated admin/ops mutation WITHOUT Origin/Sec-Fetch-Site MUST fail 403 CSRF
     for endpoint in [
-        "/api/admin/reports/export-static",
-        "/api/admin/subscriptions/retranslate",
+        "/api/admin/extensions/census_geocoder/toggle",
+        "/api/admin/subscriptions",
     ] {
         let missing_origin = csrf_app
             .clone()
@@ -934,12 +937,12 @@ async fn test_verifier_audit_regressions_admin_csrf_auth_exemptions_and_acl() {
         .unwrap();
     assert_eq!(auth_otp.status(), StatusCode::OK);
 
-    // FAIL #3A: GET /api/agent-match/recommendations?slug=private MUST enforce authorize_report
+    // FAIL #3A: GET /api/report?slug=private MUST enforce authorize_report
     let denied_recs = ext_app
         .clone()
         .oneshot(
             Request::builder()
-                .uri(format!("/api/agent-match/recommendations?slug={priv_agent_slug}"))
+                .uri(format!("/api/report?slug={priv_agent_slug}"))
                 .header(header::HOST, "127.0.0.1:8080")
                 .header(header::ORIGIN, "http://127.0.0.1:8080")
                 .header(header::COOKIE, &oe_cookie)
@@ -955,7 +958,7 @@ async fn test_verifier_audit_regressions_admin_csrf_auth_exemptions_and_acl() {
         .clone()
         .oneshot(
             Request::builder()
-                .uri(format!("/api/agent-match/recommendations?slug={priv_agent_slug}"))
+                .uri(format!("/api/report?slug={priv_agent_slug}"))
                 .header(header::HOST, "127.0.0.1:8080")
                 .header(header::ORIGIN, "http://127.0.0.1:8080")
                 .header(header::COOKIE, &oe_cookie)

@@ -207,7 +207,9 @@
       en: 'What can I do with it?',
       zh: '这处房产还能怎么利用或改建？',
       es: '¿Qué puedo hacer con la propiedad?',
-      sections: ['house3d', 'house', 'remodel', 'fengshui', 'cre', 'creReview', 'ai', 'more']
+      sections: (window.__CLOUD_CRE_ENABLED__ === true || !!(window.R && ((window.R.modules && window.R.modules.cre) || window.R.cre)))
+        ? ['house3d', 'house', 'remodel', 'fengshui', 'cre', 'creReview', 'ai', 'more']
+        : ['house3d', 'house', 'remodel', 'fengshui', 'ai', 'more']
     }
   ];
 
