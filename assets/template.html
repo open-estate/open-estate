@@ -14051,6 +14051,22 @@ function roleStarterQuestions(activeRole) {
         ];
 }
 
+function syncWidgetChatLogScroll(logEl, opts) {
+  if (!logEl) return;
+  const o = opts || {};
+  if (window.OpenEstateCore && typeof window.OpenEstateCore.syncChatLogScroll === 'function') {
+    window.OpenEstateCore.syncChatLogScroll(logEl, o);
+    return;
+  }
+  if (!o.hasEntries) {
+    logEl.scrollTop = 0;
+  } else if (o.pending || o.lastRole === 'user' || !o.msgEl) {
+    logEl.scrollTop = logEl.scrollHeight;
+  } else if (typeof o.msgEl.offsetTop === 'number') {
+    logEl.scrollTop = Math.max(0, o.msgEl.offsetTop);
+  }
+}
+
 function renderOpenEstateWidget() {
   const fab = document.getElementById('openEstateFab');
   const dr = document.getElementById('openEstateDrawer');
@@ -14158,8 +14174,10 @@ function renderOpenEstateWidget() {
   };
 
   const appendEntryDom = (entry) => {
+    const entryRole = entry.role === 'user' ? 'user' : 'assistant';
     const d = document.createElement('div');
-    d.className = 'msg ' + (entry.role === 'user' ? 'u' : 'a');
+    d.className = 'msg ' + (entryRole === 'user' ? 'u' : 'a');
+    d.setAttribute('data-chat-entry', entryRole);
     const txtSpan = document.createElement('div');
     txtSpan.className = 'db-md';
     txtSpan.innerHTML = renderChatMarkdown(entry.content || '');
@@ -14195,7 +14213,7 @@ function renderOpenEstateWidget() {
       d.appendChild(fWrap);
     }
     logEl.appendChild(d);
-    logEl.scrollTop = logEl.scrollHeight;
+    syncWidgetChatLogScroll(logEl, { hasEntries: true, lastRole: entryRole, msgEl: d });
     return d;
   };
 
@@ -14219,7 +14237,8 @@ function renderOpenEstateWidget() {
     wait.className = 'msg a';
     wait.textContent = tr3(`Thinking with ${brandInfo().name} AI…`, `${brandInfo().name} AI 正在核查档案…`, 'Consultando registros verificados…');
     logEl.appendChild(wait);
-    logEl.scrollTop = logEl.scrollHeight;
+    syncWidgetChatLogScroll(logEl, { hasEntries: true, pending: true });
+    let latestReplyEl = null;
     try {
       if (location.protocol === 'file:') throw new Error('offline_file');
       const res = await fetch('/api/ask', {
@@ -14239,7 +14258,7 @@ function renderOpenEstateWidget() {
       };
       entries.push(asstEntry);
       saveOpenEstateSession(entries);
-      appendEntryDom(asstEntry);
+      latestReplyEl = appendEntryDom(asstEntry);
       statusEl.textContent = j.refused
         ? TKEY('ai.guardrailBlocked')
         : TKEY('ai.answeredIn', { sec: ((j.ms || 0) / 1000).toFixed(1) });
@@ -14247,9 +14266,14 @@ function renderOpenEstateWidget() {
       wait.textContent = e.message === 'offline_file'
         ? tr3(`Live Q&A requires the ${brandInfo().name} server.`, `实时问答需连接 ${brandInfo().name} 服务端。`, `Las preguntas en vivo requieren el servidor ${brandInfo().name}.`)
         : `${tr3('Could not reach /api/ask', '无法连接问答接口 /api/ask', 'No se pudo conectar con /api/ask')} (${e.message}).`;
+      wait.setAttribute('data-chat-entry', 'assistant');
+      latestReplyEl = wait;
     } finally {
       sendBtn.disabled = false;
       clampOpenEstateDrawer();
+      if (latestReplyEl) {
+        syncWidgetChatLogScroll(logEl, { hasEntries: true, lastRole: 'assistant', msgEl: latestReplyEl });
+      }
     }
   }
 
@@ -14312,6 +14336,7 @@ function renderOpenEstateWidget() {
     saveOpenEstateSession([]);
     logEl.innerHTML = '';
     renderGreeting();
+    syncWidgetChatLogScroll(logEl, { hasEntries: false });
   });
   fab.onclick = () => window.toggleOpenEstateChat();
   clampOpenEstateDrawer();
@@ -14334,8 +14359,20 @@ window.openOpenEstateChat = function openOpenEstateChat(prefillQ) {
   const inEl = document.getElementById('chatIn');
   if (prefillQ && typeof _dbSendFn === 'function') {
     _dbSendFn(prefillQ);
-  } else if (inEl && inEl.focus) {
-    try { inEl.focus(); } catch {}
+  } else {
+    const logEl = dr ? dr.querySelector('#chatLog') : null;
+    if (logEl) {
+      const chatEls = logEl.querySelectorAll('[data-chat-entry]');
+      const lastEl = chatEls.length ? chatEls[chatEls.length - 1] : null;
+      syncWidgetChatLogScroll(logEl, {
+        hasEntries: Boolean(lastEl),
+        lastRole: lastEl ? lastEl.getAttribute('data-chat-entry') : '',
+        msgEl: lastEl,
+      });
+    }
+    if (inEl && inEl.focus) {
+      try { inEl.focus(); } catch {}
+    }
   }
 };
 

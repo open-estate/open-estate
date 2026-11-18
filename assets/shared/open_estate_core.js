@@ -486,6 +486,57 @@
     }
   }
 
+  function scrollChatToMessageStart(logEl, msgEl) {
+    if (!logEl) return;
+    if (!msgEl) {
+      if (isN(logEl.scrollHeight)) logEl.scrollTop = logEl.scrollHeight;
+      return;
+    }
+    try {
+      if (typeof logEl.getBoundingClientRect === 'function' && typeof msgEl.getBoundingClientRect === 'function') {
+        var logRect = logEl.getBoundingClientRect();
+        var msgRect = msgEl.getBoundingClientRect();
+        var ch = Number(logEl.clientHeight) || 0;
+        if (logRect && msgRect && (logRect.height > 0 || ch > 0)) {
+          var padTop = 0;
+          try {
+            if (typeof getComputedStyle === 'function') {
+              padTop = parseFloat(getComputedStyle(logEl).paddingTop) || 0;
+            }
+          } catch (e) {}
+          var clientTop = Number(logEl.clientTop) || 0;
+          var curTop = Number(logEl.scrollTop) || 0;
+          var targetTop = curTop + (msgRect.top - (logRect.top + clientTop)) - padTop;
+          if (isN(targetTop)) {
+            var nextTop = Math.max(0, Math.round(targetTop));
+            if (isN(logEl.scrollHeight) && ch > 0) {
+              nextTop = Math.min(Math.max(0, logEl.scrollHeight - ch), nextTop);
+            }
+            logEl.scrollTop = nextTop;
+            return;
+          }
+        }
+      }
+    } catch (e2) {}
+    if (typeof msgEl.offsetTop === 'number' && isN(msgEl.offsetTop)) {
+      logEl.scrollTop = Math.max(0, msgEl.offsetTop);
+    }
+  }
+
+  function syncChatLogScroll(logEl, opts) {
+    if (!logEl) return;
+    var o = opts || {};
+    if (!o.hasEntries) {
+      logEl.scrollTop = 0;
+      return;
+    }
+    if (o.pending || o.lastRole === 'user') {
+      if (isN(logEl.scrollHeight)) logEl.scrollTop = logEl.scrollHeight;
+      return;
+    }
+    scrollChatToMessageStart(logEl, o.msgEl);
+  }
+
   window.OpenEstateCore = {
     __v: 1,
     THREE_URLS: THREE_URLS,
@@ -507,6 +558,8 @@
     parseTourUrl: parseTourUrl,
     scrubProse: scrubProse,
     systemColorScheme: systemColorScheme,
-    onSystemColorSchemeChange: onSystemColorSchemeChange
+    onSystemColorSchemeChange: onSystemColorSchemeChange,
+    scrollChatToMessageStart: scrollChatToMessageStart,
+    syncChatLogScroll: syncChatLogScroll
   };
 })();

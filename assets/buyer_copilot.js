@@ -1439,8 +1439,6 @@
       } finally {
         state.chatSending = false;
         renderBody();
-        var logEl = bodyEl.querySelector('#bcChatLog');
-        if (logEl) logEl.scrollTop = logEl.scrollHeight;
       }
     }
 
@@ -1874,6 +1872,38 @@
 
       bodyEl.innerHTML = html.join('');
       bindDynamicEvents();
+      if (state.activeFn === 'chat') {
+        syncBcChatScroll();
+      }
+    }
+
+    function syncBcChatScroll() {
+      var logEl = bodyEl.querySelector('#bcChatLog');
+      if (!logEl) return;
+      var hasEntries = state.chatHistory.length > 0;
+      var last = hasEntries ? state.chatHistory[state.chatHistory.length - 1] : null;
+      var lastRole = last ? (last.role === 'user' ? 'user' : 'assistant') : '';
+      var msgEl = null;
+      if (!state.chatSending && lastRole === 'assistant') {
+        var asstEls = logEl.querySelectorAll('[data-bc-chat-entry="assistant"]');
+        if (asstEls && asstEls.length) msgEl = asstEls[asstEls.length - 1];
+      }
+      if (window.OpenEstateCore && typeof window.OpenEstateCore.syncChatLogScroll === 'function') {
+        window.OpenEstateCore.syncChatLogScroll(logEl, {
+          hasEntries: hasEntries,
+          pending: !!state.chatSending,
+          lastRole: lastRole,
+          msgEl: msgEl
+        });
+        return;
+      }
+      if (!hasEntries) {
+        logEl.scrollTop = 0;
+      } else if (state.chatSending || lastRole === 'user' || !msgEl) {
+        logEl.scrollTop = logEl.scrollHeight;
+      } else if (typeof msgEl.offsetTop === 'number') {
+        logEl.scrollTop = Math.max(0, msgEl.offsetTop);
+      }
     }
 
     function renderChatPanel() {
@@ -1943,7 +1973,7 @@
       } else {
         state.chatHistory.forEach(function (msg) {
           var cls = msg.role === 'user' ? 'user' : 'assistant';
-          out.push('<div class="bc-chat-msg ' + cls + '">');
+          out.push('<div class="bc-chat-msg ' + cls + '" data-bc-chat-entry="' + cls + '">');
           if (msg.role === 'assistant') {
             out.push('<div>' + formatChatAnswerHtml(msg.content) + '</div>');
             if (Array.isArray(msg.citations) && msg.citations.length) {

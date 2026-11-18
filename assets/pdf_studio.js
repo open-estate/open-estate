@@ -2281,7 +2281,7 @@
             esc(L('Point on PDF', '定位到 PDF', 'Señalar en PDF')) + ' (p.' + esc(c.sourcePage) + ')</button>';
         }).join('') + '</div>';
       }
-      out.push('<div class="ps-msg a"><div>' + formatted + '</div>' + citeHtml + '</div>');
+      out.push('<div class="ps-msg a" data-ps-chat-entry="assistant"><div>' + formatted + '</div>' + citeHtml + '</div>');
     });
     log.innerHTML = out.join('');
     log.querySelectorAll('[data-ps-chat-cite]').forEach(function (btn) {
@@ -2294,7 +2294,35 @@
         if (c) jumpToCitation(c);
       });
     });
-    log.scrollTop = log.scrollHeight;
+    syncStudioChatScroll();
+  }
+
+  function syncStudioChatScroll() {
+    var log = document.getElementById('psChatLog');
+    if (!log) return;
+    var hasEntries = studioState.chatHistory.length > 0;
+    var last = hasEntries ? studioState.chatHistory[studioState.chatHistory.length - 1] : null;
+    var lastRole = last ? (last.role === 'user' ? 'user' : 'assistant') : '';
+    var msgEl = null;
+    if (lastRole === 'assistant') {
+      var asstEls = log.querySelectorAll('[data-ps-chat-entry="assistant"]');
+      if (asstEls && asstEls.length) msgEl = asstEls[asstEls.length - 1];
+    }
+    if (window.OpenEstateCore && typeof window.OpenEstateCore.syncChatLogScroll === 'function') {
+      window.OpenEstateCore.syncChatLogScroll(log, {
+        hasEntries: hasEntries,
+        lastRole: lastRole,
+        msgEl: msgEl
+      });
+      return;
+    }
+    if (!hasEntries) {
+      log.scrollTop = 0;
+    } else if (lastRole === 'user' || !msgEl) {
+      log.scrollTop = log.scrollHeight;
+    } else if (typeof msgEl.offsetTop === 'number') {
+      log.scrollTop = Math.max(0, msgEl.offsetTop);
+    }
   }
 
   async function submitStudioChat(rawQuestion) {
@@ -3441,6 +3469,7 @@
         });
         bd.querySelector('#psTabAnalysis').classList.toggle('act', t === 'analysis');
         bd.querySelector('#psTabChat').classList.toggle('act', t === 'chat');
+        if (t === 'chat') syncStudioChatScroll();
       });
     });
 
