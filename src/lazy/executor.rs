@@ -9,7 +9,7 @@ use crate::lazy::runtime::{
     claim_next, complete, fail, heartbeat, mark_awaiting_external_response,
     resolve_extension_policy,
 };
-use crate::lazy::types::{CompleteLazyJobOutcome, LazyExtensionPolicy};
+use crate::lazy::types::{CompleteLazyJobOutcome, LazyExtensionPolicy, SectionNotificationOutcome};
 use crate::metering::{InvocationContext, InvocationTrigger, MeterScope};
 use crate::shared::{now_unix_secs, EnvConfig, HttpClient};
 use crate::web::hooks::{NoopExtensionHooks, ServerExtensionHooks};
@@ -184,8 +184,39 @@ impl LazyExecutor {
         extra_params.insert("slug".to_string(), job.slug.clone());
         extra_params.insert("section_id".to_string(), job.section_id.clone());
         extra_params.insert("lazy_job_id".to_string(), job.id.clone());
+        extra_params.insert("lazy_trigger_kind".to_string(), job.trigger_kind.clone());
         if let Some(ref uid) = job.requested_by_user_id {
             extra_params.insert("requested_by_user_id".to_string(), uid.clone());
+        }
+        if !extra_params.contains_key("mls_remarks") {
+            let mut remarks_parts: Vec<String> = Vec::new();
+            for key in ["mlsRemarks", "privateRemarks", "publicRemarks", "description"] {
+                if let Some(txt) = facts_val
+                    .get(key)
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                {
+                    remarks_parts.push(txt.to_string());
+                }
+            }
+            if let Ok(Some(sk)) = self.db.resolve_listing_sk(&job.slug).await {
+                if let Ok(Some(desc)) = self.db.get_listing_descriptions(sk).await {
+                    if let Some(txt) = desc
+                        .mls_remarks
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                    {
+                        if !remarks_parts.iter().any(|p| p == txt) {
+                            remarks_parts.push(txt.to_string());
+                        }
+                    }
+                }
+            }
+            if !remarks_parts.is_empty() {
+                extra_params.insert("mls_remarks".to_string(), remarks_parts.join("\n"));
+            }
         }
 
         let address = {
@@ -273,9 +304,23 @@ impl LazyExecutor {
         }
 
         let query = Box::pin(self.build_query_for_job(job)).await;
-        let meter_ctx = InvocationContext::new(&job.extension_id)
-            .with_trigger(InvocationTrigger::LazyJob)
+        let lazy_trigger = match job.trigger_kind.trim().to_ascii_lowercase().as_str() {
+            "periodic_scan" | "periodicscan" | "scan" => InvocationTrigger::PeriodicScan,
+            "admin_test" | "admintest" | "test_fetch" => InvocationTrigger::AdminTest,
+            "dependency" | "dep" => InvocationTrigger::Dependency,
+            _ => InvocationTrigger::LazyJob,
+        };
+        let mut meter_ctx = InvocationContext::new(&job.extension_id)
+            .with_trigger(lazy_trigger)
             .with_slug(&job.slug);
+        if let Some(uid) = job
+            .requested_by_user_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            meter_ctx = meter_ctx.with_actor_user_id(uid);
+        }
 
         let (fetch_res, _usage_event) = Box::pin(MeterScope::run_result(meter_ctx, async {
             let fut =
@@ -316,6 +361,40 @@ impl LazyExecutor {
                 return Ok(LazyExecResult::RetriedOrFailed(updated));
             }
         };
+
+        // If a domain pipeline inside `test_fetch` (e.g. `run_disclosure_pipeline`) already
+        // persisted a rich `sectionData` artifact or transitioned the job to `awaiting_external_response`,
+        // preserve that artifact instead of overwriting it with generic envelope JSON.
+        if let Ok(Some(reloaded_job)) = self.db.get_lazy_job_by_id(&job.id).await {
+            if reloaded_job.status == "awaiting_external_response" {
+                return Ok(LazyExecResult::AwaitingExternalResponse);
+            }
+            if reloaded_job.status == "succeeded" {
+                if let Ok(Some(artifact)) =
+                    self.db.get_lazy_artifact(&job.slug, &job.extension_id).await
+                {
+                    if artifact.status == "awaiting_external_response" {
+                        return Ok(LazyExecResult::AwaitingExternalResponse);
+                    }
+                    return Ok(LazyExecResult::Completed(Box::new(
+                        CompleteLazyJobOutcome {
+                            job: Some(reloaded_job),
+                            artifact,
+                            report_patched: true,
+                            new_report_updated_at: None,
+                            notifications: SectionNotificationOutcome {
+                                checked: 0,
+                                claimed: 0,
+                                delivered_via_hook: 0,
+                                delivered_via_smtp: 0,
+                                skipped_no_smtp: 0,
+                                failed: 0,
+                            },
+                        },
+                    )));
+                }
+            }
+        }
 
         let bundle_val = test_res
             .canonical_json

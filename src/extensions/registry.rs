@@ -420,6 +420,15 @@ impl ExtensionHub {
         ACTIVE_HOOK_STATE.scope(state, fut)
     }
 
+    /// Returns the task-local [`crate::web::server::AppState`] bound via `ExtensionHub::with_hook_state`
+    /// (or fallback `hook_state_builder` on the global hub).
+    pub fn active_hook_state() -> Option<crate::web::server::AppState> {
+        ACTIVE_HOOK_STATE
+            .try_with(Clone::clone)
+            .ok()
+            .or_else(|| Self::global().resolve_hook_state())
+    }
+
     fn resolve_hook_state(&self) -> Option<crate::web::server::AppState> {
         if let Ok(st) = ACTIVE_HOOK_STATE.try_with(Clone::clone) {
             return Some(st);
@@ -1758,7 +1767,17 @@ impl ExtensionHub {
 
         let has_active_scope = MeterScope::current().is_some();
         let trigger = if has_active_scope && query.extra_params.contains_key("lazy_job_id") {
-            InvocationTrigger::LazyJob
+            match query
+                .extra_params
+                .get("lazy_trigger_kind")
+                .map(|s| s.trim().to_ascii_lowercase())
+                .as_deref()
+            {
+                Some("periodic_scan" | "periodicscan" | "scan") => InvocationTrigger::PeriodicScan,
+                Some("admin_test" | "admintest" | "test_fetch") => InvocationTrigger::AdminTest,
+                Some("dependency" | "dep") => InvocationTrigger::Dependency,
+                _ => InvocationTrigger::LazyJob,
+            }
         } else {
             InvocationTrigger::AdminTest
         };
