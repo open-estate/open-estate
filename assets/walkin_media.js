@@ -223,7 +223,91 @@
     viewer: null              // Three.js 360° spherical panorama controller
   };
 
-  /* ------------------------------------------------------------------ CSS injection (light report chrome) */
+  /* ------------------------------------------------------------------ CSS injection (light & dark report chrome) */
+  function scopeDarkCss(rules) {
+    function withPrefix(pfx) {
+      return rules.map(function (rule) {
+        var bi = rule.indexOf('{');
+        if (bi < 0) return rule;
+        var sels = rule.slice(0, bi).split(',').map(function (s) {
+          var t = s.trim();
+          return t ? (pfx + ' ' + t) : t;
+        }).join(',');
+        return sels + rule.slice(bi);
+      }).join('\n');
+    }
+    return '@media (prefers-color-scheme: dark){\n' + withPrefix('html:not([data-theme="light"])') + '\n}\n' + withPrefix('html[data-theme="dark"]');
+  }
+
+  var WALKIN_DARK_RULES = [
+    '.hm-tab .wk-tab-badge{background:rgba(20,184,166,.22);color:#5eead4}',
+    '.wk-upload-pill{border-color:rgba(45,212,191,.42);background:rgba(20,184,166,.16);color:#5eead4}',
+    '.wk-upload-pill:hover{background:#0f766e;border-color:#14b8a6;color:#fff}',
+    '.bento-pano-chip{border-color:rgba(45,212,191,.55);background:rgba(15,23,42,.88);color:#5eead4;box-shadow:0 3px 10px rgba(0,0,0,.4)}',
+    '.bento-pano-chip:hover{background:#0f766e;color:#fff}',
+    '.wk-stage-shell{background:var(--surface,#111827);border-color:var(--line-strong,#334155);box-shadow:0 12px 32px -16px rgba(0,0,0,.65)}',
+    '.wk-topbar{background:var(--surface-2,#1e293b);border-bottom-color:var(--line-strong,#334155)}',
+    '.wk-seg-btn{border-color:var(--line-strong,#334155);background:var(--surface,#0f172a);color:var(--ink2,#cbd5e1)}',
+    '.wk-seg-btn:not(.on):not(.warn-on):hover{border-color:#2dd4bf;color:#5eead4}',
+    '.wk-seg-btn.on{background:#0f766e;border-color:#14b8a6;color:#fff}',
+    '.wk-seg-btn.warn-on{background:#0284c7;border-color:#38bdf8;color:#fff}',
+    '.wk-room-title-pill{color:var(--ink,#f1f5f9);background:var(--soft,#172033);border:1px solid var(--line-strong,#334155)}',
+    '.wk-tour-bar{background:rgba(20,184,166,.12);border-bottom-color:rgba(45,212,191,.3)}',
+    '.wk-tour-bar input{border-color:var(--line-strong,#334155);background:var(--surface,#0f172a);color:var(--ink,#f1f5f9)}',
+    '.wk-tour-bar input::placeholder{color:var(--muted,#94a3b8)}',
+    '.wk-msg{border-bottom-color:var(--line-strong,#334155)}',
+    '.wk-msg.ok{background:rgba(22,163,74,.18);color:#86efac}',
+    '.wk-msg.err{background:rgba(220,38,38,.18);color:#fca5a5}',
+    '.wk-viewport{background:linear-gradient(180deg,#0f172a 0%,#0b1120 100%)}',
+    '.wk-iframe{background:#0b1120}',
+    '.wk-hotspot-pill{border-color:rgba(45,212,191,.8);background:rgba(15,23,42,.9);color:#f8fafc;box-shadow:0 8px 22px -4px rgba(0,0,0,.55)}',
+    '.wk-hotspot-pill:hover{background:#0f766e;color:#fff;border-color:#fff}',
+    '.wk-hotspot-pill .wk-hs-dot{background:#2dd4bf}',
+    '.wk-hotspot-del{background:rgba(220,38,38,.28);color:#fecaca}',
+    '.wk-hud-controls{background:rgba(17,24,39,.9);border-color:rgba(51,65,85,.9);box-shadow:0 4px 16px rgba(0,0,0,.45)}',
+    '.wk-hud-btn{color:#f1f5f9}',
+    '.wk-hud-btn:hover{background:#334155}',
+    '.wk-hud-fov{color:#cbd5e1}',
+    '.wk-hud-hint{background:rgba(17,24,39,.88);border-color:rgba(51,65,85,.85);color:#cbd5e1}',
+    '.wk-link-banner{background:rgba(15,23,42,.94);border-color:#38bdf8;color:#7dd3fc;box-shadow:0 8px 24px rgba(0,0,0,.45)}',
+    '.wk-link-popover{background:var(--surface,#111827);border-color:var(--line-strong,#334155);box-shadow:0 18px 40px -10px rgba(0,0,0,.6)}',
+    '.wk-link-popover label{color:var(--ink2,#cbd5e1)}',
+    '.wk-link-popover select,.wk-link-popover input{border-color:var(--line-strong,#334155);color:var(--ink,#f1f5f9);background:var(--surface-2,#1e293b)}',
+    '.wk-fade-veil{background:rgba(15,23,42,.68)}',
+    '.wk-loading{background:rgba(15,23,42,.85);color:#f1f5f9}',
+    '.wk-room-strip{background:var(--surface,#111827);border-top-color:var(--line-strong,#334155)}',
+    '.wk-room-card{border-color:var(--line-strong,#334155);background:var(--surface-2,#1e293b);color:var(--ink,#f1f5f9)}',
+    '.wk-room-card:hover{border-color:#2dd4bf;background:rgba(20,184,166,.16)}',
+    '.wk-room-card.on{border-color:#14b8a6;background:rgba(20,184,166,.2);box-shadow:0 2px 10px rgba(20,184,166,.22)}',
+    '.wk-room-card img{background:#334155}',
+    '.wk-room-card .wk-rc-name{color:var(--ink,#f1f5f9)}',
+    '.wk-room-card .wk-rc-sub{color:var(--muted,#94a3b8)}',
+    '.wk-empty{background:linear-gradient(135deg,#0f172a 0%,rgba(15,118,110,.2) 100%)}',
+    '.wk-empty-card{background:var(--surface,#111827);border-color:var(--line-strong,#334155);box-shadow:0 14px 34px -16px rgba(0,0,0,.55)}',
+    '.wk-empty-eyebrow{color:#5eead4;background:rgba(20,184,166,.2)}',
+    '.wk-empty-card h3{color:var(--ink,#f8fafc)}',
+    '.wk-empty-card p{color:var(--ink2,#cbd5e1)}',
+    '.wk-empty-tour-row input{border-color:var(--line-strong,#334155);color:var(--ink,#f1f5f9);background:var(--surface-2,#1e293b)}',
+    '.wk-empty-tour-row input::placeholder{color:var(--muted,#94a3b8)}',
+    '.wk-sec-btn{border-color:var(--line-strong,#334155);background:var(--surface-2,#1e293b);color:var(--ink,#f1f5f9)}',
+    '.wk-sec-btn:hover{background:#293548;border-color:#475569}',
+    '.wk-modal-bg{background:rgba(15,23,42,.78)}',
+    '.wk-modal-dialog{background:var(--surface,#111827);border-color:var(--line-strong,#334155);color:var(--ink,#f1f5f9);box-shadow:0 28px 70px -16px rgba(0,0,0,.68)}',
+    '.wk-modal-hdr{background:var(--surface-2,#1e293b);border-bottom-color:var(--line-strong,#334155)}',
+    '.wk-modal-hdr h3{color:var(--ink,#f8fafc)}',
+    '.wk-dropzone{border-color:#475569;background:var(--surface-2,#1e293b);color:var(--ink,#f1f5f9)}',
+    '.wk-dropzone.dragover,.wk-dropzone:hover{border-color:#2dd4bf;background:rgba(20,184,166,.15)}',
+    '.wk-drop-title{color:var(--ink,#f8fafc)}',
+    '.wk-drop-sub,.wk-muted-xs,.wk-muted-lbl,.wk-foot-note{color:var(--muted,#94a3b8)}',
+    '.wk-q-item{border-color:var(--line-strong,#334155);background:var(--surface-2,#1e293b)}',
+    '.wk-q-item img{background:#334155}',
+    '.wk-q-chk{color:var(--ink2,#cbd5e1)}',
+    '.wk-q-err{color:#fca5a5}',
+    '.wk-q-fields input[type="text"],.wk-q-fields select{border-color:var(--line-strong,#334155);background:var(--surface,#0f172a);color:var(--ink,#f1f5f9)}',
+    '.wk-auto360-pill{background:rgba(20,184,166,.2);color:#5eead4;border-color:rgba(45,212,191,.42)}',
+    '.wk-modal-foot{background:var(--surface-2,#1e293b);border-top-color:var(--line-strong,#334155)}'
+  ];
+
   var WALKIN_CSS = [
     '.hm-tab .wk-tab-badge{display:inline-flex;align-items:center;justify-content:center;min-width:18px;height:18px;padding:0 5px;margin-left:5px;border-radius:999px;font-size:10.5px;font-weight:800;background:#ccfbf1;color:#0f766e;vertical-align:middle}',
     '.hm-tab.on .wk-tab-badge{background:rgba(255,255,255,.22);color:#fff}',
@@ -291,7 +375,7 @@
     '.wk-pri-btn:disabled{opacity:.55;cursor:not-allowed}',
     '.wk-sec-btn{display:inline-flex;align-items:center;justify-content:center;gap:5px;border:1px solid #cbd5e1;background:#fff;color:#0f172a;border-radius:10px;padding:8px 13px;font:700 12.4px var(--font,Inter,system-ui,sans-serif);cursor:pointer;white-space:nowrap}',
     '.wk-sec-btn:hover{background:#f1f5f9}',
-    /* Upload sheet modal — light frosted wash matching report page */
+    /* Upload sheet modal — light frosted wash matching light mode, dark frosted wash in dark mode */
     '.wk-modal-bg{position:fixed;inset:0;z-index:3600;background:rgba(241,245,249,.76);-webkit-backdrop-filter:blur(10px);backdrop-filter:blur(10px);display:grid;place-items:center;padding:16px}',
     '.wk-modal-bg[hidden]{display:none!important}',
     '.wk-modal-dialog{background:#fff;border:1px solid #cbd5e1;border-radius:18px;width:min(680px,100%);max-height:calc(100dvh - 32px);display:flex;flex-direction:column;overflow:hidden;box-shadow:0 28px 70px -16px rgba(15,23,42,.22)}',
@@ -300,14 +384,22 @@
     '.wk-modal-body{padding:16px 18px;overflow-y:auto;display:flex;flex-direction:column;gap:12px}',
     '.wk-dropzone{border:2px dashed #94a3b8;background:#f8fafc;border-radius:14px;padding:22px 16px;text-align:center;cursor:pointer;transition:all .15s}',
     '.wk-dropzone.dragover,.wk-dropzone:hover{border-color:#0f766e;background:#f0fdfa}',
+    '.wk-drop-title{font-weight:800;font-size:14px;color:#0f172a;margin-bottom:4px}',
+    '.wk-drop-sub{font-size:12px;color:#64748b}',
     '.wk-q-list{display:flex;flex-direction:column;gap:9px}',
     '.wk-q-item{display:grid;grid-template-columns:76px 1fr auto;gap:10px;align-items:center;padding:9px 11px;border:1px solid #e2e8f0;border-radius:12px;background:#f8fafc}',
     '.wk-q-item img{width:76px;height:48px;object-fit:cover;border-radius:8px;background:#e2e8f0}',
     '.wk-q-fields{display:flex;flex-wrap:wrap;gap:6px;align-items:center}',
+    '.wk-q-chk{display:inline-flex;align-items:center;gap:4px;font-size:11.6px;font-weight:700;color:#334155;cursor:pointer}',
+    '.wk-muted-xs{font-size:11px;color:#64748b}',
+    '.wk-muted-lbl{font-size:11.3px;font-weight:700;color:#64748b}',
+    '.wk-foot-note{font-size:12px;color:#64748b}',
+    '.wk-q-err{color:#b91c1c;font-size:11.5px;margin-top:4px}',
     '.wk-q-fields input[type="text"],.wk-q-fields select{border:1px solid #cbd5e1;border-radius:7px;padding:4px 8px;font:600 12px var(--font,Inter,system-ui,sans-serif);background:#fff;color:#0f172a}',
     '.wk-auto360-pill{display:inline-flex;align-items:center;gap:4px;background:#ccfbf1;color:#0f766e;border:1px solid #99f6e4;border-radius:999px;padding:2px 8px;font:800 10.6px var(--font,Inter,system-ui,sans-serif)}',
     '.wk-modal-foot{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:12px 18px;background:#f8fafc;border-top:1px solid #e2e8f0}',
-    '@media (max-width:720px){.wk-viewport{aspect-ratio:4 / 3;min-height:260px}.wk-hud-hint{display:none}.wk-q-item{grid-template-columns:60px 1fr}}'
+    '@media (max-width:720px){.wk-viewport{aspect-ratio:4 / 3;min-height:260px}.wk-hud-hint{display:none}.wk-q-item{grid-template-columns:60px 1fr}}',
+    scopeDarkCss(WALKIN_DARK_RULES)
   ].join('\n');
 
   function injectStyles() {
@@ -1571,12 +1663,12 @@
               '<option value="staging"' + (q.category === 'staging' ? ' selected' : '') + '>' + esc(L3('Interior / Room', '室内 / 房间', 'Interior / Sala')) + '</option>' +
               '<option value="exterior"' + (q.category === 'exterior' ? ' selected' : '') + '>' + esc(L3('Exterior / Yard', '外立面 / 庭院', 'Exterior / Patio')) + '</option>' +
             '</select>' +
-            '<label style="display:inline-flex;align-items:center;gap:4px;font-size:11.6px;font-weight:700;color:#334155;cursor:pointer">' +
+            '<label class="wk-q-chk">' +
               '<input type="checkbox" data-q-pano="' + idx + '"' + (is360 ? ' checked' : '') + '> 360°' +
             '</label>' +
-            (q.autoPano ? '<span class="wk-auto360-pill">✦ ' + esc(L3('Auto 360° (' + q.width + '×' + q.height + ')', '自动识别 360° (' + q.width + '×' + q.height + ')', 'Auto 360° (' + q.width + '×' + q.height + ')')) + '</span>' : '<span style="font-size:11px;color:#64748b">' + q.width + '×' + q.height + '</span>') +
+            (q.autoPano ? '<span class="wk-auto360-pill">✦ ' + esc(L3('Auto 360° (' + q.width + '×' + q.height + ')', '自动识别 360° (' + q.width + '×' + q.height + ')', 'Auto 360° (' + q.width + '×' + q.height + ')')) + '</span>' : '<span class="wk-muted-xs">' + q.width + '×' + q.height + '</span>') +
           '</div>' +
-          (q.err ? '<div style="color:#b91c1c;font-size:11.5px;margin-top:4px">' + esc(q.err) + '</div>' : '') +
+          (q.err ? '<div class="wk-q-err">' + esc(q.err) + '</div>' : '') +
         '</div>' +
         '<button type="button" class="wk-sec-btn" style="padding:4px 9px;font-size:11.5px" data-q-rm="' + idx + '" aria-label="Remove">✕</button>' +
       '</div>';
@@ -1591,16 +1683,16 @@
         '<div class="wk-modal-body">' +
           '<div class="wk-dropzone" id="wkDropzone">' +
             '<input type="file" id="walkinFileInput" accept="image/jpeg,image/png,image/webp" multiple style="display:none">' +
-            '<div style="font-weight:800;font-size:14px;color:#0f172a;margin-bottom:4px">' + span3('Drag & drop JPEG / PNG / WebP photos here, or click to browse', '拖拽 JPEG / PNG / WebP 照片至此，或点击选择文件', 'Arrastre fotos JPEG / PNG / WebP aquí o haga clic para elegir') + '</div>' +
-            '<div style="font-size:12px;color:#64748b">' + span3('2:1 equirectangular panoramas (≥1600 px wide) are automatically detected as 360° Walk-In rooms (up to 12 MB each).', '宽高比约 2:1（宽度 ≥1600 像素）的全景照片将自动识别为 360° 实景漫游房间（单张上限 12 MB）。', 'Los panoramas 2:1 (≥1600 px de ancho) se detectan automáticamente como salas 360° (máx. 12 MB).') + '</div>' +
+            '<div class="wk-drop-title">' + span3('Drag & drop JPEG / PNG / WebP photos here, or click to browse', '拖拽 JPEG / PNG / WebP 照片至此，或点击选择文件', 'Arrastre fotos JPEG / PNG / WebP aquí o haga clic para elegir') + '</div>' +
+            '<div class="wk-drop-sub">' + span3('2:1 equirectangular panoramas (≥1600 px wide) are automatically detected as 360° Walk-In rooms (up to 12 MB each).', '宽高比约 2:1（宽度 ≥1600 像素）的全景照片将自动识别为 360° 实景漫游房间（单张上限 12 MB）。', 'Los panoramas 2:1 (≥1600 px de ancho) se detectan automáticamente como salas 360° (máx. 12 MB).') + '</div>' +
           '</div>' +
           (st.uploadQueue.length
-            ? '<div style="display:flex;align-items:center;gap:5px;flex-wrap:wrap"><span style="font-size:11.3px;font-weight:700;color:#64748b">' + span3('Quick tag:', '快捷命名：', 'Etiqueta rápida:') + '</span>' + presetsHtml + '</div>' +
+            ? '<div style="display:flex;align-items:center;gap:5px;flex-wrap:wrap"><span class="wk-muted-lbl">' + span3('Quick tag:', '快捷命名：', 'Etiqueta rápida:') + '</span>' + presetsHtml + '</div>' +
               '<div class="wk-q-list">' + queueHtml + '</div>'
             : '') +
         '</div>' +
         '<div class="wk-modal-foot">' +
-          '<span style="font-size:12px;color:#64748b">' + esc(L3(st.uploadQueue.length + ' file(s) queued · stored locally on this server', '已选 ' + st.uploadQueue.length + ' 张影像 · 本地持久化存储', st.uploadQueue.length + ' archivo(s) en cola')) + '</span>' +
+          '<span class="wk-foot-note">' + esc(L3(st.uploadQueue.length + ' file(s) queued · stored locally on this server', '已选 ' + st.uploadQueue.length + ' 张影像 · 本地持久化存储', st.uploadQueue.length + ' archivo(s) en cola')) + '</span>' +
           '<div style="display:flex;gap:8px">' +
             '<button type="button" class="wk-sec-btn" id="wkUploadCancelBtn">' + span3('Cancel', '取消', 'Cancelar') + '</button>' +
             '<button type="button" class="wk-pri-btn" id="wkUploadSubmitBtn"' + (!st.uploadQueue.length || st.uploading ? ' disabled' : '') + '>' +

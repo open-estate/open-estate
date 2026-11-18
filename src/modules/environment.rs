@@ -2722,7 +2722,376 @@ fn build_highlights(
             "text": format!("Transportation noise (24-h LAeq) at the property: {lbl}; loudest within 150 m: {near_lbl}."),
         }));
     }
+
+    if let Some(exts) = noise.get("extensions").and_then(Value::as_object) {
+        if let Some(hw) = exts.get("highwayTraffic") {
+            if let Some(nc) = hw.get("nearestCorridor").filter(|v| v.is_object()) {
+                let route = nc.get("routeId").and_then(Value::as_str).unwrap_or("Arterial");
+                let aadt = nc.get("aadt").and_then(Value::as_i64).unwrap_or(0);
+                let trk = val_f64(nc.get("heavyTruckPct")).unwrap_or(0.0);
+                let dist_m = nc.get("distanceM").and_then(Value::as_i64).unwrap_or(0);
+                let ldn = val_f64(hw.get("estLdnDba")).unwrap_or(0.0);
+                if aadt >= 10_000 || ldn >= 52.0 {
+                    h.push(json!({
+                        "level": if ldn >= 62.0 { "bad" } else if ldn >= 54.0 { "watch" } else { "good" },
+                        "text": format!(
+                            "Highway & arterial traffic (FHWA HPMS): {} ({} m) carries {} AADT ({:.1}% trucks); modeled road noise {:.1} dBA Ldn.",
+                            route, dist_m, aadt, trk, ldn
+                        ),
+                    }));
+                }
+            }
+        }
+
+        if let Some(fl) = exts.get("faaFlight") {
+            if let Some(nc) = fl.get("nearestCorridor").filter(|v| v.is_object()) {
+                let arpt = nc.get("airportId").and_then(Value::as_str).unwrap_or("");
+                let rwy = nc.get("runwayEndId").and_then(Value::as_str).unwrap_or("");
+                let cross_mi = val_f64(nc.get("crossTrackMi")).unwrap_or(99.0);
+                let alt_ft = nc.get("estGlidepathAltAglFt").and_then(Value::as_i64).unwrap_or(0);
+                let ldn = val_f64(fl.get("estLdnDba")).unwrap_or(0.0);
+                let lmax = val_f64(fl.get("peakFlyoverLmaxDba")).unwrap_or(0.0);
+                if cross_mi <= 2.0 || ldn >= 48.0 {
+                    h.push(json!({
+                        "level": if ldn >= 60.0 { "bad" } else if ldn >= 50.0 || cross_mi <= 1.0 { "watch" } else { "good" },
+                        "text": format!(
+                            "Flight corridor (FAA AIS / BTS): {:.2} mi from {} Rwy {} extended approach (~{} ft AGL; {:.1} dBA Ldn, ~{:.0} dBA peak flyover).",
+                            cross_mi, arpt, rwy, alt_ft, ldn, lmax
+                        ),
+                    }));
+                }
+            }
+        }
+
+        if let Some(rl) = exts.get("railTransit") {
+            let qz_cnt = rl.get("quietZoneCrossingCount").and_then(Value::as_u64).unwrap_or(0);
+            let horn_cnt = rl.get("activeHornCrossingCount").and_then(Value::as_u64).unwrap_or(0);
+            if let Some(nx) = rl.get("nearestCrossing").filter(|v| v.is_object()) {
+                let street = nx.get("street").and_then(Value::as_str).unwrap_or("Crossing");
+                let dist_mi = val_f64(nx.get("distanceMi")).unwrap_or(0.0);
+                let day_t = nx.get("daylightThruTrains").and_then(Value::as_i64).unwrap_or(0);
+                let night_t = nx.get("nighttimeThruTrains").and_then(Value::as_i64).unwrap_or(0);
+                let is_qz = nx.get("isQuietZone").and_then(Value::as_bool).unwrap_or(false);
+                if day_t + night_t > 0 && dist_mi <= 1.6 {
+                    if is_qz && horn_cnt == 0 {
+                        h.push(json!({
+                            "level": "good",
+                            "text": format!(
+                                "Rail schedule & Quiet Zone (FRA): nearest crossing at {} ({}) has {} day / {} night trains with a 24-hr Quiet Zone horn ban ({qz_cnt} Quiet Zone crossing(s) nearby).",
+                                street, fmt_mi(dist_mi), day_t, night_t
+                            ),
+                        }));
+                    } else if let Some(hlmax) = val_f64(rl.get("peakHornLmaxDba")) {
+                        h.push(json!({
+                            "level": if hlmax >= 75.0 { "bad" } else { "watch" },
+                            "text": format!(
+                                "Active rail horn crossing (FRA): {horn_cnt} active horn crossing(s) nearby (nearest {}, {}, {} day / {} night trains; ~{:.0} dBA horn peak).",
+                                street, fmt_mi(dist_mi), day_t, night_t, hlmax
+                            ),
+                        }));
+                    }
+                }
+            }
+        }
+
+        if let Some(mil) = exts.get("militaryAirspace") {
+            if let Some(sua) = mil
+                .get("specialUseAirspace")
+                .and_then(Value::as_array)
+                .and_then(|a| a.first())
+            {
+                let inside = sua.get("inside").and_then(Value::as_bool).unwrap_or(false);
+                let dist_mi = val_f64(sua.get("distanceMi")).unwrap_or(99.0);
+                if inside || dist_mi <= 10.0 {
+                    let name = sua.get("name").and_then(Value::as_str).unwrap_or("SUA");
+                    let sched = sua
+                        .get("timesOfUse")
+                        .and_then(Value::as_str)
+                        .unwrap_or("by NOTAM");
+                    h.push(json!({
+                        "level": if inside { "watch" } else { "good" },
+                        "text": format!(
+                            "Military / Special Use Airspace (FAA): {} ({}) — active schedule: {}.",
+                            name,
+                            if inside { "overhead".to_string() } else { fmt_mi(dist_mi) },
+                            sched
+                        ),
+                    }));
+                }
+            }
+        }
+    }
     h
+}
+
+#[derive(Default)]
+struct NoiseExtensionBundle {
+    extensions_obj: Map<String, Value>,
+    map_layers: Vec<Value>,
+    sources: Vec<SourceItem>,
+}
+
+async fn execute_single_noise_ext(
+    hub: &ExtensionHub,
+    ext_id: &str,
+    query: &crate::extensions::proto::ExtensionQueryProto,
+    http: &HttpClient,
+    env: &EnvConfig,
+) -> Option<(Value, Option<SourceItem>, Vec<Value>)> {
+    let envs = match hub.execute_enabled_extension(ext_id, query, http, env).await {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(extension_id = %ext_id, error = %e, "environment: noise feed extension unavailable");
+            return None;
+        }
+    };
+    for env_msg in envs {
+        if env_msg.extension_id != ext_id {
+            continue;
+        }
+        if let Some(crate::extensions::proto::extension_envelope_proto::Payload::RawJson(raw)) =
+            env_msg.payload
+        {
+            if let Ok(mut val) = serde_json::from_str::<Value>(&raw) {
+                let mut layers = Vec::new();
+                if let Some(obj) = val.as_object_mut() {
+                    if let Some(Value::Array(arr)) = obj.remove("mapLayers") {
+                        let ids: Vec<Value> = arr
+                            .iter()
+                            .filter_map(|l| l.get("id").and_then(Value::as_str).map(|s| json!(s)))
+                            .collect();
+                        obj.insert("layerIds".to_string(), Value::Array(ids));
+                        layers = arr;
+                    }
+                }
+                let src = env_msg.attribution.and_then(|a| {
+                    let sname = a.source_name.trim().to_string();
+                    let surl = a.source_url.trim().to_string();
+                    if !sname.is_empty() && surl.starts_with("https://") {
+                        Some(SourceItem::new(sname, surl))
+                    } else {
+                        None
+                    }
+                });
+                return Some((val, src, layers));
+            }
+        }
+    }
+    None
+}
+
+async fn fetch_noise_extensions_via_hub(
+    http: &HttpClient,
+    env: &EnvConfig,
+    lat: f64,
+    lon: f64,
+    state: &str,
+    geo: &Value,
+) -> NoiseExtensionBundle {
+    if http.is_offline_external_blocked() {
+        return NoiseExtensionBundle::default();
+    }
+    let mut extra_params = HashMap::new();
+    if let Some(c) = env_geo_str(geo, "country") {
+        extra_params.insert("country".to_string(), c);
+    }
+    let query = crate::extensions::proto::ExtensionQueryProto {
+        lat: Some(lat),
+        lon: Some(lon),
+        state: state.to_string(),
+        city: env_geo_str(geo, "city").unwrap_or_default(),
+        zip: env_geo_str(geo, "zip")
+            .or_else(|| env_geo_str(geo, "postalCode"))
+            .unwrap_or_default(),
+        county_fips: env_geo_str(geo, "countyFips").unwrap_or_default(),
+        county_name: env_geo_str(geo, "county"),
+        extra_params,
+        ..Default::default()
+    };
+    let hub = ExtensionHub::global();
+    let (r_faa, r_hw, r_rail, r_mil) = tokio::join!(
+        execute_single_noise_ext(hub, crate::modules::noise_feeds::FAA_FLIGHT_EXT_ID, &query, http, env),
+        execute_single_noise_ext(hub, crate::modules::noise_feeds::HIGHWAY_TRAFFIC_EXT_ID, &query, http, env),
+        execute_single_noise_ext(hub, crate::modules::noise_feeds::RAIL_TRANSIT_EXT_ID, &query, http, env),
+        execute_single_noise_ext(hub, crate::modules::noise_feeds::MILITARY_AIRSPACE_EXT_ID, &query, http, env),
+    );
+
+    let mut out = NoiseExtensionBundle::default();
+    let mut seen_layer_ids = HashSet::new();
+    let mut seen_src_urls = HashSet::new();
+    for (json_key, res) in [
+        ("faaFlight", r_faa),
+        ("highwayTraffic", r_hw),
+        ("railTransit", r_rail),
+        ("militaryAirspace", r_mil),
+    ] {
+        if let Some((val, src_opt, layers)) = res {
+            out.extensions_obj.insert(json_key.to_string(), val);
+            if let Some(src) = src_opt {
+                if seen_src_urls.insert(format!("{}|{}", src.name, src.url)) {
+                    out.sources.push(src);
+                }
+            }
+            for lyr in layers {
+                let lid = lyr
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                if lid.is_empty() || seen_layer_ids.insert(lid) {
+                    out.map_layers.push(lyr);
+                }
+            }
+        }
+    }
+    out
+}
+
+pub fn fuse_noise_extensions_into_noise(
+    noise_val: &mut Value,
+    state: &str,
+    ext_map: &Map<String, Value>,
+) {
+    let Some(obj) = noise_val.as_object_mut() else {
+        return;
+    };
+
+    // Always attach region-aware BTS 2022 tile metadata when noise or extensions are present
+    let was_checked = obj.get("checked").and_then(Value::as_bool).unwrap_or(false);
+    if was_checked || !ext_map.is_empty() {
+        obj.insert(
+            "btsTiles".to_string(),
+            json!({
+                "combined": crate::modules::noise_feeds::bts_noise_tile_meta(state, "combined"),
+                "aviation": crate::modules::noise_feeds::bts_noise_tile_meta(state, "aviation"),
+                "road": crate::modules::noise_feeds::bts_noise_tile_meta(state, "road"),
+                "rail": crate::modules::noise_feeds::bts_noise_tile_meta(state, "rail"),
+            }),
+        );
+    }
+
+    if ext_map.is_empty() {
+        return;
+    }
+
+    obj.insert("extensions".to_string(), Value::Object(ext_map.clone()));
+
+    let ext_hw_ldn = ext_map
+        .get("highwayTraffic")
+        .and_then(|v| val_f64(v.get("estLdnDba")));
+    let ext_faa_ldn = ext_map
+        .get("faaFlight")
+        .and_then(|v| val_f64(v.get("estLdnDba")));
+    let ext_mil_ldn = ext_map
+        .get("militaryAirspace")
+        .and_then(|v| val_f64(v.get("estLdnDba")));
+    let ext_av_ldn = crate::modules::noise_feeds::energetic_sum_dba(&[
+        ext_faa_ldn.unwrap_or(0.0),
+        ext_mil_ldn.unwrap_or(0.0),
+    ]);
+    let ext_rail_ldn = ext_map
+        .get("railTransit")
+        .and_then(|v| val_f64(v.get("estLdnDba")));
+
+    let peak_lmax = [
+        ext_map
+            .get("faaFlight")
+            .and_then(|v| val_f64(v.get("peakFlyoverLmaxDba"))),
+        ext_map
+            .get("highwayTraffic")
+            .and_then(|v| val_f64(v.get("peakTruckLmaxDba"))),
+        ext_map
+            .get("railTransit")
+            .and_then(|v| val_f64(v.get("peakHornLmaxDba"))),
+        ext_map
+            .get("militaryAirspace")
+            .and_then(|v| val_f64(v.get("peakJetLmaxDba"))),
+    ]
+    .into_iter()
+    .flatten()
+    .fold(None, |acc: Option<f64>, v| {
+        Some(acc.map_or(v, |prev| prev.max(v)))
+    });
+    if let Some(lmax) = peak_lmax {
+        obj.insert("peakLmaxDb".to_string(), json!(round_n(lmax, 1)));
+    }
+
+    if ext_hw_ldn.is_none() && ext_av_ldn.is_none() && ext_rail_ldn.is_none() {
+        return;
+    }
+
+    if was_checked {
+        obj.insert(
+            "btsBaseline".to_string(),
+            json!({
+                "estLdnDb": obj.get("estLdnDb").cloned().unwrap_or(Value::Null),
+                "roadDb": obj.get("roadDb").cloned().unwrap_or(Value::Null),
+                "aviationDb": obj.get("aviationDb").cloned().unwrap_or(Value::Null),
+                "railDb": obj.get("railDb").cloned().unwrap_or(Value::Null),
+            }),
+        );
+    } else {
+        obj.insert("checked".to_string(), json!(true));
+        obj.remove("unavailable");
+    }
+
+    let base_road = val_f64(obj.get("roadDb")).unwrap_or(0.0);
+    let base_av = val_f64(obj.get("aviationDb")).unwrap_or(0.0);
+    let base_rail = val_f64(obj.get("railDb")).unwrap_or(0.0);
+    let base_all = val_f64(obj.get("estLdnDb")).unwrap_or(0.0);
+
+    let road_db = round_n(base_road.max(ext_hw_ldn.unwrap_or(0.0)).max(36.0), 1);
+    let av_db = round_n(base_av.max(ext_av_ldn.unwrap_or(0.0)).max(36.0), 1);
+    let rail_db = round_n(base_rail.max(ext_rail_ldn.unwrap_or(0.0)).max(36.0), 1);
+    let fused_comb = crate::modules::noise_feeds::energetic_sum_dba(&[road_db, av_db, rail_db])
+        .unwrap_or(base_all)
+        .max(base_all);
+    let comb_db = round_n(fused_comb, 1);
+
+    obj.insert("roadDb".to_string(), json!(road_db));
+    obj.insert("aviationDb".to_string(), json!(av_db));
+    obj.insert("railDb".to_string(), json!(rail_db));
+    obj.insert("estLdnDb".to_string(), json!(comb_db));
+    obj.insert("category".to_string(), json!(noise_category(comb_db)));
+
+    let maybe_upgrade_class = |cur: Option<&Value>, modeled_db: f64| -> Value {
+        let cur_low = cur
+            .and_then(|c| c.get("lowDb"))
+            .and_then(Value::as_i64)
+            .unwrap_or(0) as f64;
+        if modeled_db >= 45.0 && modeled_db >= cur_low + 5.0 {
+            db_to_class_json(modeled_db)
+        } else if let Some(existing_obj) = cur.filter(|v| v.is_object()) {
+            existing_obj.clone()
+        } else {
+            db_to_class_json(modeled_db)
+        }
+    };
+
+    let next_at_prop = json!({
+        "all": maybe_upgrade_class(obj.get("atProperty").and_then(|p| p.get("all")), comb_db),
+        "road": maybe_upgrade_class(obj.get("atProperty").and_then(|p| p.get("road")), road_db),
+        "aviation": maybe_upgrade_class(obj.get("atProperty").and_then(|p| p.get("aviation")), av_db),
+        "rail": maybe_upgrade_class(obj.get("atProperty").and_then(|p| p.get("rail")), rail_db),
+    });
+    obj.insert("atProperty".to_string(), next_at_prop);
+
+    if obj
+        .get("maxWithinRadius")
+        .and_then(|m| m.get("all"))
+        .map(|v| v.is_null())
+        .unwrap_or(true)
+    {
+        obj.insert(
+            "maxWithinRadius".to_string(),
+            json!({
+                "all": db_to_class_json((comb_db + 3.0).min(90.0)),
+                "road": db_to_class_json((road_db + 3.0).min(90.0)),
+                "aviation": db_to_class_json(av_db),
+                "rail": db_to_class_json(rail_db),
+            }),
+        );
+    }
 }
 
 fn build_map_layers(items: &[SiteRecord], boundaries: &[NplBoundary]) -> (Vec<Value>, Value) {
@@ -2901,13 +3270,15 @@ pub async fn run_environment_with_db(
         (ces_res, ej_res),
         (air_opt, air_sources, air_warns),
         (water_val, water_sources, water_warns),
-        (noise_val, noise_sources, noise_warns),
+        (mut noise_val, noise_sources, noise_warns),
+        noise_ext_bundle,
     ) = tokio::join!(
         Box::pin(sites_fut),
         Box::pin(screening_fut),
         Box::pin(fetch_air_quality_with_db(http, env, db, lat, lon, geo)),
         Box::pin(fetch_drinking_water(http, lat, lon, &state, city.as_deref())),
         Box::pin(fetch_noise_with_db(http, db, lat, lon, &state, geo)),
+        Box::pin(fetch_noise_extensions_via_hub(http, env, lat, lon, &state, geo)),
     );
 
     let mut sources = Vec::new();
@@ -3009,6 +3380,12 @@ pub async fn run_environment_with_db(
     warnings.extend(water_warns);
     sources.extend(noise_sources);
     warnings.extend(noise_warns);
+    for ns in noise_ext_bundle.sources {
+        if !sources.iter().any(|s| s.url == ns.url && s.name == ns.name) {
+            sources.push(ns);
+        }
+    }
+    fuse_noise_extensions_into_noise(&mut noise_val, &state, &noise_ext_bundle.extensions_obj);
 
     let active_progs: Vec<&ProgramMeta> = PROGRAMS
         .iter()
@@ -3104,7 +3481,8 @@ pub async fn run_environment_with_db(
     let highlights = build_highlights(
         &items, &boundaries, ces_val.as_ref(), ej_val.as_ref(), air_opt.as_ref(), &water_val, &noise_val, is_ca, qstat,
     );
-    let (map_layers, sites_fc) = build_map_layers(&items, &boundaries);
+    let (mut map_layers, sites_fc) = build_map_layers(&items, &boundaries);
+    map_layers.extend(noise_ext_bundle.map_layers);
 
     let data = json!({
         "state": if state.is_empty() { Value::Null } else { json!(state) },

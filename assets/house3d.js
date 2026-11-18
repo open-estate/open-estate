@@ -1094,8 +1094,8 @@
     var root = new THREE.Group();
     scene3.add(root);
 
-    var data = null, terr = terrainSampler(null), groups = {}, labels = [], pickables = [], disposables = [];
-    var layers = { aerial: true, roofphoto: false, trees: true, neighbors: true, shadows: true, labels: true, lot: true, outlines: true };
+    var data = null, solarData = null, terr = terrainSampler(null), groups = {}, labels = [], pickables = [], disposables = [];
+    var layers = { aerial: true, roofphoto: false, solarflux: false, trees: true, neighbors: true, shadows: true, labels: true, lot: true, outlines: true };
     var aerial = null, aerialKey = '', aerialState = 'none';
     var sunMs = Date.now(), sunInfo = { altitude: 0.8, bearing: 180 };
     var cam = { b: 150, p: 58, r: 70, tx: 0, ty: 2, tz: 0 }, goal = { b: 150, p: 58, r: 70, tx: 0, ty: 2, tz: 0 }, home = null;
@@ -1235,6 +1235,9 @@
         roofAerialDim: std({ map: aerial ? aerial.texMuted : null, color: 0xf8fafc, roughness: 0.9 }),
         // This home in a restrained colour, everything else matte white.
         roofSubject: std({ color: 0x8fb4ad }),
+        roofSolarFlux: std({ color: 0xffffff, vertexColors: true, roughness: 0.7, metalness: 0.06, side: dbl }),
+        solarPanel: std({ color: 0x102347, roughness: 0.34, metalness: 0.28, side: dbl, polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1 }),
+        solarPanelFrame: new THREE.LineBasicMaterial({ color: 0x93c5fd, transparent: true, opacity: 0.72 }),
         roofAccessory: std({ color: 0xc8bcd8 }),
         roofNeighbor: std({ color: 0xf6f6f3 }),
         wallSubject: std({ color: 0xfcf9f1, vertexColors: true, side: dbl }),
@@ -1272,7 +1275,110 @@
         faceHi: new THREE.MeshBasicMaterial({ color: 0x14b8a6, transparent: true, opacity: 0.45, depthWrite: false, side: dbl, polygonOffset: true, polygonOffsetFactor: -3, polygonOffsetUnits: -3 }),
       };
     }
-    function roofMaterial(role) {
+    var SOLAR_STOPS = [
+      [0.149, 0.094, 0.329], // #261854 deep violet shade
+      [0.357, 0.129, 0.714], // #5b21b6 indigo
+      [0.745, 0.094, 0.365], // #be185d magenta
+      [0.863, 0.149, 0.149], // #dc2626 crimson
+      [0.961, 0.620, 0.043], // #f59e0b amber
+      [0.996, 0.941, 0.541]  // #fef08a peak solar yellow
+    ];
+    function solarFluxRgb(t) {
+      var u = clamp(isNum(t) ? t : 0.62, 0, 1) * (SOLAR_STOPS.length - 1);
+      var i = Math.min(SOLAR_STOPS.length - 2, Math.max(0, Math.floor(u)));
+      var f = u - i, a = SOLAR_STOPS[i], b = SOLAR_STOPS[i + 1];
+      return [a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f, a[2] + (b[2] - a[2]) * f];
+    }
+    function solarOriginOffset(orig) {
+      if (!orig || !isNum(orig.lat) || !isNum(orig.lon) || !data || !data.origin || !isNum(data.origin.lat) || !isNum(data.origin.lon)) return [0, 0];
+      if (Math.abs(orig.lat - data.origin.lat) < 1e-7 && Math.abs(orig.lon - data.origin.lon) < 1e-7) return [0, 0];
+      var fr = H3.localFrame(data.origin.lat, data.origin.lon);
+      return fr.fwd(orig.lat, orig.lon);
+    }
+    function sampleSolarNorm(fg, off, e, n) {
+      if (!fg || !Array.isArray(fg.norm255) || !fg.w || !fg.h || !fg.step) return 0.62;
+      var dx = (e - off[0]) - (fg.ox || 0), dy = (n - off[1]) - (fg.oy || 0);
+      var ang = -(fg.rot || 0) * RAD, cr = Math.cos(ang), sr = Math.sin(ang);
+      var ux = (dx * cr - dy * sr) / fg.step, uy = (dx * sr + dy * cr) / fg.step;
+      var ci = Math.round(ux), cj = Math.round(uy);
+      var w = fg.w, h = fg.h, arr = fg.norm255;
+      var at = function (ix, iy) {
+        if (ix < 0 || iy < 0 || ix >= w || iy >= h) return -1;
+        var v = arr[iy * w + ix];
+        return isNum(v) && v >= 0 ? v : -1;
+      };
+      var v0 = at(ci, cj);
+      if (v0 >= 0) return v0 / 255;
+      var sum = 0, cnt = 0;
+      for (var dj = -2; dj <= 2; dj++) for (var di = -2; di <= 2; di++) {
+        var vn = at(ci + di, cj + dj);
+        if (vn >= 0) { sum += vn; cnt++; }
+      }
+      return cnt > 0 ? (sum / cnt) / 255 : 0.55;
+    }
+    function applySolarColorsToRoof() {
+      if (!groups.buildings || !solarData || !solarData.fluxGrid) return false;
+      var fg = solarData.fluxGrid, off = solarOriginOffset(fg.origin), applied = false;
+      groups.buildings.children.forEach(function (g) {
+        if (g.userData.role !== 'subject') return;
+        g.children.forEach(function (m) {
+          if (m.userData.kind !== 'roof' || !m.geometry) return;
+          var pos = m.geometry.getAttribute('position');
+          if (!pos || !pos.count) return;
+          var col = new Float32Array(pos.count * 3);
+          for (var k = 0; k < pos.count; k++) {
+            var e = pos.getX(k), n = -pos.getZ(k);
+            var rgb = solarFluxRgb(sampleSolarNorm(fg, off, e, n));
+            col[k * 3] = rgb[0]; col[k * 3 + 1] = rgb[1]; col[k * 3 + 2] = rgb[2];
+          }
+          m.geometry.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
+          m.userData.hasSolarColors = true;
+          applied = true;
+        });
+      });
+      return applied;
+    }
+    function buildSolarPanels() {
+      var grp = new THREE.Group();
+      grp.visible = Boolean(layers.solarflux && solarData);
+      if (!solarData || !Array.isArray(solarData.panels) || !solarData.panels.length || !subject || !subject._model) return grp;
+      var M = subject._model, base = subject.base || 0;
+      var off = solarOriginOffset(solarData.fluxGrid && solarData.fluxGrid.origin);
+      var pPos = [], pNor = [], fPos = [];
+      solarData.panels.forEach(function (p) {
+        if (!p || !Array.isArray(p.cornersLocal) || p.cornersLocal.length < 4) return;
+        var pts3 = p.cornersLocal.slice(0, 4).map(function (c) {
+          var e = c[0] + off[0], n = c[1] + off[1];
+          var lat = M.lattice(e, n), s = M.surf(lat[0], lat[1]);
+          return [e, base + s.h + 0.06, -n];
+        });
+        var ux = pts3[1][0] - pts3[0][0], uy = pts3[1][1] - pts3[0][1], uz = pts3[1][2] - pts3[0][2];
+        var vx = pts3[3][0] - pts3[0][0], vy = pts3[3][1] - pts3[0][1], vz = pts3[3][2] - pts3[0][2];
+        var nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
+        if (ny < 0) { nx = -nx; ny = -ny; nz = -nz; }
+        var nl = Math.hypot(nx, ny, nz) || 1;
+        nx /= nl; ny /= nl; nz /= nl;
+        [pts3[0], pts3[1], pts3[2], pts3[0], pts3[2], pts3[3]].forEach(function (v) {
+          pPos.push(v[0], v[1], v[2]);
+          pNor.push(nx, ny, nz);
+        });
+        for (var i = 0; i < 4; i++) {
+          var a = pts3[i], b = pts3[(i + 1) % 4];
+          fPos.push(a[0], a[1] + 0.004, a[2], b[0], b[1] + 0.004, b[2]);
+        }
+      });
+      if (pPos.length) {
+        var pm = new THREE.Mesh(geomFrom(pPos, pNor), mats.solarPanel);
+        pm.receiveShadow = true;
+        grp.add(pm);
+      }
+      if (fPos.length) {
+        grp.add(new THREE.LineSegments(geomFrom(fPos), mats.solarPanelFrame));
+      }
+      return grp;
+    }
+    function roofMaterial(role, hasSolarColors) {
+      if (role === 'subject' && layers.solarflux && hasSolarColors && mats.roofSolarFlux) return mats.roofSolarFlux;
       if (layers.roofphoto && layers.aerial && aerial) return role === 'neighbor' ? mats.roofAerialDim : mats.roofAerial;
       return role === 'subject' ? mats.roofSubject : role === 'accessory' ? mats.roofAccessory : mats.roofNeighbor;
     }
@@ -1282,12 +1388,13 @@
       (groups.buildings ? groups.buildings.children : []).forEach(function (g) {
         g.children.forEach(function (m) {
           var kind = m.userData.kind;
-          if (kind === 'roof') m.material = roofMaterial(g.userData.role);
+          if (kind === 'roof') m.material = roofMaterial(g.userData.role, Boolean(m.userData.hasSolarColors));
           else if (kind === 'outline-cap' || kind === 'outline-line') m.material = layers.outlines ? m.userData.on : m.userData.off;
           else if (kind === 'collar') m.visible = layers.outlines;
         });
         if (g.userData.role === 'neighbor') g.visible = layers.neighbors;
       });
+      if (groups.solarPanels) groups.solarPanels.visible = Boolean(layers.solarflux && solarData);
       if (groups.streets) groups.streets.visible = !(layers.aerial && aerial);
       if (groups.trees) groups.trees.visible = layers.trees;
       if (groups.lot) groups.lot.visible = layers.lot;
@@ -1832,6 +1939,8 @@
       streetLabels = [];
       groups.ground = buildGround();
       groups.buildings = buildBuildings();
+      if (solarData && solarData.fluxGrid) applySolarColorsToRoof();
+      groups.solarPanels = buildSolarPanels();
       groups.trees = buildTrees();
       groups.streets = buildStreets();
       groups.lot = buildLot();
@@ -2164,6 +2273,16 @@
     resize();
     return {
       setScene: function (scene, keepCamera) { data = scene; rebuild(Boolean(keepCamera)); },
+      setSolarData: function (sd) {
+        solarData = sd || null;
+        if (groups.buildings && solarData && solarData.fluxGrid) applySolarColorsToRoof();
+        if (groups.solarPanels) { root.remove(groups.solarPanels); groups.solarPanels = null; }
+        if (data && subject && solarData) {
+          groups.solarPanels = buildSolarPanels();
+          root.add(groups.solarPanels);
+        }
+        applyStyle();
+      },
       setLayer: function (name, on) { layers[name] = Boolean(on); applySun(); applyStyle(); },
       layers: function () { return Object.assign({}, layers); },
       /** Shows one kind of measurement on the model ('heights', 'roof', 'lot', 'gap', 'tree') or none. */
@@ -2216,6 +2335,58 @@
   if (!H3 || H3.mount) return;
   var T = H3.T, P = H3.P, escH = H3.escH, isNum = H3.isNum, ftm = H3.ftm, sqftm = H3.sqftm, nf = H3.nf;
   var TOUR_KEY = 'openestate:house3d:tour:v1:';
+
+  function scopeDarkCss(rules) {
+    function withPrefix(pfx) {
+      return rules.map(function (rule) {
+        var bi = rule.indexOf('{');
+        if (bi < 0) return rule;
+        var sels = rule.slice(0, bi).split(',').map(function (s) {
+          var t = s.trim();
+          return t ? (pfx + ' ' + t) : t;
+        }).join(',');
+        return sels + rule.slice(bi);
+      }).join('\n');
+    }
+    return '@media (prefers-color-scheme: dark){\n' + withPrefix('html:not([data-theme="light"])') + '\n}\n' + withPrefix('html[data-theme="dark"]');
+  }
+
+  var DARK_CSS = [
+    '.h3d-stage{border-color:var(--line-strong,#334155);box-shadow:0 12px 32px rgba(0,0,0,.45)}',
+    '.h3d-label-front{color:#5eead4;background:rgba(15,23,42,.88);border-color:rgba(45,212,191,.45);box-shadow:0 2px 10px rgba(0,0,0,.45)}',
+    '.h3d-label-street{color:#f1f5f9;text-shadow:0 0 4px rgba(15,23,42,.95),0 0 6px rgba(15,23,42,.95),0 1px 6px #000}',
+    '.h3d-label-dim{background:rgba(15,23,42,.9);color:#f1f5f9;border-color:rgba(148,163,184,.32);box-shadow:0 2px 10px rgba(0,0,0,.5)}',
+    '.h3d-label-dim i{color:#fbbf24}',
+    '.h3d-dim-note{border-color:rgba(45,212,191,.45);color:#5eead4}',
+    '.h3d-chip{background:rgba(15,23,42,.88);border-color:rgba(148,163,184,.25);color:#f1f5f9;box-shadow:0 4px 12px rgba(0,0,0,.45)}',
+    '.h3d-chip.ok{color:#4ade80;border-color:rgba(74,222,128,.35)}',
+    '.h3d-chip.est{color:#fbbf24;border-color:rgba(251,191,36,.35)}',
+    '.h3d-chip.busy{color:#60a5fa;border-color:rgba(96,165,250,.35)}',
+    '.h3d-chip.light{color:#fde68a;border-color:rgba(251,191,36,.35)}',
+    '.h3d-btnrow{background:rgba(15,23,42,.88);border-color:rgba(148,163,184,.25);box-shadow:0 4px 12px rgba(0,0,0,.45)}',
+    '.h3d-btnrow button:not(.on){color:#e2e8f0}',
+    '.h3d-btnrow button+button{border-left-color:rgba(148,163,184,.18)}',
+    '.h3d-btnrow button:not(.on):hover{background:#1e293b;color:#ffffff}',
+    '.h3d-btnrow button.on{background:#0f766e;color:#ffffff}',
+    '.h3d-compass{background:rgba(15,23,42,.88);border-color:rgba(148,163,184,.25);box-shadow:0 4px 12px rgba(0,0,0,.45)}',
+    '.h3d-needle:after{color:#f1f5f9}',
+    '.h3d-sun{background:rgba(15,23,42,.9);border-color:rgba(148,163,184,.25);color:#e2e8f0;box-shadow:0 4px 14px rgba(0,0,0,.5)}',
+    '.h3d-sun select{border-color:#334155;background:#1e293b;color:#f1f5f9}',
+    '.h3d-sun button:not(.on){border-color:#334155;background:#1e293b;color:#e2e8f0}',
+    '.h3d-sun button:not(.on):hover{background:#293548;border-color:#475569;color:#ffffff}',
+    '.h3d-sun button.on{background:#d97706;border-color:#d97706;color:#ffffff}',
+    '.h3d-attr{color:rgba(241,245,249,.82);text-shadow:0 0 4px rgba(15,23,42,.95),0 1px 4px rgba(0,0,0,.9)}',
+    '.h3d-cover{background:linear-gradient(180deg,#0f172a,#1e293b);color:#f1f5f9}',
+    '.h3d-cover small{color:#94a3b8}',
+    '.h3d-spin{border-color:rgba(45,212,191,.22);border-top-color:#2dd4bf}',
+    '.h3d-printimg{border-color:var(--line-strong,#334155)}',
+    '.h3d-warn{border-color:rgba(251,191,36,.38)}',
+    '.h3d-paste input{background:var(--surface-2,#1e293b);color:var(--ink,#f1f5f9);border-color:var(--line-strong,#334155)}',
+    '.h3d-paste input::placeholder{color:var(--muted,#94a3b8)}',
+    '.h3d-paste button.ghost{background:var(--surface-2,#1e293b);color:var(--ink,#f1f5f9);border-color:var(--line-strong,#334155)}',
+    '.h3d-paste button.ghost:hover{background:#293548;border-color:#475569}',
+    '.h3d-msg{color:#fca5a5}'
+  ];
 
   var CSS = [
     '.h3d-stage{position:relative;width:100%;aspect-ratio:4/3;min-height:360px;max-height:min(820px,86vh);border-radius:14px;border:1px solid var(--line,#e5e7eb);overflow:hidden;background:linear-gradient(180deg,#89bef0 0%,#c4dff7 26%,#dce9f6 48%,#dce9f6 100%);box-shadow:0 12px 32px rgba(15,23,42,.08);outline:none;user-select:none;-webkit-user-select:none}',
@@ -2295,10 +2466,11 @@
       '.h3d-sun{grid-template-columns:136px minmax(0,1fr) auto 34px;gap:6px 8px;padding:7px 10px}.h3d-sun>span[aria-hidden]{display:none}.h3d-sun select{grid-column:1/2;grid-row:1}.h3d-sunread{grid-column:2/5;grid-row:1;text-align:right}.h3d-sun input[type=range]{grid-column:1/3;grid-row:2}.h3d-sun button.h3d-now{grid-column:3/4;grid-row:2}.h3d-sun #h3dPlay{grid-column:4/5;grid-row:2}' +
       '.h3d-hint{display:none}.h3d-compass,.h3d-attr{bottom:96px}.h3d-attr{max-width:68%}.h3d-btnrow button{padding:8px 9px;min-width:32px}}',
     '@media print{.h3d-stage,.h3d-layers,.h3d-measure,.h3d-paste,.h3d-tourframe{display:none!important}.h3d-printimg.ready{display:block!important}}',
+    scopeDarkCss(DARK_CSS)
   ].join('\n');
 
   var st = {
-    rep: null, slug: '', sec: null, viewer: null, scene: null, serverTried: false, started: false, failed: false,
+    rep: null, slug: '', sec: null, viewer: null, scene: null, solar: null, serverTried: false, started: false, failed: false,
     lat: null, lon: null, tz: 'America/Chicago', sun: { preset: 'today', minutes: 630, mode: 'morning', playing: false, raf: 0 },
     measure: 'heights', busy: false,
     warnings: [], hintTimer: 0, tours: [], tourIdx: 0, tourLoaded: false,
@@ -2318,13 +2490,13 @@
   /* ------------------------------------------------------------------ shell */
   function shellHtml(hasPlace) {
     var views = [['orbit', '3D', '3D', '3D'], ['top', 'Top', '俯视', 'Planta'], ['front', 'Front', '正面', 'Frente'], ['back', 'Back', '背面', 'Atrás']];
-    var layers = [['outlines', 'Outlines', '轮廓线', 'Contornos'], ['aerial', 'Aerial imagery', '航拍影像', 'Imagen aérea'], ['roofphoto', 'Photo on roofs', '屋顶贴航拍', 'Foto en techos'], ['trees', 'Trees', '树木', 'Árboles'], ['neighbors', 'Neighbors', '邻近建筑', 'Vecinos'], ['shadows', 'Shadows', '日照阴影', 'Sombras'], ['labels', 'Labels', '标注', 'Etiquetas'], ['lot', 'Lot line', '地块红线', 'Límite del lote']];
+    var layers = [['outlines', 'Outlines', '轮廓线', 'Contornos'], ['aerial', 'Aerial imagery', '航拍影像', 'Imagen aérea'], ['roofphoto', 'Photo on roofs', '屋顶贴航拍', 'Foto en techos'], ['solarflux', 'Solar Flux', '光伏热力', 'Flujo solar'], ['trees', 'Trees', '树木', 'Árboles'], ['neighbors', 'Neighbors', '邻近建筑', 'Vecinos'], ['shadows', 'Shadows', '日照阴影', 'Sombras'], ['labels', 'Labels', '标注', 'Etiquetas'], ['lot', 'Lot line', '地块红线', 'Límite del lote']];
     // Measurements drawn on the model, one kind at a time.
     var measures = [['heights', 'Heights', '高度', 'Alturas'], ['roof', 'Roof faces', '屋面', 'Faldones'], ['lot', 'Lot edges', '地块边长', 'Lados del lote'], ['gap', 'Neighbor gap', '邻栋间距', 'Separación del vecino'], ['tree', 'Tallest tree', '最高树木', 'Árbol más alto']];
     var hex = function (n) { return '#' + ('00000' + n.toString(16)).slice(-6); };
     var OL = H3.OUTLINE || { subject: 0xfacc15, accessory: 0xe879f9 };
-    // Legend swatches, matching the satellite map: home, garage / ADU, lot line.
-    var swatch = { outlines: [hex(OL.subject), hex(OL.accessory)], lot: ['#38bdf8'] };
+    // Legend swatches, matching the satellite map: home, garage / ADU, lot line, solar irradiance.
+    var swatch = { outlines: [hex(OL.subject), hex(OL.accessory)], lot: ['#38bdf8'], solarflux: ['#f59e0b', '#dc2626'] };
     var stage = !hasPlace ? '' :
       '<div class="h3d-stage" id="h3dStage" tabindex="0" role="application" aria-label="Interactive 3D model of the home">' +
         '<canvas class="h3d-canvas" id="h3dCanvas"></canvas>' +
@@ -2349,7 +2521,7 @@
         '<div class="h3d-cover" id="h3dCover"></div>' +
       '</div>' +
       '<img class="h3d-printimg" id="h3dPrint" alt="3D model snapshot">' +
-      '<div class="chips h3d-layers" id="h3dLayers">' + layers.map(function (l) { return '<span class="chip' + (l[0] === 'roofphoto' ? '' : ' on') + '" data-layer="' + l[0] + '">' + (swatch[l[0]] || []).map(function (c) { return '<i style="background:' + c + '"></i>'; }).join('') + T(l[1], l[2], l[3]) + '</span>'; }).join('') + '</div>';
+      '<div class="chips h3d-layers" id="h3dLayers">' + layers.map(function (l) { return '<span class="chip' + (l[0] === 'roofphoto' || l[0] === 'solarflux' ? '' : ' on') + '" data-layer="' + l[0] + '">' + (swatch[l[0]] || []).map(function (c) { return '<i style="background:' + c + '"></i>'; }).join('') + T(l[1], l[2], l[3]) + '</span>'; }).join('') + '</div>';
     if (hasPlace) stage = stage.replace('<div class="chips h3d-layers"', '<div class="h3d-measure" id="h3dMeasure"><span class="h3d-mlbl">' + T('Measure on the model:', '在模型上标注：', 'Medir sobre el modelo:') + '</span>' +
       measures.map(function (m) { return '<span class="chip' + (m[0] === st.measure ? ' on' : '') + '" data-measure="' + m[0] + '">' + T(m[1], m[2], m[3]) + '</span>'; }).join('') + '</div><div class="chips h3d-layers"');
     return '<div class="eyebrow">' + T('Interactive 3D', '三维实景', '3D interactivo') + '</div>' +
@@ -2637,14 +2809,65 @@
      section, so the measured roofs are usually in hand when the viewer opens. The server answers
      202 {pending} while it is still downloading the survey; keep polling for up to two minutes
      (the build carries on server-side and lands in its cache either way). */
-  var scenePromise = null, sceneListeners = [];
+  var scenePromise = null, solarPromise = null, sceneListeners = [];
+  function syncSolarChip() {
+    var chip = $('#h3dLayers [data-layer="solarflux"]');
+    if (!chip || !chip.style) return;
+    var disabled = Boolean(st.rep && st.rep.solarPotentialDisabled === true);
+    chip.style.display = disabled ? 'none' : '';
+  }
+  function requestSolarData() {
+    if (st.rep && st.rep.solarPotentialDisabled === true) return Promise.resolve(null);
+    if (st.solar && st.solar.lidarMeasured && st.solar.fluxGrid) {
+      if (st.viewer) st.viewer.setSolarData(st.solar);
+      return Promise.resolve(st.solar);
+    }
+    if (solarPromise) return solarPromise;
+    if (!st.slug || typeof fetch !== 'function' || typeof location === 'undefined' || !/^https?:$/.test(location.protocol)) {
+      if (st.solar && st.viewer) st.viewer.setSolarData(st.solar);
+      return Promise.resolve(st.solar);
+    }
+    var t0 = Date.now();
+    var step = function () {
+      return fetch('/api/solar/' + encodeURIComponent(st.slug), { headers: { Accept: 'application/json' }, credentials: 'same-origin' })
+        .then(function (r) {
+          if (r.status === 202) {
+            return r.json().then(function (j) {
+              if (j && j.solar && j.solar.fluxGrid) {
+                st.solar = j.solar;
+                if (st.viewer) st.viewer.setSolarData(st.solar);
+              }
+              if (Date.now() - t0 > 60000) return st.solar;
+              var wait = Math.max(1500, Math.min(6000, Number(j && j.retryAfterMs) || 2500));
+              return new Promise(function (done) { setTimeout(done, wait); }).then(step);
+            }, function () { return st.solar; });
+          }
+          if (!r.ok) return st.solar;
+          return r.json().then(function (j) {
+            var sd = (j && j.solar && j.solar.fluxGrid) ? j.solar : (j && j.fluxGrid ? j : null);
+            if (sd) {
+              st.solar = sd;
+              if (st.viewer) st.viewer.setSolarData(st.solar);
+            }
+            return st.solar;
+          }, function () { return st.solar; });
+        }, function () { return st.solar; });
+    };
+    solarPromise = step().then(function (sd) {
+      if (!sd || !sd.lidarMeasured) solarPromise = null;
+      return sd;
+    });
+    return solarPromise;
+  }
   function applyServerScene(j) {
     if (!(j && j.ok && j.scene && Array.isArray(j.scene.buildings))) return false;
     st.scene = j.scene;
     st.warnings = Array.isArray(j.warnings) ? j.warnings : [];
     if (st.viewer) st.viewer.setScene(st.scene, true);
     syncLotChip();
+    syncSolarChip();
     renderTiles();
+    if (st.viewer && st.viewer.layers().solarflux) requestSolarData();
     sceneListeners.forEach(function (cb) { try { cb(j.scene, j); } catch (e) { /* listener's own problem */ } });
     return true;
   }
@@ -2756,6 +2979,7 @@
       // Open in late-morning light on today's date (labelled on the model); "Now" is one tap away.
       if (st.sun.mode === 'morning') { st.sun.preset = 'today'; st.sun.minutes = 630; }
       st.viewer.setSunTime(sunMsNow());
+      if (st.solar && st.solar.fluxGrid) st.viewer.setSolarData(st.solar);
       st.viewer.setScene(st.scene, false);
       if (typeof IntersectionObserver !== 'undefined' && stage) {
         var seen = true, sync = function () { if (st.viewer) st.viewer.setInView(seen && !document.hidden); };
@@ -2795,6 +3019,15 @@
     var box = $('#h3dTour');
     if (!box) return;
     collectTours();
+    var showRefLinks = Boolean(Core && typeof Core.isDisplayLinksEnabled === 'function' ? Core.isDisplayLinksEnabled() : (document.documentElement && document.documentElement.getAttribute('data-display-links') === '1'));
+    var safeExtAttrs = function (rawUrl, label) {
+      if (!showRefLinks || !rawUrl) return '';
+      if (Core && typeof Core.toReferenceRedirectUrl === 'function') {
+        var rUrl = Core.toReferenceRedirectUrl(rawUrl, { section: 'house3d', kind: 'tour', label: label || '3D Tour' });
+        return rUrl ? 'class="src-lnk" href="' + escH(rUrl) + '"' : '';
+      }
+      return 'class="src-lnk" href="' + escH(rawUrl) + '"';
+    };
     var addr = (st.rep && st.rep.meta && st.rep.meta.displayAddress) || '', q = encodeURIComponent(addr);
     var embeds = st.tours.filter(function (t) { return t.embedUrl; }), links = st.tours.filter(function (t) { return !t.embedUrl; });
     var cur = embeds[Math.min(st.tourIdx, Math.max(0, embeds.length - 1))];
@@ -2803,24 +3036,29 @@
       if (embeds.length > 1) {
         html += '<div class="chips">' + embeds.map(function (t, i) { return '<span class="chip' + (t === cur ? ' on' : '') + '" data-tour="' + i + '">' + escH(t.vendor) + (t.mine ? ' · ' + T('added by you', '您添加的', 'añadido por usted') : '') + '</span>'; }).join('') + '</div>';
       }
+      var curOpenAttrs = safeExtAttrs(cur.openUrl, cur.vendor || '3D Tour');
       html += '<div class="h3d-tourframe" id="h3dTourFrame">' + (st.tourLoaded ? tourIframe(cur) :
         '<div class="h3d-tourposter"><div>' + escH(cur.vendor) + ' · ' + (cur.kind === 'video' ? T('video tour', '视频看房', 'recorrido en video') : T('interactive 3D walkthrough', '可交互三维漫游', 'recorrido 3D interactivo')) + '</div>' +
         '<small>' + T('Loads the tour straight from ' + (cur.generic ? 'its host' : cur.vendor) + '. Walk through rooms, switch to the dollhouse or floor-plan view, and measure where the host allows it.', '直接从' + (cur.generic ? '其托管方' : ' ' + cur.vendor + ' ') + '加载。可逐间浏览、切换立体剖面或平面图视图，并在托管方支持时测量。', 'Se carga directamente desde ' + (cur.generic ? 'su servicio' : cur.vendor) + '. Recorra las habitaciones, cambie a la vista de maqueta o plano y mida donde el servicio lo permita.') + '</small>' +
         '<button type="button" data-act="tourload">' + T('Load interactive tour', '加载交互式漫游', 'Cargar recorrido interactivo') + '</button></div>') + '</div>' +
         '<div class="h3d-src">' + (cur.mine ? T('Link added by you — stored only in this browser.', '此链接由您添加，仅保存在本浏览器中。', 'Enlace añadido por usted; solo se guarda en este navegador.') : T('Tour link from the listing record.', '漫游链接来自房源记录。', 'Enlace del recorrido tomado del anuncio.')) +
-        ' <a href="' + escH(cur.openUrl) + '" target="_blank" rel="noopener noreferrer">' + T('Open in a new tab ↗', '在新标签页打开 ↗', 'Abrir en pestaña nueva ↗') + '</a>' +
+        (curOpenAttrs ? ' <a ' + curOpenAttrs + ' target="_blank" rel="noopener noreferrer">' + T('Open in a new tab ↗', '在新标签页打开 ↗', 'Abrir en pestaña nueva ↗') + '</a>' : '') +
         (cur.mine ? ' · <a href="#" data-act="tourclear">' + T('Remove', '移除', 'Quitar') + '</a>' : '') + '</div>';
     } else {
       html += '<div class="hint">' + T('No 3D tour link is on record for this home. If the listing has a Matterport, iGUIDE or similar walkthrough, paste its link to explore it here next to the exterior model.', '此房源记录中暂无三维漫游链接。如果房源提供 Matterport、iGUIDE 等漫游，可粘贴链接，在此与外部模型一并查看。', 'No hay enlace de recorrido 3D registrado para esta casa. Si el anuncio tiene un recorrido Matterport, iGUIDE o similar, pegue su enlace para explorarlo aquí junto al modelo exterior.') + '</div>';
     }
     links.forEach(function (t) {
-      html += '<div class="h3d-src"><a href="' + escH(t.openUrl) + '" target="_blank" rel="noopener noreferrer">' + T('Open the listing’s virtual tour ↗', '打开房源虚拟看房 ↗', 'Abrir el recorrido virtual del anuncio ↗') + '</a></div>';
+      var lAttrs = safeExtAttrs(t.openUrl, 'Virtual Tour');
+      if (lAttrs) {
+        html += '<div class="h3d-src"><a ' + lAttrs + ' target="_blank" rel="noopener noreferrer">' + T('Open the listing’s virtual tour ↗', '打开房源虚拟看房 ↗', 'Abrir el recorrido virtual del anuncio ↗') + '</a></div>';
+      }
     });
     var wb3d = (typeof window !== 'undefined' && window.__OPEN_ESTATE_BRAND__) || {};
     var bn3d = (wb3d.name && String(wb3d.name).trim()) || (typeof R !== 'undefined' && R && R.brand && R.brand.name && String(R.brand.name).trim()) || 'Open Estate';
+    var searchAttrs = addr ? safeExtAttrs('https://www.google.com/search?q=' + q + '%203D%20tour', 'Search 3D Tour') : '';
     html += '<div class="h3d-paste"><input type="url" id="h3dTourUrl" inputmode="url" autocomplete="off" spellcheck="false" placeholder="' + escH(P('Paste a 3D tour link (Matterport, iGUIDE, YouTube…)', '粘贴三维漫游链接（Matterport、iGUIDE、YouTube…）', 'Pegue un enlace de recorrido 3D (Matterport, iGUIDE, YouTube…)')) + '">' +
       '<button type="button" data-act="touradd">' + T('Show tour', '显示漫游', 'Mostrar recorrido') + '</button>' +
-      (addr ? '<a class="h3d-src" style="align-self:center;margin:0" href="https://www.google.com/search?q=' + q + '%203D%20tour" target="_blank" rel="noopener noreferrer">' + T('Search for this home’s tour ↗', '搜索此房的三维漫游 ↗', 'Buscar el recorrido de esta casa ↗') + '</a>' : '') + '</div>' +
+      (searchAttrs ? '<a class="h3d-src src-lnk" style="align-self:center;margin:0" ' + searchAttrs.replace(/^class="src-lnk"\s*/, '') + ' target="_blank" rel="noopener noreferrer">' + T('Search for this home’s tour ↗', '搜索此房的三维漫游 ↗', 'Buscar el recorrido de esta casa ↗') + '</a>' : '') + '</div>' +
       (msg ? '<div class="h3d-msg">' + msg + '</div>' : '') +
       '<div class="h3d-src">' + T('Tours play through the host’s own embedded player; ' + bn3d + ' does not copy, store or alter tour content, which belongs to the listing’s owner.', '漫游通过托管方自带的嵌入式播放器呈现；' + bn3d + ' 不复制、不存储、不修改漫游内容，内容版权归房源方所有。', 'Los recorridos se reproducen con el reproductor del propio servicio; ' + bn3d + ' no copia, almacena ni altera su contenido, que pertenece al titular del anuncio.') + '</div>';
     box.innerHTML = html;
@@ -2878,6 +3116,7 @@
     if (layer) {
       var on = !el.classList.contains('on');
       el.classList.toggle('on', on);
+      if (layer === 'solarflux' && on) requestSolarData();
       st.viewer.setLayer(layer, on);
       return;
     }
@@ -2938,6 +3177,7 @@
     st.rep = H3.getReport();
     st.slug = String((st.rep && st.rep.meta && st.rep.meta.slug) || '').replace(/[^a-z0-9-]/gi, '').slice(0, 160);
     st.scene = H3.sceneFromReport(st.rep);
+    st.solar = (st.rep && (st.rep.solarPotential || (st.rep.modules && st.rep.modules.solar && st.rep.modules.solar.data))) || null;
     injectCss();
     var hasPlace = Boolean(st.scene && st.scene.origin);
     sec.innerHTML = shellHtml(hasPlace);
@@ -2960,6 +3200,7 @@
     renderBadge(false);
     renderTiles();
     syncLotChip();
+    syncSolarChip();
     fillDateOptions();
     showCover('idle');
     // Ask for the measured scene once the page is idle (cached server-side, so usually instant;
@@ -2983,7 +3224,11 @@
       });
     }
     if (typeof MutationObserver !== 'undefined' && document.documentElement && document.documentElement.nodeType === 1) {
-      new MutationObserver(onLang).observe(document.documentElement, { attributes: true, attributeFilter: ['lang'] });
+      new MutationObserver(function (muts) {
+        var linkChanged = muts && muts.some(function (m) { return m.attributeName === 'data-display-links'; });
+        if (linkChanged) renderTour();
+        else onLang();
+      }).observe(document.documentElement, { attributes: true, attributeFilter: ['lang', 'data-display-links'] });
     }
   }
   H3.mount = mount;

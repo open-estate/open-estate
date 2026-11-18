@@ -16,8 +16,9 @@ use url::Url;
 
 use crate::extensions::ExtensionHub;
 use crate::modules::commute::{
-    EstimateReason, LatLon, RoutingClient, RoutingConfig, EST_MINUTES_PER_MILE, EST_MIN_MINUTES,
-    OSM_COPYRIGHT_URL, OSRM_ATTRIBUTION, ROAD_DISTANCE_FACTOR,
+    fetch_osm_na_trails_corridor, ActiveMobilityMode, DriveTime, EstimateReason, LatLon,
+    RoutingClient, RoutingConfig, EST_MINUTES_PER_MILE, EST_MIN_MINUTES, OSM_COPYRIGHT_URL,
+    OSRM_ATTRIBUTION, ROAD_DISTANCE_FACTOR,
 };
 use crate::shared::{
     bearing_deg, compass8, haversine_m, round_n, EnvConfig, HttpClient, ModuleOutput, SourceItem,
@@ -35,6 +36,32 @@ struct DestTarget {
     name: String,
     lat: f64,
     lon: f64,
+    in_assigned_district: Option<bool>,
+    is_24h_emergency: Option<bool>,
+}
+
+fn is_er_hospital_candidate(v: &Value) -> bool {
+    let em_tag = v
+        .pointer("/tags/emergency")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    if em_tag.eq_ignore_ascii_case("yes") || em_tag.eq_ignore_ascii_case("emergency_ward_entrance") {
+        return true;
+    }
+    let oh = v
+        .pointer("/tags/opening_hours")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let nm = v
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    oh == "24/7"
+        || nm.contains("emergency")
+        || nm.contains("medical center")
+        || nm.contains("general hospital")
+        || nm.contains("regional medical")
 }
 
 pub async fn find_city_hall(
@@ -152,7 +179,13 @@ pub async fn run_access_with_env_and_hub(
     let civ = civic.map(|v| v.get("data").unwrap_or(v));
 
     let mut dests: Vec<DestTarget> = Vec::new();
-    let mut push_dest = |key: &'static str, label: &'static str, name: &str, la: f64, lo: f64| {
+    let mut push_dest_meta = |key: &'static str,
+                              label: &'static str,
+                              name: &str,
+                              la: f64,
+                              lo: f64,
+                              assigned: Option<bool>,
+                              er_24h: Option<bool>| {
         if la.is_finite() && lo.is_finite() && (la != 0.0 || lo != 0.0) {
             dests.push(DestTarget {
                 key,
@@ -160,6 +193,8 @@ pub async fn run_access_with_env_and_hub(
                 name: name.to_string(),
                 lat: la,
                 lon: lo,
+                in_assigned_district: assigned,
+                is_24h_emergency: er_24h,
             });
         }
     };
@@ -182,7 +217,7 @@ pub async fn run_access_with_env_and_hub(
                 .or_else(|| ch.get("name"))
                 .and_then(|v| v.as_str())
                 .unwrap_or("City Hall");
-            push_dest("downtown", "Downtown (city hall)", nm, cla, clo);
+            push_dest_meta("downtown", "Downtown (city hall)", nm, cla, clo, None, None);
         }
     }
 
@@ -203,7 +238,7 @@ pub async fn run_access_with_env_and_hub(
                     Some(code) => format!("{base_nm} ({code})"),
                     None => base_nm.to_string(),
                 };
-                push_dest("airport", "Major airport", &nm, ala, alo);
+                push_dest_meta("airport", "Major airport", &nm, ala, alo, None, None);
             }
         }
     }
@@ -212,21 +247,28 @@ pub async fn run_access_with_env_and_hub(
         .and_then(|c| c.pointer("/schools/public/list"))
         .and_then(|v| v.as_array())
     {
-        let hs = pub_list
-            .iter()
-            .find(|s| {
-                s.get("level").and_then(|v| v.as_str()) == Some("high")
-                    && s.get("inAssignedDistrict").and_then(|v| v.as_bool()) == Some(true)
-            })
-            .or_else(|| {
-                pub_list
-                    .iter()
-                    .find(|s| s.get("level").and_then(|v| v.as_str()) == Some("high"))
-            });
-        if let Some(h) = hs {
-            if let Some((hla, hlo)) = val_coords(h) {
-                let nm = h.get("name").and_then(|v| v.as_str()).unwrap_or("High School");
-                push_dest("highschool", "High school", nm, hla, hlo);
+        for (lvl, d_key, d_lbl, def_nm) in [
+            ("elementary", "elementary", "Elementary school", "Elementary School"),
+            ("middle", "middleschool", "Middle school", "Middle School"),
+            ("high", "highschool", "High school", "High School"),
+        ] {
+            let picked = pub_list
+                .iter()
+                .find(|s| {
+                    s.get("level").and_then(|v| v.as_str()) == Some(lvl)
+                        && s.get("inAssignedDistrict").and_then(|v| v.as_bool()) == Some(true)
+                })
+                .or_else(|| {
+                    pub_list
+                        .iter()
+                        .find(|s| s.get("level").and_then(|v| v.as_str()) == Some(lvl))
+                });
+            if let Some(sc) = picked {
+                if let Some((sla, slo)) = val_coords(sc) {
+                    let nm = sc.get("name").and_then(|v| v.as_str()).unwrap_or(def_nm);
+                    let assigned = sc.get("inAssignedDistrict").and_then(|v| v.as_bool());
+                    push_dest_meta(d_key, d_lbl, nm, sla, slo, assigned, None);
+                }
             }
         }
     }
@@ -255,7 +297,7 @@ pub async fn run_access_with_env_and_hub(
     }) {
         if let Some((rla, rlo)) = val_coords(rail) {
             let nm = rail.get("name").and_then(|v| v.as_str()).unwrap_or("Rail station");
-            push_dest("rail", "Rail / light-rail station", nm, rla, rlo);
+            push_dest_meta("rail", "Rail / light-rail station", nm, rla, rlo, None, None);
         }
     }
 
@@ -270,7 +312,7 @@ pub async fn run_access_with_env_and_hub(
     {
         if let Some((gla, glo)) = val_coords(groc) {
             let nm = groc.get("name").and_then(|v| v.as_str()).unwrap_or("Supermarket");
-            push_dest("grocery", "Nearest supermarket", nm, gla, glo);
+            push_dest_meta("grocery", "Nearest supermarket", nm, gla, glo, None, None);
         }
     }
 
@@ -278,11 +320,12 @@ pub async fn run_access_with_env_and_hub(
         p.get("cat").and_then(|v| v.as_str()) == Some("park")
             && p.pointer("/tags/leisure").and_then(|v| v.as_str()) == Some("park")
     })
+    .or_else(|| first_poi(&|p| p.get("cat").and_then(|v| v.as_str()) == Some("park")))
     .or_else(|| am.and_then(|a| a.pointer("/nearest/park")).filter(|v| !v.is_null()))
     {
         if let Some((pla, plo)) = val_coords(park) {
             let nm = park.get("name").and_then(|v| v.as_str()).unwrap_or("Park");
-            push_dest("park", "Park", nm, pla, plo);
+            push_dest_meta("park", "Park", nm, pla, plo, None, None);
         }
     }
 
@@ -293,13 +336,20 @@ pub async fn run_access_with_env_and_hub(
     {
         if let Some((fla, flo)) = val_coords(fire) {
             let nm = fire.get("name").and_then(|v| v.as_str()).unwrap_or("Fire station");
-            push_dest("fire", "Fire station", nm, fla, flo);
+            push_dest_meta("fire", "Fire station", nm, fla, flo, None, None);
         }
     }
 
-    if let Some(hosp) = am
-        .and_then(|a| a.pointer("/emergency/hospital"))
-        .filter(|v| !v.is_null())
+    let er_poi = first_poi(&|p| {
+        p.get("cat").and_then(|v| v.as_str()) == Some("health")
+            && p.pointer("/tags/amenity").and_then(|v| v.as_str()) == Some("hospital")
+            && is_er_hospital_candidate(p)
+    });
+    if let Some(hosp) = er_poi
+        .or_else(|| {
+            am.and_then(|a| a.pointer("/emergency/hospital"))
+                .filter(|v| !v.is_null())
+        })
         .or_else(|| {
             first_poi(&|p| {
                 p.get("cat").and_then(|v| v.as_str()) == Some("health")
@@ -309,7 +359,8 @@ pub async fn run_access_with_env_and_hub(
     {
         if let Some((hla, hlo)) = val_coords(hosp) {
             let nm = hosp.get("name").and_then(|v| v.as_str()).unwrap_or("Hospital");
-            push_dest("hospital", "Hospital", nm, hla, hlo);
+            let is_er = is_er_hospital_candidate(hosp);
+            push_dest_meta("hospital", "Hospital", nm, hla, hlo, None, Some(is_er));
         }
     }
 
@@ -500,11 +551,116 @@ pub async fn run_access_with_env_and_hub(
         Vec::new()
     };
     if env.is_some() {
+        let corridor = fetch_osm_na_trails_corridor(http, lat, lon).await;
+        let wb_indices: Vec<usize> = dests
+            .iter()
+            .enumerate()
+            .filter(|(_, d)| {
+                matches!(
+                    d.key,
+                    "elementary" | "middleschool" | "highschool" | "hospital" | "park"
+                )
+            })
+            .map(|(i, _)| i)
+            .collect();
+        let wb_coords: Vec<LatLon> = wb_indices
+            .iter()
+            .map(|&i| LatLon::new(dests[i].lat, dests[i].lon))
+            .collect();
+        let wb_drive_cells: Vec<Option<DriveTime>> =
+            wb_indices.iter().map(|&i| cell_at(i)).collect();
+        let origin_pt = LatLon::new(lat, lon);
+        let (foot_row, bike_row) = tokio::join!(
+            router.active_mobility_row(
+                ActiveMobilityMode::Foot,
+                origin_pt,
+                &wb_coords,
+                Some(&wb_drive_cells),
+                corridor.has_bikeway_corridor,
+            ),
+            router.active_mobility_row(
+                ActiveMobilityMode::Bike,
+                origin_pt,
+                &wb_coords,
+                Some(&wb_drive_cells),
+                corridor.has_bikeway_corridor,
+            )
+        );
+        let mut walk_bike_targets = Vec::with_capacity(wb_indices.len());
+        for (pos, &di) in wb_indices.iter().enumerate() {
+            let d = &dests[di];
+            let canonical_key = match d.key {
+                "elementary" => "elementary_school",
+                "middleschool" => "middle_school",
+                "highschool" => "high_school",
+                "hospital" => "er_hospital",
+                _ => "park",
+            };
+            let straight_mi = round_n(haversine_m(lat, lon, d.lat, d.lon) / MILE_M, 2);
+            let dir = compass8(bearing_deg(lat, lon, d.lat, d.lon));
+            let walk_val = foot_row
+                .get(pos)
+                .and_then(|o| *o)
+                .map(|w| {
+                    json!({
+                        "durationMin": w.duration_min.round().max(1.0) as i64,
+                        "distanceMi": round_n(w.distance_mi, 2),
+                        "estimated": w.estimated,
+                        "estimateReason": w.reason.map(EstimateReason::as_str),
+                        "basis": w.basis,
+                        "profile": w.profile,
+                    })
+                })
+                .unwrap_or(Value::Null);
+            let bike_val = bike_row
+                .get(pos)
+                .and_then(|o| *o)
+                .map(|b| {
+                    json!({
+                        "durationMin": b.duration_min.round().max(1.0) as i64,
+                        "distanceMi": round_n(b.distance_mi, 2),
+                        "estimated": b.estimated,
+                        "estimateReason": b.reason.map(EstimateReason::as_str),
+                        "basis": b.basis,
+                        "profile": b.profile,
+                    })
+                })
+                .unwrap_or(Value::Null);
+
+            walk_bike_targets.push(json!({
+                "key": canonical_key,
+                "destinationKey": d.key,
+                "label": d.label,
+                "name": d.name,
+                "lat": round_n(d.lat, 5),
+                "lon": round_n(d.lon, 5),
+                "straightMi": straight_mi,
+                "dir": dir,
+                "inAssignedDistrict": d.in_assigned_district,
+                "is24hEmergency": d.is_24h_emergency,
+                "walk": walk_val,
+                "bike": bike_val,
+            }));
+        }
+
+        if corridor.queried
+            && !sources
+                .iter()
+                .any(|s| s.name.contains("OSM_NA_Trails") || s.name.contains(OSM_ODBL_ATTRIBUTION))
+        {
+            sources.push(SourceItem::new(
+                format!("Esri OSM North America Trails & Sidewalks — {OSM_ODBL_ATTRIBUTION}"),
+                OSM_COPYRIGHT_URL,
+            ));
+        }
+
         if let Some(obj) = data.as_object_mut() {
             obj.insert("osmAttribution".into(), json!(OSM_ODBL_ATTRIBUTION));
             if let Some(ref ep) = configured_endpoint {
                 obj.insert("routingEndpoint".into(), json!(ep));
             }
+            obj.insert("walkBikeTargets".into(), json!(walk_bike_targets));
+            obj.insert("activeMobilityCorridor".into(), json!(corridor));
         }
         if configured_endpoint.is_some()
             && only_self_hosted_osrm
@@ -579,4 +735,72 @@ fn access_note(
             "驾车时间为估算值（按直线距离的 1.28 倍、每英里 2.1 分钟计算，至少 2 分钟），原因：{why_zh}。{WALK_NOTE_ZH}"
         ),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    #[tokio::test]
+    async fn run_access_with_env_routes_assigned_elem_middle_high_schools_er_and_park() {
+        let http = HttpClient::offline_loopback_only(None);
+        let env = EnvConfig::from_map(HashMap::new());
+        let geo = json!({ "city": "Campbell", "state": "CA", "lat": 37.2883, "lon": -121.9441 });
+        let city_hall = json!({ "name": "Campbell City Hall", "lat": 37.28835, "lon": -121.94416 });
+        let civic = json!({
+            "data": {
+                "schools": {
+                    "public": {
+                        "list": [
+                            { "name": "Capri Elementary", "level": "elementary", "inAssignedDistrict": true, "lat": 37.2750, "lon": -121.9560 },
+                            { "name": "Rolling Hills Middle", "level": "middle", "inAssignedDistrict": true, "lat": 37.2690, "lon": -121.9620 },
+                            { "name": "Westmont High", "level": "high", "inAssignedDistrict": true, "lat": 37.2755, "lon": -121.9740 }
+                        ]
+                    }
+                }
+            }
+        });
+        let amenities = json!({
+            "data": {
+                "pois": [
+                    { "cat": "park", "name": "John D. Morgan Park", "lat": 37.2830, "lon": -121.9540, "distM": 920, "tags": { "leisure": "park" } },
+                    { "cat": "health", "name": "Santa Clara Valley Medical Center ER", "lat": 37.3130, "lon": -121.9330, "distM": 2900, "tags": { "amenity": "hospital", "emergency": "yes", "opening_hours": "24/7" } }
+                ]
+            }
+        });
+
+        let out = run_access_with_env(
+            &http,
+            Some(&env),
+            37.2883,
+            -121.9441,
+            &geo,
+            Some(&amenities),
+            Some(&civic),
+            Some(&city_hall),
+        )
+        .await
+        .unwrap();
+
+        let wb = out.data["walkBikeTargets"].as_array().expect("walkBikeTargets");
+        let keys: Vec<&str> = wb.iter().filter_map(|t| t["key"].as_str()).collect();
+        assert_eq!(
+            keys,
+            vec![
+                "elementary_school",
+                "middle_school",
+                "high_school",
+                "park",
+                "er_hospital"
+            ]
+        );
+        for item in wb {
+            assert_eq!(item["walk"]["estimated"], true);
+            assert_eq!(item["bike"]["estimated"], true);
+            assert!(item["walk"]["durationMin"].as_i64().unwrap() >= 1);
+            assert!(item["bike"]["durationMin"].as_i64().unwrap() >= 1);
+        }
+        assert_eq!(out.data["activeMobilityCorridor"]["status"], "offline_skipped");
+    }
 }

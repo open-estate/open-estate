@@ -3161,8 +3161,8 @@ pub fn render_deal_room_html_with_brand(
                 };
                 format!(
                     r#"<div><b><span data-en="{v_en_a}" data-zh="{v_zh_a}" data-es="{v_es_a}">{v_init_t}</span></b></div>
-                       <div class="muted" style="color:#15803d">+ {up}</div>
-                       <div class="muted" style="color:#b42318">− {rk}</div>"#,
+                       <div class="muted dr-upside">+ {up}</div>
+                       <div class="muted dr-risk">− {rk}</div>"#,
                     v_en_a = encode_double_quoted_attribute(&it.verdict_en),
                     v_zh_a = encode_double_quoted_attribute(&it.verdict_zh),
                     v_es_a = encode_double_quoted_attribute(&it.verdict_es),
@@ -3250,32 +3250,121 @@ pub fn render_deal_room_html_with_brand(
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
   <title>{page_title}</title>
   {fav}
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&family=Noto+Serif+SC:wght@700;900&display=swap" rel="stylesheet">
   <style>
-    :root {{
+    :root, html[data-theme="light"] {{
+      color-scheme: light;
       --brand: #0f766e;
+      --brand-solid: #0f766e;
       --brand2: #14b8a6;
       --brandsoft: #f0fdfa;
+      --brand-ink: #0f766e;
       --ink: #0f172a;
+      --ink2: #334155;
       --muted: #64748b;
       --line: #e2e8f0;
+      --line-subtle: #f1f5f9;
+      --line-strong: #cbd5e1;
       --bg: #f8fafc;
+      --surface: #ffffff;
+      --surface-2: #f8fafc;
+      --topbar-bg: rgba(255, 255, 255, 0.95);
       --winbg: #ecfdf5;
+      --wincol-bg: linear-gradient(180deg, #ecfdf5, #f8fafc);
       --winborder: #10b981;
+      --wbadge-bg: #d1fae5;
+      --wbadge-bd: #6ee7b7;
+      --wbadge-fg: #065f46;
+      --notice-bg: #fffbeb;
+      --notice-bd: #fde68a;
+      --notice-fg: #92400e;
+      --rm-fg: #64748b;
+      --rm-hover: #dc2626;
+      --up-fg: #15803d;
+      --rk-fg: #b42318;
+      --shadow: 0 4px 20px -10px rgba(15, 23, 42, 0.12);
+    }}
+    @media (prefers-color-scheme: dark) {{
+      :root:not([data-theme="light"]) {{
+        color-scheme: dark;
+        --brand: #14b8a6;
+        --brand-solid: #0f766e;
+        --brand2: #2dd4bf;
+        --brandsoft: rgba(20, 184, 166, 0.16);
+        --brand-ink: #5eead4;
+        --ink: #f1f5f9;
+        --ink2: #cbd5e1;
+        --muted: #94a3b8;
+        --line: #334155;
+        --line-subtle: #1e293b;
+        --line-strong: #475569;
+        --bg: #0b1120;
+        --surface: #111827;
+        --surface-2: #1e293b;
+        --topbar-bg: rgba(15, 23, 42, 0.92);
+        --winbg: rgba(16, 185, 129, 0.14);
+        --wincol-bg: linear-gradient(180deg, rgba(16, 185, 129, 0.22), #1e293b);
+        --winborder: #10b981;
+        --wbadge-bg: rgba(16, 185, 129, 0.22);
+        --wbadge-bd: rgba(52, 211, 153, 0.42);
+        --wbadge-fg: #a7f3d0;
+        --notice-bg: rgba(217, 119, 6, 0.18);
+        --notice-bd: rgba(251, 191, 36, 0.38);
+        --notice-fg: #fde68a;
+        --rm-fg: #94a3b8;
+        --rm-hover: #f87171;
+        --up-fg: #4ade80;
+        --rk-fg: #f87171;
+        --shadow: 0 12px 32px -12px rgba(0, 0, 0, 0.65);
+      }}
+    }}
+    html[data-theme="dark"] {{
+      color-scheme: dark;
+      --brand: #14b8a6;
+      --brand-solid: #0f766e;
+      --brand2: #2dd4bf;
+      --brandsoft: rgba(20, 184, 166, 0.16);
+      --brand-ink: #5eead4;
+      --ink: #f1f5f9;
+      --ink2: #cbd5e1;
+      --muted: #94a3b8;
+      --line: #334155;
+      --line-subtle: #1e293b;
+      --line-strong: #475569;
+      --bg: #0b1120;
+      --surface: #111827;
+      --surface-2: #1e293b;
+      --topbar-bg: rgba(15, 23, 42, 0.92);
+      --winbg: rgba(16, 185, 129, 0.14);
+      --wincol-bg: linear-gradient(180deg, rgba(16, 185, 129, 0.22), #1e293b);
+      --winborder: #10b981;
+      --wbadge-bg: rgba(16, 185, 129, 0.22);
+      --wbadge-bd: rgba(52, 211, 153, 0.42);
+      --wbadge-fg: #a7f3d0;
+      --notice-bg: rgba(217, 119, 6, 0.18);
+      --notice-bd: rgba(251, 191, 36, 0.38);
+      --notice-fg: #fde68a;
+      --rm-fg: #94a3b8;
+      --rm-hover: #f87171;
+      --up-fg: #4ade80;
+      --rk-fg: #f87171;
+      --shadow: 0 12px 32px -12px rgba(0, 0, 0, 0.65);
     }}
     * {{ box-sizing: border-box; }}
     body {{
       margin: 0;
       background: var(--bg);
       color: var(--ink);
-      font: 14px/1.5 -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', Roboto, 'PingFang SC', 'Microsoft YaHei', sans-serif;
+      font: 14px/1.5 Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'PingFang SC', 'Microsoft YaHei', sans-serif;
     }}
     .topbar {{
       position: sticky;
       top: 0;
       z-index: 100;
-      background: rgba(255, 255, 255, 0.95);
+      background: var(--topbar-bg);
       backdrop-filter: blur(10px);
       border-bottom: 1px solid var(--line);
       padding: 12px 22px;
@@ -3303,7 +3392,7 @@ pub fn render_deal_room_html_with_brand(
     .toolbar {{ display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }}
     .tbtn {{
       border: 1px solid var(--line);
-      background: #fff;
+      background: var(--surface);
       color: var(--ink);
       border-radius: 9px;
       padding: 7px 12px;
@@ -3314,12 +3403,13 @@ pub fn render_deal_room_html_with_brand(
       align-items: center;
       gap: 6px;
     }}
-    .tbtn:hover {{ border-color: var(--brand); color: var(--brand); background: var(--brandsoft); }}
-    .tbtn.pri {{ background: var(--brand); border-color: var(--brand); color: #fff; }}
-    .tbtn.pri:hover {{ filter: brightness(0.95); color: #fff; background: var(--brand); }}
+    .tbtn:hover:not(:disabled) {{ border-color: var(--brand); color: var(--brand-ink); background: var(--brandsoft); }}
+    .tbtn.pri {{ background: var(--brand-solid); border-color: var(--brand-solid); color: #fff; }}
+    .tbtn.pri:hover:not(:disabled) {{ filter: brightness(0.95); color: #fff; background: var(--brand-solid); }}
+    .tbtn:disabled, .tbtn[disabled] {{ opacity: 0.45; cursor: not-allowed; filter: none; }}
     .container {{ max-width: 1440px; margin: 0 auto; padding: 18px 22px 48px; }}
     .picker-bar {{
-      background: #fff;
+      background: var(--surface);
       border: 1px solid var(--line);
       border-radius: 12px;
       padding: 11px 14px;
@@ -3334,36 +3424,38 @@ pub fn render_deal_room_html_with_brand(
       align-items: center;
       padding: 4px 10px;
       border-radius: 999px;
-      border: 1px solid #cbd5e1;
-      background: #f8fafc;
-      color: #334155;
+      border: 1px solid var(--line-strong);
+      background: var(--surface-2);
+      color: var(--ink2);
       font-size: 12px;
       font-weight: 600;
       text-decoration: none;
     }}
-    .add-chip:hover {{ border-color: var(--brand); color: var(--brand); background: var(--brandsoft); }}
+    .add-chip:hover {{ border-color: var(--brand); color: var(--brand-ink); background: var(--brandsoft); }}
     .notice {{
-      background: #fffbeb;
-      border: 1px solid #fde68a;
-      color: #92400e;
+      background: var(--notice-bg);
+      border: 1px solid var(--notice-bd);
+      color: var(--notice-fg);
       padding: 9px 13px;
       border-radius: 10px;
       font-size: 12.5px;
       margin-bottom: 12px;
     }}
     .empty-box {{
-      background: #fff;
+      background: var(--surface);
       border: 1px solid var(--line);
       border-radius: 16px;
       padding: 42px 24px;
       text-align: center;
+      color: var(--ink);
     }}
+    .empty-box p {{ color: var(--muted); }}
     .matrix-wrap {{
-      background: #fff;
+      background: var(--surface);
       border: 1px solid var(--line);
       border-radius: 16px;
       overflow-x: auto;
-      box-shadow: 0 4px 20px -10px rgba(15, 23, 42, 0.12);
+      box-shadow: var(--shadow);
     }}
     table.matrix {{
       width: 100%;
@@ -3372,8 +3464,8 @@ pub fn render_deal_room_html_with_brand(
     }}
     table.matrix th, table.matrix td {{
       padding: 12px 14px;
-      border-bottom: 1px solid #f1f5f9;
-      border-right: 1px solid #f1f5f9;
+      border-bottom: 1px solid var(--line-subtle);
+      border-right: 1px solid var(--line-subtle);
       vertical-align: top;
       text-align: left;
     }}
@@ -3381,45 +3473,65 @@ pub fn render_deal_room_html_with_brand(
       position: sticky;
       left: 0;
       z-index: 10;
-      background: #f8fafc;
+      background: var(--surface-2);
       width: 205px;
       min-width: 185px;
       font-weight: 800;
       font-size: 12.5px;
-      color: #334155;
+      color: var(--ink2);
       border-right: 2px solid var(--line);
     }}
     table.matrix thead th {{
-      background: #f8fafc;
+      background: var(--surface-2);
       border-bottom: 2px solid var(--line);
     }}
     table.matrix th.prop-col {{ min-width: 230px; }}
-    table.matrix th.win-col {{ background: linear-gradient(180deg, #ecfdf5, #f8fafc); }}
+    table.matrix th.win-col {{ background: var(--wincol-bg); }}
     table.matrix td.win-cell {{ background: var(--winbg); }}
     .prop-top {{ display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px; }}
-    .ptype {{ font-size: 10.5px; font-weight: 800; text-transform: uppercase; color: var(--brand); background: var(--brandsoft); padding: 2px 7px; border-radius: 999px; }}
-    .rm-link {{ color: #94a3b8; text-decoration: none; font-size: 16px; font-weight: 800; line-height: 1; }}
-    .rm-link:hover {{ color: #dc2626; }}
+    .ptype {{ font-size: 10.5px; font-weight: 800; text-transform: uppercase; color: var(--brand-ink); background: var(--brandsoft); padding: 2px 7px; border-radius: 999px; }}
+    .rm-link {{ color: var(--rm-fg); text-decoration: none; font-size: 16px; font-weight: 800; line-height: 1; }}
+    .rm-link:hover {{ color: var(--rm-hover); }}
     .prop-link {{ font-size: 15px; font-weight: 800; color: var(--ink); text-decoration: none; display: block; }}
-    .prop-link:hover {{ color: var(--brand); text-decoration: underline; }}
+    .prop-link:hover {{ color: var(--brand-ink); text-decoration: underline; }}
     .prop-sub {{ font-size: 12px; color: var(--muted); font-weight: 500; margin-top: 2px; }}
     .muted {{ font-size: 12px; color: var(--muted); margin-top: 3px; line-height: 1.4; }}
+    .dr-upside {{ color: var(--up-fg); }}
+    .dr-risk {{ color: var(--rk-fg); }}
     .wbadge {{
       display: inline-block;
       margin-bottom: 4px;
       padding: 2px 8px;
       border-radius: 999px;
-      background: #d1fae5;
-      border: 1px solid #6ee7b7;
-      color: #065f46;
+      background: var(--wbadge-bg);
+      border: 1px solid var(--wbadge-bd);
+      color: var(--wbadge-fg);
       font-size: 11px;
       font-weight: 800;
     }}
     @media print {{
       @page {{ size: landscape; margin: 10mm; }}
-      body {{ background: #fff !important; font-size: 11.5px; }}
+      :root, html[data-theme="dark"], html[data-theme="light"] {{
+        color-scheme: light;
+        --bg: #fff;
+        --surface: #fff;
+        --surface-2: #f8fafc;
+        --ink: #0f172a;
+        --ink2: #334155;
+        --muted: #64748b;
+        --line: #e2e8f0;
+        --line-subtle: #f1f5f9;
+        --winbg: #ecfdf5;
+        --wincol-bg: #ecfdf5;
+        --wbadge-bg: #d1fae5;
+        --wbadge-bd: #6ee7b7;
+        --wbadge-fg: #065f46;
+        --up-fg: #15803d;
+        --rk-fg: #b42318;
+      }}
+      body {{ background: #fff !important; color: #0f172a !important; font-size: 11.5px; }}
       .topbar .toolbar, .picker-bar, .rm-link {{ display: none !important; }}
-      .topbar {{ position: static; border-bottom: 2px solid #0f172a; padding: 0 0 8px; margin-bottom: 10px; }}
+      .topbar {{ position: static; background: #fff !important; border-bottom: 2px solid #0f172a; padding: 0 0 8px; margin-bottom: 10px; }}
       .container {{ max-width: none; padding: 0; }}
       .matrix-wrap {{ box-shadow: none; border: 1px solid #cbd5e1; overflow: visible; }}
       table.matrix th.corner, table.matrix th.row-lbl {{ position: static; }}
@@ -3435,8 +3547,8 @@ pub fn render_deal_room_html_with_brand(
     </div>
     <div class="toolbar">
       <button type="button" class="tbtn" id="langBtn">{lang_btn_txt}</button>
-      <button type="button" class="tbtn" id="csvBtn"><span data-en="{csv_en}" data-zh="{csv_zh}" data-es="{csv_es}">{csv_init}</span></button>
-      <button type="button" class="tbtn pri" id="printBtn"><span data-en="{print_en}" data-zh="{print_zh}" data-es="{print_es}">{print_init}</span></button>
+      <button type="button" class="tbtn" id="csvBtn"{export_disabled_attr}><span data-en="{csv_en}" data-zh="{csv_zh}" data-es="{csv_es}">{csv_init}</span></button>
+      <button type="button" class="tbtn pri" id="printBtn"{export_disabled_attr}><span data-en="{print_en}" data-zh="{print_zh}" data-es="{print_es}">{print_init}</span></button>
     </div>
   </header>
 
@@ -3510,7 +3622,19 @@ pub fn render_deal_room_html_with_brand(
       applyLang();
     }});
 
+    function syncActionButtons() {{
+      const isEmpty = !Array.isArray(items) || items.length === 0;
+      ['csvBtn', 'printBtn'].forEach((id) => {{
+        const btn = document.getElementById(id);
+        if (!btn) return;
+        btn.disabled = isEmpty;
+        if (isEmpty) btn.setAttribute('aria-disabled', 'true');
+        else btn.removeAttribute('aria-disabled');
+      }});
+    }}
+
     document.getElementById('printBtn')?.addEventListener('click', () => {{
+      if (!items.length) return;
       window.print();
     }});
 
@@ -3595,6 +3719,7 @@ pub fn render_deal_room_html_with_brand(
       }}
     }}
 
+    syncActionButtons();
     hydrateLocalQuickAdd();
     if (lang !== 'en') applyLang();
   }})();
@@ -3609,6 +3734,11 @@ pub fn render_deal_room_html_with_brand(
         brand_dom_js = brand_dom_js,
         fav = crate::web::favicon::FAVICON_HEAD_TAGS.as_str(),
         mark = crate::web::favicon::logo_mark_img(30),
+        export_disabled_attr = if items.is_empty() {
+            r#" disabled aria-disabled="true""#
+        } else {
+            ""
+        },
         sub_en = encode_double_quoted_attribute(&sub_en),
         sub_zh = encode_double_quoted_attribute(&sub_zh),
         sub_es = encode_double_quoted_attribute(&sub_es),
@@ -3653,4 +3783,50 @@ pub fn render_deal_room_html_with_brand(
         init_lang_js = if init_lang == "zh" { "'zh'" } else if init_lang == "es" { "'es'" } else { "'en'" },
         allow_local_recent_js = if allow_local_recent { "true" } else { "false" },
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{extract_deal_room_item, render_deal_room_html};
+    use serde_json::json;
+
+    #[test]
+    fn deal_room_loads_inter_and_disables_export_print_only_when_empty() {
+        let empty_html = render_deal_room_html(&[], &[], &[], "en");
+        assert!(
+            empty_html.contains("fonts.googleapis.com/css2?family=Inter"),
+            "Deal Room must load the Inter Google Font stylesheet"
+        );
+        assert!(
+            empty_html.contains("font: 14px/1.5 Inter, system-ui"),
+            "Deal Room body font stack must prioritize Inter"
+        );
+        assert!(
+            empty_html.contains(r#"id="csvBtn" disabled aria-disabled="true""#),
+            "CSV Export button must be disabled when 0 properties are in Deal Room"
+        );
+        assert!(
+            empty_html.contains(r#"id="printBtn" disabled aria-disabled="true""#),
+            "Print button must be disabled when 0 properties are in Deal Room"
+        );
+
+        let item = extract_deal_room_item(
+            "100-synth-oak-ave-campbell-ca-95008",
+            &json!({
+                "meta": { "displayAddress": "100 Synth Oak Ave, Campbell, CA 95008" },
+                "facts": { "propertyType": "Single Family" }
+            }),
+            None,
+            "http://localhost:8080",
+        );
+        let filled_html = render_deal_room_html(&[item], &[], &[], "en");
+        assert!(
+            filled_html.contains(r#"id="csvBtn"><span"#),
+            "CSV Export button must be enabled when >=1 property is present"
+        );
+        assert!(
+            filled_html.contains(r#"id="printBtn"><span"#),
+            "Print button must be enabled when >=1 property is present"
+        );
+    }
 }

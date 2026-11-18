@@ -1,8 +1,12 @@
 id: osrm_routing
-name: "Self-Hosted OSRM Routing Matrix"
-version: "1.0.0"
-description: "Primary Tier-1 self-hosted OSRM road-network driving table service (configured via OSRM_REGIONS_JSON and/or OSRM_BASE_URL; public demo router is never called)."
+name: "Self-Hosted OSRM Multi-Modal Routing Matrix"
+version: "1.1.0"
+description: "Primary Tier-1 self-hosted OSRM road-network driving, walking, and cycling table service (configured via OSRM_REGIONS_JSON, OSRM_BASE_URL, OSRM_FOOT_BASE_URL, and OSRM_BIKE_BASE_URL; public demo routers project-osrm.org and routing.openstreetmap.de are never called) plus Esri OSM_NA_Trails sidewalk/bikeway corridor verification for assigned schools, nearest 24/7 ER, and parks."
 domain: routing
+domains:
+  - routing
+  - livability
+  - schools
 driver: openapi_yaml
 proto_message_type: "openestate.extension.v1.RoutingMatrixProto"
 priority: 200
@@ -44,9 +48,10 @@ sharing:
   key_fields:
     - "extra_params.profile"
 source_attribution:
-  name: "OpenStreetMap road network (OSRM)"
+  name: "OpenStreetMap road & trail network (self-hosted OSRM + OSM_NA_Trails)"
   url: "https://project-osrm.org/"
   reference_url_template: "https://project-osrm.org/"
+  notes: "Supports driving, foot, and bike OSRM profiles on self-hosted endpoints only; public demo hosts project-osrm.org and routing.openstreetmap.de are strictly blocked."
 openapi:
   spec_file: "openapi.yaml"
   operation_id: "getOsrmDrivingTable"

@@ -12,7 +12,8 @@ use crate::extensions::proto::{
     extension_envelope_proto::Payload, shared_v1::BroadbandHexProto, AuthSpecProto,
     BroadbandOptionProto, CapabilityDomain, DriverKind, ExecutionMode, ExtensionEnvelopeProto,
     ExtensionManifestProto, ExtensionQueryProto, ExtensionTier, GeoScopeProto, LicenseClass,
-    ProvenanceTier, RateLimitSpecProto, SourceAttributionProto,
+    ManifestSourceAttributionProto, MeteringSpecProto, ProvenanceTier, RateLimitSpecProto,
+    ShareScope as ProtoShareScope, SharingSpecProto, SourceAttributionProto,
 };
 use crate::extensions::shared_cache::{
     dataset_ids, encode_geohash, get_shared_dataset_proto, put_shared_dataset_proto,
@@ -20,8 +21,8 @@ use crate::extensions::shared_cache::{
 };
 use crate::metering::{add_bytes_downloaded, mark_cached};
 use crate::modules::school_metrics::db_target_key;
-use crate::shared::{now_iso, EnvConfig, HttpClient};
-use anyhow::Result;
+use crate::shared::{now_iso, round_n, EnvConfig, HttpClient};
+use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -31,8 +32,16 @@ use url::Url;
 
 pub const FCC_BDC_FIXED_DEFAULT_URL: &str =
     "https://broadbandmap.fcc.gov/api/public/map/listAvailableFixedProvidersByLocation";
+pub const FCC_BDC_FIXED_BLOCK_SUMMARY_URL: &str =
+    "https://services8.arcgis.com/peDZJliSvYims39Q/arcgis/rest/services/FCC_Broadband_Data_Collection_December_2024_View/FeatureServer/4/query";
+pub const FCC_MOBILE_5G_EXT_ID: &str = "fcc_mobile_5g";
+pub const FCC_BDC_MOBILE_H3_DEFAULT_URL: &str =
+    "https://services8.arcgis.com/peDZJliSvYims39Q/arcgis/rest/services/FCC_Mobile_Broadband_Data_Collection_(Latest)/FeatureServer/2/query";
+pub const FCC_BDC_MOBILE_RSRP_DISCLAIMER: &str =
+    "FCC Broadband Data Collection (BDC) H3 Resolution-8 modeled outdoor minimum Reference Signal Received Power (RSRP) threshold in dBm (link-budget cell-edge floor outdoors; never indoor signal bars).";
 pub const FCC_BDC_MAP_HOME_URL: &str = "https://broadbandmap.fcc.gov/";
 pub const FCC_CACHE_TTL_SECS: i64 = 6 * 60 * 60;
+pub const FCC_MOBILE_CACHE_TTL_SECS: u64 = 7 * 86_400;
 pub(crate) const BROADBAND_HEX_TTL_SECS: u64 = 30 * 86_400;
 
 static BROADBAND_DB_CACHE: OnceCell<Mutex<HashMap<String, Option<DbStore>>>> = OnceCell::const_new();
@@ -90,6 +99,41 @@ impl FccProviderRecord {
     }
 }
 
+/// Keyless FCC BDC Census Block Broadband Serviceable Location (BSL) summary
+/// (`FCC_Broadband_Data_Collection_December_2024_View/FeatureServer/4`).
+/// Reports official Census Block BSL counts and unique provider counts by technology
+/// when parcel-level `FCC_BDC_API_TOKEN` is unset — never fabricating carrier names
+/// or falsely promoting block-level fiber to parcel-confirmed fiber.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FccFixedBlockSummary {
+    pub geoid: String,
+    pub state_abbr: Option<String>,
+    pub county_name: Option<String>,
+    pub total_pop: Option<i64>,
+    pub total_bsls: i64,
+    pub served_bsls: i64,
+    pub underserved_bsls: i64,
+    pub unserved_bsls: i64,
+    pub served_bsls_fiber: i64,
+    pub served_bsls_cable: i64,
+    pub served_bsls_copper: i64,
+    pub served_bsls_fixed_wireless: i64,
+    pub served_bsls_licensed_fixed_wireless: i64,
+    pub unique_providers: i64,
+    pub unique_providers_fiber: i64,
+    pub unique_providers_cable: i64,
+    pub unique_providers_copper: i64,
+    pub unique_providers_fixed_wireless: i64,
+    pub unique_providers_licensed_fixed_wireless: i64,
+    pub fiber_bsl_share_pct: Option<f64>,
+    pub cable_bsl_share_pct: Option<f64>,
+    pub block_has_fiber_bsls: bool,
+    pub block_has_cable_bsls: bool,
+    pub vintage: String,
+    pub source_url: String,
+}
+
 /// Honest FCC BDC fixed lookup result (`unavailable` on HTTP 401/405/offline).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -103,6 +147,8 @@ pub struct FccFixedBroadbandResult {
     pub cable_available: bool,
     pub max_download_mbps: Option<i64>,
     pub max_upload_mbps: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub block_summary: Option<FccFixedBlockSummary>,
     pub source_name: String,
     pub source_url: String,
     pub provenance: String,
@@ -130,6 +176,7 @@ impl FccFixedBroadbandResult {
             cable_available: false,
             max_download_mbps: None,
             max_upload_mbps: None,
+            block_summary: None,
             source_name: "FCC National Broadband Map (BDC)".to_string(),
             source_url,
             provenance: match status {
@@ -198,6 +245,7 @@ fn fixed_result_from_hex_proto(
         cable_available,
         max_download_mbps: max_dl,
         max_upload_mbps: max_ul,
+        block_summary: None,
         source_name: "FCC National Broadband Map (BDC)".to_string(),
         source_url,
         provenance: "fcc_bdc_live".to_string(),
@@ -630,15 +678,25 @@ pub async fn check_fcc_fixed_broadband(
             Err(_) => last_fail_reason = "fcc_request_timeout",
         }
     }
+    let attach_block_fallback = |mut res: FccFixedBroadbandResult| async move {
+        let allow_block = !has_creds
+            && (env.get("FCC_BDC_API_URL").is_none() || env.get("FCC_BDC_FIXED_BLOCK_URL").is_some());
+        if allow_block && res.status == FccLookupStatus::Unavailable {
+            res.block_summary = check_fcc_fixed_block_summary(http, env, la, lo).await;
+        }
+        res
+    };
+
     let Some(resp) = resp_opt else {
-        return FccFixedBroadbandResult::unavailable(
+        return attach_block_fallback(FccFixedBroadbandResult::unavailable(
             fcc_map_url,
             true,
             has_creds,
             None,
             FccLookupStatus::Unavailable,
             last_fail_reason,
-        );
+        ))
+        .await;
     };
 
     let code = resp.status().as_u16();
@@ -649,57 +707,62 @@ pub async fn check_fcc_fixed_broadband(
             b
         }
         Err(_) => {
-            return FccFixedBroadbandResult::unavailable(
+            return attach_block_fallback(FccFixedBroadbandResult::unavailable(
                 fcc_map_url,
                 true,
                 has_creds,
                 Some(code),
                 FccLookupStatus::Unavailable,
                 "fcc_body_read_failed",
-            );
+            ))
+            .await;
         }
     };
 
     if code == 401 {
-        return FccFixedBroadbandResult::unavailable(
+        return attach_block_fallback(FccFixedBroadbandResult::unavailable(
             fcc_map_url,
             true,
             has_creds,
             Some(code),
             FccLookupStatus::Unavailable,
             "http_401_unauthorized",
-        );
+        ))
+        .await;
     }
     if code == 405 {
-        return FccFixedBroadbandResult::unavailable(
+        return attach_block_fallback(FccFixedBroadbandResult::unavailable(
             fcc_map_url,
             true,
             has_creds,
             Some(code),
             FccLookupStatus::Unavailable,
             "http_405_method_not_available",
-        );
+        ))
+        .await;
     }
     if !is_success {
-        return FccFixedBroadbandResult::unavailable(
+        return attach_block_fallback(FccFixedBroadbandResult::unavailable(
             fcc_map_url,
             true,
             has_creds,
             Some(code),
             FccLookupStatus::Unavailable,
             format!("http_{code}"),
-        );
+        ))
+        .await;
     }
 
     let Ok(val) = serde_json::from_slice::<Value>(&raw_bytes) else {
-        return FccFixedBroadbandResult::unavailable(
+        return attach_block_fallback(FccFixedBroadbandResult::unavailable(
             fcc_map_url,
             true,
             has_creds,
             Some(code),
             FccLookupStatus::Unavailable,
             "fcc_invalid_json",
-        );
+        ))
+        .await;
     };
 
     match parse_fcc_fixed_json(&val) {
@@ -723,6 +786,7 @@ pub async fn check_fcc_fixed_broadband(
                 cable_available,
                 max_download_mbps: max_dl.filter(|&n| n > 0),
                 max_upload_mbps: max_ul.filter(|&n| n > 0),
+                block_summary: None,
                 source_name: "FCC National Broadband Map (BDC)".to_string(),
                 source_url: fcc_map_url,
                 provenance: "fcc_bdc_live".to_string(),
@@ -762,15 +826,154 @@ pub async fn check_fcc_fixed_broadband(
                 .await;
             result
         }
-        Err(reason) => FccFixedBroadbandResult::unavailable(
-            fcc_map_url,
-            true,
-            has_creds,
-            Some(code),
-            FccLookupStatus::Unavailable,
-            reason,
-        ),
+        Err(reason) => {
+            attach_block_fallback(FccFixedBroadbandResult::unavailable(
+                fcc_map_url,
+                true,
+                has_creds,
+                Some(code),
+                FccLookupStatus::Unavailable,
+                reason,
+            ))
+            .await
+        }
     }
+}
+
+fn attr_i64(attrs: &Value, key: &str) -> Option<i64> {
+    let v = attrs.get(key)?;
+    if v.is_null() {
+        return None;
+    }
+    v.as_i64()
+        .or_else(|| v.as_f64().filter(|x| x.is_finite()).map(|x| x.round() as i64))
+        .or_else(|| v.as_str().and_then(|s| s.trim().parse::<i64>().ok()))
+}
+
+/// Parses an ArcGIS FeatureServer response from `FCC_Broadband_Data_Collection_December_2024_View/FeatureServer/4`.
+pub fn parse_fcc_fixed_block_json(v: &Value, source_url: &str) -> Option<FccFixedBlockSummary> {
+    if v.get("error").is_some() {
+        return None;
+    }
+    let feats = v.get("features")?.as_array()?;
+    let first = feats.first()?;
+    let attrs = first.get("attributes")?;
+    let geoid = json_str(attrs.get("GEOID"))?.to_string();
+    let total_bsls = attr_i64(attrs, "TotalBSLs").unwrap_or(0).max(0);
+    let served_bsls = attr_i64(attrs, "ServedBSLs").unwrap_or(0).max(0);
+    let underserved_bsls = attr_i64(attrs, "UnderservedBSLs").unwrap_or(0).max(0);
+    let unserved_bsls = attr_i64(attrs, "UnservedBSLs").unwrap_or(0).max(0);
+    let served_bsls_fiber = attr_i64(attrs, "ServedBSLsFiber").unwrap_or(0).max(0);
+    let served_bsls_cable = attr_i64(attrs, "ServedBSLsCable").unwrap_or(0).max(0);
+    let served_bsls_copper = attr_i64(attrs, "ServedBSLsCopper").unwrap_or(0).max(0);
+    let served_bsls_fw = attr_i64(attrs, "ServedBSLsLTFW").unwrap_or(0).max(0);
+    let served_bsls_lic_fw = attr_i64(attrs, "ServedBSLsLBRTFW").unwrap_or(0).max(0);
+    let unique_providers = attr_i64(attrs, "UniqueProviders").unwrap_or(0).max(0);
+    let unique_providers_fiber = attr_i64(attrs, "UniqueProvidersFiber").unwrap_or(0).max(0);
+    let unique_providers_cable = attr_i64(attrs, "UniqueProvidersCable").unwrap_or(0).max(0);
+    let unique_providers_copper = attr_i64(attrs, "UniqueProvidersCopper").unwrap_or(0).max(0);
+    let unique_providers_fw = attr_i64(attrs, "UniqueProvidersLTFW").unwrap_or(0).max(0);
+    let unique_providers_lic_fw = attr_i64(attrs, "UniqueProvidersLBRTFW").unwrap_or(0).max(0);
+
+    let fiber_share = (total_bsls > 0)
+        .then(|| round_n((served_bsls_fiber as f64 / total_bsls as f64) * 100.0, 1));
+    let cable_share = (total_bsls > 0)
+        .then(|| round_n((served_bsls_cable as f64 / total_bsls as f64) * 100.0, 1));
+
+    Some(FccFixedBlockSummary {
+        geoid,
+        state_abbr: json_str(attrs.get("StateAbbr")).map(String::from),
+        county_name: json_str(attrs.get("CountyName")).map(String::from),
+        total_pop: attr_i64(attrs, "TotalPop"),
+        total_bsls,
+        served_bsls,
+        underserved_bsls,
+        unserved_bsls,
+        served_bsls_fiber,
+        served_bsls_cable,
+        served_bsls_copper,
+        served_bsls_fixed_wireless: served_bsls_fw,
+        served_bsls_licensed_fixed_wireless: served_bsls_lic_fw,
+        unique_providers,
+        unique_providers_fiber,
+        unique_providers_cable,
+        unique_providers_copper,
+        unique_providers_fixed_wireless: unique_providers_fw,
+        unique_providers_licensed_fixed_wireless: unique_providers_lic_fw,
+        fiber_bsl_share_pct: fiber_share,
+        cable_bsl_share_pct: cable_share,
+        block_has_fiber_bsls: served_bsls_fiber > 0 || unique_providers_fiber > 0,
+        block_has_cable_bsls: served_bsls_cable > 0 || unique_providers_cable > 0,
+        vintage: "FCC BDC Census Block Summary (Dec 2024)".to_string(),
+        source_url: source_url.to_string(),
+    })
+}
+
+/// Queries keyless FCC BDC Census Block BSL summary (`FeatureServer/4`) when parcel-level
+/// `FCC_BDC_API_TOKEN` is unset. Respects `http.is_offline_external_blocked()`.
+pub async fn check_fcc_fixed_block_summary(
+    http: &HttpClient,
+    env: &EnvConfig,
+    lat: f64,
+    lon: f64,
+) -> Option<FccFixedBlockSummary> {
+    if !lat.is_finite() || !lon.is_finite() || env.get("FCC_BDC_DISABLED") == Some("1") {
+        return None;
+    }
+    let base = env
+        .get("FCC_BDC_FIXED_BLOCK_URL")
+        .unwrap_or(FCC_BDC_FIXED_BLOCK_SUMMARY_URL);
+    let mut url = Url::parse(base).ok()?;
+    let host = url.host_str().unwrap_or("");
+    if http.is_offline_external_blocked() && !is_loopback_host(host) {
+        return None;
+    }
+
+    let cache_key = format!("fcc_fixed_block:v1:{base}:{lat:.5}:{lon:.5}");
+    if !http.is_bypassing_cache_reads() {
+        if let Some(cached) = http.read_cache(&cache_key, FCC_CACHE_TTL_SECS).await {
+            if let Ok(parsed) = serde_json::from_str::<FccFixedBlockSummary>(&cached) {
+                return Some(parsed);
+            }
+        }
+    }
+
+    {
+        let mut qp = url.query_pairs_mut();
+        qp.append_pair("geometry", &format!("{lon:.6},{lat:.6}"));
+        qp.append_pair("geometryType", "esriGeometryPoint");
+        qp.append_pair("inSR", "4326");
+        qp.append_pair("spatialRel", "esriSpatialRelIntersects");
+        qp.append_pair(
+            "outFields",
+            "GEOID,StateAbbr,CountyName,TotalPop,TotalBSLs,ServedBSLs,UnderservedBSLs,UnservedBSLs,ServedBSLsFiber,ServedBSLsCable,ServedBSLsCopper,ServedBSLsLTFW,ServedBSLsLBRTFW,UniqueProviders,UniqueProvidersFiber,UniqueProvidersCable,UniqueProvidersCopper,UniqueProvidersLTFW,UniqueProvidersLBRTFW",
+        );
+        qp.append_pair("returnGeometry", "false");
+        qp.append_pair("f", "json");
+    }
+
+    let client = http.direct_client_for_url(url.as_str()).ok()?;
+    let req = client
+        .get(url)
+        .header("Accept", "application/json")
+        .timeout(Duration::from_millis(5_000));
+    let resp = tokio::time::timeout(Duration::from_millis(5_500), req.send())
+        .await
+        .ok()?
+        .ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let bytes = resp.bytes().await.ok()?;
+    add_bytes_downloaded(bytes.len() as u64);
+    let val = serde_json::from_slice::<Value>(&bytes).ok()?;
+    let map_url =
+        format!("https://broadbandmap.fcc.gov/location-summary/fixed?latlon={lat:.6}%2C{lon:.6}");
+    let summary = parse_fcc_fixed_block_json(&val, &map_url)?;
+    if let Ok(raw) = serde_json::to_string(&summary) {
+        http.write_cache(&cache_key, &raw, FCC_CACHE_TTL_SECS).await;
+    }
+    Some(summary)
 }
 
 /// Native `DataExtensionAdapter` exposing honest open-data FCC BDC fixed lookups.
@@ -887,6 +1090,771 @@ impl DataExtensionAdapter for FccBroadbandBdcAdapter {
                     cached: res.cached,
                     payload: Some(Payload::RawJson(serde_json::to_string(&res)?)),
                 }])
+            }
+        })
+    }
+}
+
+// =========================================================================
+// FCC Mobile BDC H3 Resolution-8 Keyless Native Adapter (`fcc_mobile_5g`)
+// =========================================================================
+
+fn is_us_country_opt(country: &str) -> bool {
+    let trimmed = country.trim();
+    if trimmed.is_empty() {
+        return true;
+    }
+    matches!(
+        trimmed.to_ascii_uppercase().as_str(),
+        "US" | "USA" | "UNITED STATES" | "UNITED STATES OF AMERICA"
+    )
+}
+
+/// Per-technology-tier coverage and FCC BDC modeled outdoor minimum RSRP threshold (`fcc_mobile_5g`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FccMobileTechTierCoverage {
+    pub covered: bool,
+    /// Raw FCC BDC environment code: `0` = outdoor stationary, `1` = in-vehicle mobile.
+    pub environment_code: Option<i64>,
+    /// `"outdoor_stationary"` (`0`) or `"in_vehicle_mobile"` (`1`).
+    pub environment: Option<String>,
+    pub outdoor_stationary: bool,
+    pub in_vehicle_mobile: bool,
+    /// FCC BDC modeled outdoor minimum RSRP threshold in dBm (e.g. `-90`..`-120`), NEVER indoor signal bars.
+    pub modeled_outdoor_min_rsrp_dbm: Option<i64>,
+    pub modeled_outdoor_min_rsrp_label: Option<String>,
+}
+
+impl FccMobileTechTierCoverage {
+    fn from_h3_fields(min_sig: Option<i64>, env_code: Option<i64>) -> Self {
+        let valid_sig = min_sig.filter(|&s| (-150..=-40).contains(&s));
+        let valid_env = env_code.filter(|&e| e == 0 || e == 1);
+        let covered = valid_sig.is_some() || valid_env.is_some();
+        if !covered {
+            return Self {
+                covered: false,
+                environment_code: None,
+                environment: None,
+                outdoor_stationary: false,
+                in_vehicle_mobile: false,
+                modeled_outdoor_min_rsrp_dbm: None,
+                modeled_outdoor_min_rsrp_label: None,
+            };
+        }
+        let in_vehicle = valid_env == Some(1);
+        let env_str = match valid_env {
+            Some(1) => Some("in_vehicle_mobile".to_string()),
+            Some(0) => Some("outdoor_stationary".to_string()),
+            _ => Some("outdoor_stationary".to_string()),
+        };
+        let label = valid_sig.map(|dbm| {
+            let env_desc = if in_vehicle {
+                "in-vehicle & outdoor stationary"
+            } else {
+                "outdoor stationary"
+            };
+            format!(
+                ">= {dbm} dBm (FCC BDC modeled outdoor minimum RSRP threshold, {env_desc} — never indoor signal bars)"
+            )
+        });
+        Self {
+            covered: true,
+            environment_code: valid_env,
+            environment: env_str,
+            outdoor_stationary: true,
+            in_vehicle_mobile: in_vehicle,
+            modeled_outdoor_min_rsrp_dbm: valid_sig,
+            modeled_outdoor_min_rsrp_label: label,
+        }
+    }
+}
+
+/// Carrier-level mobile wireless availability parsed from FCC Mobile BDC H3 Resolution-8 cell.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FccMobileCarrierCoverage {
+    pub carrier_name: String,
+    pub outdoor_5g_nr_35x3: String,
+    pub outdoor_5g_nr_7x1: String,
+    pub outdoor_4g_lte_5x1: String,
+    pub best_tier: String,
+    pub best_environment: Option<String>,
+    pub lte_5x1: FccMobileTechTierCoverage,
+    pub nr_7x1: FccMobileTechTierCoverage,
+    pub nr_35x3: FccMobileTechTierCoverage,
+    /// FCC BDC modeled outdoor minimum RSRP threshold in dBm for the carrier's best tier (never indoor signal bars).
+    pub modeled_outdoor_min_rsrp_dbm: Option<i64>,
+    pub modeled_outdoor_min_rsrp_note: String,
+    /// Strictly `None` (`null` in JSON) — indoor handset signal bars are never fabricated from outdoor BDC models.
+    pub signal_strength_dbm: Option<i64>,
+    pub provenance: String,
+}
+
+/// Result of a keyless FCC Mobile BDC H3 Resolution-8 coverage query (`fcc_mobile_5g`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FccMobile5gResult {
+    pub status: FccLookupStatus,
+    pub available: bool,
+    pub queried: bool,
+    pub http_status: Option<u16>,
+    pub h3_id: Option<String>,
+    pub h3_resolution: u8,
+    pub state: Option<String>,
+    pub best_available_tech_code: Option<i64>,
+    pub best_available_tier: String,
+    pub carriers_5g_35x3_count: usize,
+    pub carriers_5g_7x1_count: usize,
+    pub carriers_4g_lte_count: usize,
+    pub carriers_in_vehicle_5g_35x3_count: usize,
+    /// Strictly `None` (`null` in JSON) — never indoor signal bars.
+    pub signal_strength_dbm: Option<i64>,
+    pub rsrp_threshold_methodology: String,
+    pub carriers: Vec<FccMobileCarrierCoverage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub map_layer: Option<Value>,
+    pub source_name: String,
+    pub source_url: String,
+    pub provenance: String,
+    pub checked_at: String,
+    pub cached: bool,
+    pub reason: Option<String>,
+}
+
+impl FccMobile5gResult {
+    fn unavailable(
+        source_url: String,
+        queried: bool,
+        http_status: Option<u16>,
+        status: FccLookupStatus,
+        reason: impl Into<String>,
+    ) -> Self {
+        Self {
+            status,
+            available: false,
+            queried,
+            http_status,
+            h3_id: None,
+            h3_resolution: 8,
+            state: None,
+            best_available_tech_code: None,
+            best_available_tier: "Unavailable".to_string(),
+            carriers_5g_35x3_count: 0,
+            carriers_5g_7x1_count: 0,
+            carriers_4g_lte_count: 0,
+            carriers_in_vehicle_5g_35x3_count: 0,
+            signal_strength_dbm: None,
+            rsrp_threshold_methodology: FCC_BDC_MOBILE_RSRP_DISCLAIMER.to_string(),
+            carriers: Vec::new(),
+            map_layer: None,
+            source_name: "FCC National Broadband Map — Mobile BDC (H3 Resolution-8)".to_string(),
+            source_url,
+            provenance: match status {
+                FccLookupStatus::Unconfigured => "fcc_bdc_unconfigured",
+                _ => "fcc_bdc_unavailable",
+            }
+            .to_string(),
+            checked_at: now_iso(),
+            cached: false,
+            reason: Some(reason.into()),
+        }
+    }
+}
+
+fn build_h3_polygon_layer(
+    geom: Option<&Value>,
+    h3_id: Option<&str>,
+    best_tier: &str,
+    carriers_35: usize,
+) -> Option<Value> {
+    let rings = geom?.get("rings")?.as_array()?;
+    let outer = rings.first()?.as_array()?;
+    if outer.len() < 4 {
+        return None;
+    }
+    let mut coords = Vec::with_capacity(outer.len());
+    for pt in outer.iter().take(16) {
+        let pair = pt.as_array()?;
+        let lon = pair.first()?.as_f64()?;
+        let lat = pair.get(1)?.as_f64()?;
+        if !lat.is_finite() || !lon.is_finite() || lat.abs() > 90.0 || lon.abs() > 180.0 {
+            return None;
+        }
+        coords.push(json!([round_n(lon, 6), round_n(lat, 6)]));
+    }
+    let hex_lbl = h3_id.unwrap_or("H3 Res-8");
+    Some(json!({
+        "id": "fcc-mobile-5g-h3",
+        "title": "FCC Mobile 5G-NR H3 Cell (Res-8)",
+        "kind": "polygons",
+        "color": "#2563eb",
+        "type": "FeatureCollection",
+        "features": [{
+            "type": "Feature",
+            "geometry": {
+                "type": "Polygon",
+                "coordinates": [coords],
+            },
+            "properties": {
+                "h3Id": h3_id,
+                "h3Resolution": 8,
+                "bestAvailableTier": best_tier,
+                "carriers5g35x3Count": carriers_35,
+                "popup": format!("FCC BDC Mobile Cell ({hex_lbl}): {best_tier} · {carriers_35}/3 carriers with 5G-NR 35/3 Mbps (outdoor modeled RSRP)"),
+            }
+        }]
+    }))
+}
+
+/// Parses an ArcGIS FeatureServer response from `FCC_Mobile_Broadband_Data_Collection_(Latest)/FeatureServer/2`.
+pub fn parse_fcc_mobile_h3_json(
+    v: &Value,
+    fcc_map_url: &str,
+) -> std::result::Result<Option<FccMobile5gResult>, String> {
+    if let Some(err) = v.get("error") {
+        let code = err.get("code").and_then(Value::as_i64).unwrap_or(500);
+        return Err(format!("arcgis_error_{code}"));
+    }
+    let Some(feats) = v.get("features").and_then(Value::as_array) else {
+        return Err("fcc_mobile_missing_features_array".to_string());
+    };
+    let Some(first) = feats.first() else {
+        return Ok(None);
+    };
+    let Some(attrs) = first.get("attributes") else {
+        return Err("fcc_mobile_missing_attributes".to_string());
+    };
+
+    let h3_id = json_str(attrs.get("h3_id")).map(String::from);
+    let state = json_str(attrs.get("state")).map(String::from);
+    let best_code = attr_i64(attrs, "Best_Available_Tech");
+
+    let specs = [
+        (
+            "Verizon",
+            "Verizon_4GLTE_minsignal",
+            "Verizon_4GLTE_environment",
+            "Verizon_5GNR_7_1_minsignal",
+            "Verizon_5GNR_7_1_environment",
+            "Verizon_5GNR_35_3_minsignal",
+            "Verizon_5GNR_35_3_environment",
+        ),
+        (
+            "AT&T",
+            "ATT_4GLTE_minsignal",
+            "ATT_4GLTE_environment",
+            "ATT_5GNR_7_1_minsignal",
+            "ATT_5GNR_7_1_environment",
+            "ATT_5GNR_35_3_minsignal",
+            "ATT_5GNR_35_3_environment",
+        ),
+        (
+            "T-Mobile",
+            "TMobile_4GLTE_minsignal",
+            "TMobile_4GLTE_environment",
+            "TMobile_5GNR_7_1_minsignal",
+            "TMobile_5GNR_7_1_environment",
+            "TMobile_5GNR_35_3_minsignal",
+            "TMobile_5GNR_35_3_environment",
+        ),
+    ];
+
+    let mut carriers = Vec::with_capacity(3);
+    for (name, lte_sig_k, lte_env_k, nr7_sig_k, nr7_env_k, nr35_sig_k, nr35_env_k) in specs {
+        let lte = FccMobileTechTierCoverage::from_h3_fields(
+            attr_i64(attrs, lte_sig_k),
+            attr_i64(attrs, lte_env_k),
+        );
+        let nr7 = FccMobileTechTierCoverage::from_h3_fields(
+            attr_i64(attrs, nr7_sig_k),
+            attr_i64(attrs, nr7_env_k),
+        );
+        let nr35 = FccMobileTechTierCoverage::from_h3_fields(
+            attr_i64(attrs, nr35_sig_k),
+            attr_i64(attrs, nr35_env_k),
+        );
+
+        let outdoor_5g_35x3 = if nr35.covered {
+            "verified_fcc_bdc_35_3_mbps"
+        } else if nr7.covered {
+            "verified_fcc_bdc_7_1_mbps"
+        } else {
+            "not_reported_at_35_3_tier"
+        };
+        let outdoor_5g_7x1 = if nr7.covered || nr35.covered {
+            "verified_fcc_bdc_7_1_mbps"
+        } else {
+            "not_reported_at_7_1_tier"
+        };
+        let outdoor_4g_lte = if lte.covered || nr7.covered || nr35.covered {
+            "verified_fcc_bdc_5_1_mbps"
+        } else {
+            "not_reported_at_5_1_tier"
+        };
+
+        let (best_tier, best_env, best_rsrp) = if nr35.covered {
+            (
+                "5g_nr_35_3",
+                nr35.environment.clone(),
+                nr35.modeled_outdoor_min_rsrp_dbm,
+            )
+        } else if nr7.covered {
+            (
+                "5g_nr_7_1",
+                nr7.environment.clone(),
+                nr7.modeled_outdoor_min_rsrp_dbm,
+            )
+        } else if lte.covered {
+            (
+                "4g_lte_5_1",
+                lte.environment.clone(),
+                lte.modeled_outdoor_min_rsrp_dbm,
+            )
+        } else {
+            ("none", None, None)
+        };
+
+        let rsrp_note = match best_rsrp {
+            Some(dbm) => format!(
+                "FCC BDC modeled outdoor minimum RSRP threshold >= {dbm} dBm (outdoor link-budget floor — NOT indoor signal bars)"
+            ),
+            None => "No FCC BDC 4G LTE / 5G-NR outdoor modeled RSRP threshold filed in this H3 cell".to_string(),
+        };
+
+        carriers.push(FccMobileCarrierCoverage {
+            carrier_name: name.to_string(),
+            outdoor_5g_nr_35x3: outdoor_5g_35x3.to_string(),
+            outdoor_5g_nr_7x1: outdoor_5g_7x1.to_string(),
+            outdoor_4g_lte_5x1: outdoor_4g_lte.to_string(),
+            best_tier: best_tier.to_string(),
+            best_environment: best_env,
+            lte_5x1: lte,
+            nr_7x1: nr7,
+            nr_35x3: nr35,
+            modeled_outdoor_min_rsrp_dbm: best_rsrp,
+            modeled_outdoor_min_rsrp_note: rsrp_note,
+            signal_strength_dbm: None,
+            provenance: "fcc_bdc_h3_res8_live".to_string(),
+        });
+    }
+
+    let c_35 = carriers.iter().filter(|c| c.nr_35x3.covered).count();
+    let c_35_veh = carriers
+        .iter()
+        .filter(|c| c.nr_35x3.in_vehicle_mobile)
+        .count();
+    let c_7 = carriers
+        .iter()
+        .filter(|c| c.nr_7x1.covered || c.nr_35x3.covered)
+        .count();
+    let c_lte = carriers
+        .iter()
+        .filter(|c| c.lte_5x1.covered || c.nr_7x1.covered || c.nr_35x3.covered)
+        .count();
+
+    let best_tier_label = if c_35_veh > 0 {
+        "5G-NR 35/3 Mbps (In-Vehicle & Outdoor Stationary)".to_string()
+    } else if c_35 > 0 {
+        "5G-NR 35/3 Mbps (Outdoor Stationary)".to_string()
+    } else if carriers
+        .iter()
+        .any(|c| c.nr_7x1.in_vehicle_mobile)
+    {
+        "5G-NR 7/1 Mbps (In-Vehicle & Outdoor Stationary)".to_string()
+    } else if c_7 > 0 {
+        "5G-NR 7/1 Mbps (Outdoor Stationary)".to_string()
+    } else if carriers.iter().any(|c| c.lte_5x1.in_vehicle_mobile) {
+        "4G LTE 5/1 Mbps (In-Vehicle & Outdoor Stationary)".to_string()
+    } else if c_lte > 0 {
+        "4G LTE 5/1 Mbps (Outdoor Stationary)".to_string()
+    } else {
+        "No 5G-NR or 4G LTE reported".to_string()
+    };
+
+    let any_covered = c_lte > 0 || c_7 > 0 || c_35 > 0;
+    let map_layer =
+        build_h3_polygon_layer(first.get("geometry"), h3_id.as_deref(), &best_tier_label, c_35);
+
+    Ok(Some(FccMobile5gResult {
+        status: FccLookupStatus::LiveVerified,
+        available: any_covered,
+        queried: true,
+        http_status: Some(200),
+        h3_id,
+        h3_resolution: 8,
+        state,
+        best_available_tech_code: best_code,
+        best_available_tier: best_tier_label,
+        carriers_5g_35x3_count: c_35,
+        carriers_5g_7x1_count: c_7,
+        carriers_4g_lte_count: c_lte,
+        carriers_in_vehicle_5g_35x3_count: c_35_veh,
+        signal_strength_dbm: None,
+        rsrp_threshold_methodology: FCC_BDC_MOBILE_RSRP_DISCLAIMER.to_string(),
+        carriers,
+        map_layer,
+        source_name: "FCC National Broadband Map — Mobile BDC (H3 Resolution-8)".to_string(),
+        source_url: fcc_map_url.to_string(),
+        provenance: "fcc_bdc_h3_res8_live".to_string(),
+        checked_at: now_iso(),
+        cached: false,
+        reason: None,
+    }))
+}
+
+/// Executes a keyless live FCC Mobile BDC H3 Resolution-8 query across AT&T, T-Mobile, and Verizon.
+/// Respects `http.is_offline_external_blocked()` and never fabricates indoor signal bars (`signalStrengthDbm` is always `None`).
+pub async fn check_fcc_mobile_5g_h3(
+    http: &HttpClient,
+    env: &EnvConfig,
+    lat: Option<f64>,
+    lon: Option<f64>,
+) -> FccMobile5gResult {
+    let fcc_map_url = match (lat, lon) {
+        (Some(la), Some(lo)) if la.is_finite() && lo.is_finite() => format!(
+            "https://broadbandmap.fcc.gov/location-summary/mobile?latlon={la:.6}%2C{lo:.6}"
+        ),
+        _ => FCC_BDC_MAP_HOME_URL.to_string(),
+    };
+
+    let (Some(la), Some(lo)) = (lat, lon) else {
+        return FccMobile5gResult::unavailable(
+            fcc_map_url,
+            false,
+            None,
+            FccLookupStatus::Unconfigured,
+            "missing_coordinates",
+        );
+    };
+    if !la.is_finite()
+        || !lo.is_finite()
+        || la.abs() > 90.0
+        || lo.abs() > 180.0
+        || env.get("FCC_BDC_DISABLED") == Some("1")
+    {
+        return FccMobile5gResult::unavailable(
+            fcc_map_url,
+            false,
+            None,
+            FccLookupStatus::Unconfigured,
+            "fcc_mobile_disabled_or_invalid_coords",
+        );
+    }
+
+    let base = env
+        .get("FCC_BDC_MOBILE_H3_URL")
+        .or_else(|| env.get("FCC_BDC_MOBILE_API_URL"))
+        .unwrap_or(FCC_BDC_MOBILE_H3_DEFAULT_URL);
+    let Ok(mut url) = Url::parse(base) else {
+        return FccMobile5gResult::unavailable(
+            fcc_map_url,
+            false,
+            None,
+            FccLookupStatus::Unconfigured,
+            "invalid_fcc_mobile_url",
+        );
+    };
+
+    let is_loopback = is_loopback_host(url.host_str().unwrap_or(""));
+    if http.is_offline_external_blocked() && !is_loopback {
+        return FccMobile5gResult::unavailable(
+            fcc_map_url,
+            false,
+            None,
+            FccLookupStatus::Unavailable,
+            "offline_mode_blocked",
+        );
+    }
+
+    let cache_key = format!("fcc_mobile_h3:v1:{base}:{la:.4}:{lo:.4}");
+    if !http.is_bypassing_cache_reads() {
+        if let Some(cached_raw) = http.read_cache(&cache_key, FCC_CACHE_TTL_SECS).await {
+            if let Ok(mut parsed) = serde_json::from_str::<FccMobile5gResult>(&cached_raw) {
+                parsed.cached = true;
+                mark_cached();
+                return parsed;
+            }
+        }
+    }
+
+    {
+        let mut qp = url.query_pairs_mut();
+        qp.append_pair("geometry", &format!("{lo:.6},{la:.6}"));
+        qp.append_pair("geometryType", "esriGeometryPoint");
+        qp.append_pair("inSR", "4326");
+        qp.append_pair("spatialRel", "esriSpatialRelIntersects");
+        qp.append_pair("outFields", "*");
+        qp.append_pair("outSR", "4326");
+        qp.append_pair("returnGeometry", "true");
+        qp.append_pair("f", "json");
+    }
+
+    let Ok(client) = http.direct_client_for_url(url.as_str()) else {
+        return FccMobile5gResult::unavailable(
+            fcc_map_url,
+            false,
+            None,
+            FccLookupStatus::Unavailable,
+            "offline_mode_blocked",
+        );
+    };
+
+    let max_attempts: usize = if is_loopback { 1 } else { 2 };
+    let mut resp_opt = None;
+    let mut last_fail = "fcc_mobile_request_failed";
+    for attempt in 0..max_attempts {
+        if attempt > 0 {
+            tokio::time::sleep(Duration::from_millis(150)).await;
+        }
+        let req = client
+            .get(url.clone())
+            .header("Accept", "application/json")
+            .timeout(Duration::from_millis(5_500));
+        match tokio::time::timeout(Duration::from_millis(6_000), req.send()).await {
+            Ok(Ok(r)) => {
+                resp_opt = Some(r);
+                break;
+            }
+            Ok(Err(_)) => last_fail = "fcc_mobile_request_failed",
+            Err(_) => last_fail = "fcc_mobile_request_timeout",
+        }
+    }
+
+    let Some(resp) = resp_opt else {
+        return FccMobile5gResult::unavailable(
+            fcc_map_url,
+            true,
+            None,
+            FccLookupStatus::Unavailable,
+            last_fail,
+        );
+    };
+
+    let code = resp.status().as_u16();
+    let is_success = resp.status().is_success();
+    let Ok(raw_bytes) = resp.bytes().await else {
+        return FccMobile5gResult::unavailable(
+            fcc_map_url,
+            true,
+            Some(code),
+            FccLookupStatus::Unavailable,
+            "fcc_mobile_body_read_failed",
+        );
+    };
+    add_bytes_downloaded(raw_bytes.len() as u64);
+
+    if !is_success {
+        return FccMobile5gResult::unavailable(
+            fcc_map_url,
+            true,
+            Some(code),
+            FccLookupStatus::Unavailable,
+            format!("http_{code}"),
+        );
+    }
+
+    let Ok(val) = serde_json::from_slice::<Value>(&raw_bytes) else {
+        return FccMobile5gResult::unavailable(
+            fcc_map_url,
+            true,
+            Some(code),
+            FccLookupStatus::Unavailable,
+            "fcc_mobile_invalid_json",
+        );
+    };
+
+    match parse_fcc_mobile_h3_json(&val, &fcc_map_url) {
+        Ok(Some(res)) => {
+            if let Ok(encoded) = serde_json::to_string(&res) {
+                http.write_cache(&cache_key, &encoded, FCC_CACHE_TTL_SECS).await;
+            }
+            res
+        }
+        Ok(None) => FccMobile5gResult {
+            status: FccLookupStatus::EmptyResult,
+            available: false,
+            queried: true,
+            http_status: Some(code),
+            h3_id: None,
+            h3_resolution: 8,
+            state: None,
+            best_available_tech_code: None,
+            best_available_tier: "Outside US H3 Mobile Coverage".to_string(),
+            carriers_5g_35x3_count: 0,
+            carriers_5g_7x1_count: 0,
+            carriers_4g_lte_count: 0,
+            carriers_in_vehicle_5g_35x3_count: 0,
+            signal_strength_dbm: None,
+            rsrp_threshold_methodology: FCC_BDC_MOBILE_RSRP_DISCLAIMER.to_string(),
+            carriers: Vec::new(),
+            map_layer: None,
+            source_name: "FCC National Broadband Map — Mobile BDC (H3 Resolution-8)".to_string(),
+            source_url: fcc_map_url,
+            provenance: "fcc_bdc_h3_res8_live".to_string(),
+            checked_at: now_iso(),
+            cached: false,
+            reason: Some("no_h3_cell_for_coordinates".to_string()),
+        },
+        Err(reason) => FccMobile5gResult::unavailable(
+            fcc_map_url,
+            true,
+            Some(code),
+            FccLookupStatus::Unavailable,
+            reason,
+        ),
+    }
+}
+
+/// Native `DataExtensionAdapter` exposing keyless FCC Mobile BDC H3 Resolution-8 5G-NR & 4G LTE lookups.
+pub struct FccMobile5gAdapter;
+
+impl DataExtensionAdapter for FccMobile5gAdapter {
+    fn manifest(&self) -> ExtensionManifestProto {
+        ExtensionManifestProto {
+            extension_id: FCC_MOBILE_5G_EXT_ID.to_string(),
+            name: "FCC Broadband Data Collection — 5G-NR & 4G LTE Mobile Coverage".to_string(),
+            version: "1.0.0".to_string(),
+            description: "Federal Communications Commission Broadband Data Collection (BDC) H3 Resolution-8 mobile wireless 5G-NR (35/3 Mbps & 7/1 Mbps) and 4G LTE (5/1 Mbps) outdoor stationary vs. in-vehicle mobile coverage and modeled outdoor minimum RSRP threshold across AT&T, T-Mobile, and Verizon.".to_string(),
+            domain: CapabilityDomain::DomainBroadband as i32,
+            additional_domains: vec![
+                CapabilityDomain::DomainBroadband as i32,
+                CapabilityDomain::DomainLivability as i32,
+            ],
+            driver: DriverKind::DriverNativeAdapter as i32,
+            geo_scope: Some(GeoScopeProto {
+                states: Vec::new(),
+                counties: Vec::new(),
+                zip_prefixes: Vec::new(),
+                zip_codes: Vec::new(),
+                cities: Vec::new(),
+                nationwide: true,
+                specificity_override: Some(500),
+                country: "US".to_string(),
+            }),
+            auth: Some(AuthSpecProto {
+                auth_type: "none".to_string(),
+                env_var: String::new(),
+                header_name: String::new(),
+                query_param: String::new(),
+                header_prefix: None,
+                optional_key: false,
+            }),
+            rate_limit: Some(RateLimitSpecProto {
+                requests_per_second: 5,
+                burst: 10,
+                timeout_ms: 6_000,
+                max_retries: 1,
+            }),
+            cache_ttl_secs: FCC_MOBILE_CACHE_TTL_SECS,
+            priority: 265,
+            enabled: true,
+            builtin: true,
+            tier: ExtensionTier::Basic as i32,
+            license_class: LicenseClass::PublicOpenData as i32,
+            execution_mode: ExecutionMode::Eager as i32,
+            enabled_by_default: Some(true),
+            proto_message_type: "openestate.extension.v1.BroadbandCatalogProto".to_string(),
+            openapi_spec_file: None,
+            homepage_url: Some(FCC_BDC_MAP_HOME_URL.to_string()),
+            documentation_url: Some("https://www.fcc.gov/BroadbandData".to_string()),
+            codeowners: vec!["@openestate/connectivity".to_string()],
+            default_provenance: ProvenanceTier::ProvenanceLiveVerified as i32,
+            metering: Some(MeteringSpecProto {
+                dimensions: vec![
+                    "invocations".to_string(),
+                    "wall_time_ms".to_string(),
+                    "external_api_calls".to_string(),
+                    "bytes_downloaded".to_string(),
+                ],
+            }),
+            sharing: Some(SharingSpecProto {
+                scope: ProtoShareScope::Geohash6 as i32,
+                ttl_secs: BROADBAND_HEX_TTL_SECS,
+                stale_while_revalidate_secs: FCC_MOBILE_CACHE_TTL_SECS,
+                background_refresh: true,
+                key_fields: Vec::new(),
+            }),
+            source_attribution: Some(ManifestSourceAttributionProto {
+                name: "FCC National Broadband Map — Mobile Wireless Broadband Data Collection (H3 Res-8)".to_string(),
+                url: FCC_BDC_MAP_HOME_URL.to_string(),
+                reference_url_template: "https://broadbandmap.fcc.gov/location-summary/mobile?latlon={{lat}}%2C{{lon}}".to_string(),
+                schedule_or_version: Some("FCC BDC Semi-Annual Mobile Wireless Availability (H3 Resolution 8)".to_string()),
+                notes: Some("Evaluates keyless FCC Mobile BDC H3 Resolution-8 hexagons for AT&T, T-Mobile, and Verizon 4G LTE (5/1), 5G-NR (7/1), and 5G-NR (35/3) outdoor stationary vs. in-vehicle coverage and FCC BDC modeled outdoor minimum RSRP thresholds (dBm) — never indoor signal bars.".to_string()),
+            }),
+            ..Default::default()
+        }
+    }
+
+    fn execute_async<'a>(
+        &'a self,
+        query: &'a ExtensionQueryProto,
+        http: &'a HttpClient,
+        env: &'a EnvConfig,
+    ) -> BoxFuture<'a, Result<Vec<ExtensionEnvelopeProto>>> {
+        Box::pin(async move {
+            let country = query
+                .extra_params
+                .get("country")
+                .map(String::as_str)
+                .unwrap_or("");
+            if !is_us_country_opt(country) {
+                return Ok(Vec::new());
+            }
+            let (Some(la), Some(lo)) = (query.lat, query.lon) else {
+                return Ok(Vec::new());
+            };
+            if !la.is_finite() || !lo.is_finite() || la.abs() > 90.0 || lo.abs() > 180.0 {
+                return Ok(Vec::new());
+            }
+
+            let base = env
+                .get("FCC_BDC_MOBILE_H3_URL")
+                .or_else(|| env.get("FCC_BDC_MOBILE_API_URL"))
+                .unwrap_or(FCC_BDC_MOBILE_H3_DEFAULT_URL);
+            let host = Url::parse(base)
+                .ok()
+                .and_then(|u| u.host_str().map(String::from))
+                .unwrap_or_default();
+            if http.is_offline_external_blocked() && !is_loopback_host(&host) {
+                return Ok(Vec::new());
+            }
+
+            let started = Instant::now();
+            let res = check_fcc_mobile_5g_h3(http, env, Some(la), Some(lo)).await;
+            let latency_ms = started.elapsed().as_millis().min(u32::MAX as u128) as u32;
+
+            match res.status {
+                FccLookupStatus::LiveVerified => Ok(vec![ExtensionEnvelopeProto {
+                    extension_id: FCC_MOBILE_5G_EXT_ID.to_string(),
+                    domain: CapabilityDomain::DomainBroadband as i32,
+                    priority: 265,
+                    geo_specificity: 500,
+                    attribution: Some(SourceAttributionProto {
+                        extension_id: FCC_MOBILE_5G_EXT_ID.to_string(),
+                        source_name: res.source_name.clone(),
+                        source_url: res.source_url.clone(),
+                        provenance_tier: ProvenanceTier::ProvenanceLiveVerified as i32,
+                        fetched_at_rfc3339: res.checked_at.clone(),
+                        schedule_or_version: Some("H3 Resolution-8".to_string()),
+                        notes: Some(FCC_BDC_MOBILE_RSRP_DISCLAIMER.to_string()),
+                    }),
+                    latency_ms,
+                    cached: res.cached,
+                    payload: Some(Payload::RawJson(serde_json::to_string(&res)?)),
+                }]),
+                FccLookupStatus::EmptyResult => Ok(Vec::new()),
+                FccLookupStatus::Unconfigured => Ok(Vec::new()),
+                FccLookupStatus::Unavailable => {
+                    if !res.queried {
+                        Ok(Vec::new())
+                    } else {
+                        Err(anyhow!(
+                            "FCC Mobile BDC H3 lookup unavailable: {}",
+                            res.reason.as_deref().unwrap_or("upstream_error")
+                        ))
+                    }
+                }
             }
         })
     }
@@ -1060,5 +2028,265 @@ mod tests {
         .await
         .expect("query failure cell");
         assert!(err_rows.is_empty());
+    }
+
+    #[test]
+    fn fcc_mobile_h3_parser_distinguishes_in_vehicle_from_outdoor_and_never_invents_indoor_dbm() {
+        let campbell_payload = json!({
+            "features": [{
+                "attributes": {
+                    "OBJECTID": 4360054,
+                    "h3_id": "8828347265fffff",
+                    "state": "CA",
+                    "Best_Available_Tech": 1,
+                    "mindown_4GLTE": 5,
+                    "minup_4GLTE": 1,
+                    "environment_4GLTE": 1,
+                    "mindown_5GNR": 35,
+                    "minup_5GNR": 1,
+                    "environment_5GNR": 0,
+                    "ATT_4GLTE_minsignal": -100,
+                    "ATT_4GLTE_environment": 1,
+                    "ATT_5GNR_7_1_minsignal": -110,
+                    "ATT_5GNR_7_1_environment": 1,
+                    "ATT_5GNR_35_3_minsignal": -110,
+                    "ATT_5GNR_35_3_environment": 1,
+                    "TMobile_4GLTE_minsignal": -90,
+                    "TMobile_4GLTE_environment": 1,
+                    "TMobile_5GNR_7_1_minsignal": -90,
+                    "TMobile_5GNR_7_1_environment": 1,
+                    "TMobile_5GNR_35_3_minsignal": -90,
+                    "TMobile_5GNR_35_3_environment": 0,
+                    "Verizon_4GLTE_minsignal": -90,
+                    "Verizon_4GLTE_environment": 1,
+                    "Verizon_5GNR_7_1_minsignal": -100,
+                    "Verizon_5GNR_7_1_environment": 0,
+                    "Verizon_5GNR_35_3_minsignal": -100,
+                    "Verizon_5GNR_35_3_environment": 0
+                },
+                "geometry": {
+                    "rings": [[
+                        [-121.965, 37.280],
+                        [-121.960, 37.280],
+                        [-121.958, 37.284],
+                        [-121.962, 37.286],
+                        [-121.965, 37.280]
+                    ]]
+                }
+            }]
+        });
+
+        let parsed = parse_fcc_mobile_h3_json(
+            &campbell_payload,
+            "https://broadbandmap.fcc.gov/location-summary/mobile?latlon=37.282147%2C-121.961797",
+        )
+        .expect("parse succeeds")
+        .expect("H3 cell present");
+
+        assert_eq!(parsed.status, FccLookupStatus::LiveVerified);
+        assert!(parsed.available);
+        assert_eq!(parsed.h3_id.as_deref(), Some("8828347265fffff"));
+        assert_eq!(parsed.carriers_5g_35x3_count, 3);
+        assert_eq!(parsed.carriers_in_vehicle_5g_35x3_count, 1);
+        assert!(parsed.signal_strength_dbm.is_none());
+        assert!(parsed.map_layer.is_some());
+
+        let att = parsed
+            .carriers
+            .iter()
+            .find(|c| c.carrier_name == "AT&T")
+            .unwrap();
+        assert!(att.nr_35x3.in_vehicle_mobile);
+        assert!(att.nr_35x3.outdoor_stationary);
+        assert_eq!(att.nr_35x3.modeled_outdoor_min_rsrp_dbm, Some(-110));
+        assert!(att
+            .nr_35x3
+            .modeled_outdoor_min_rsrp_label
+            .as_deref()
+            .unwrap()
+            .contains("FCC BDC modeled outdoor minimum RSRP threshold"));
+        assert!(att.signal_strength_dbm.is_none());
+
+        let tmo = parsed
+            .carriers
+            .iter()
+            .find(|c| c.carrier_name == "T-Mobile")
+            .unwrap();
+        assert!(!tmo.nr_35x3.in_vehicle_mobile);
+        assert!(tmo.nr_35x3.outdoor_stationary);
+        assert_eq!(tmo.nr_35x3.environment.as_deref(), Some("outdoor_stationary"));
+        assert_eq!(tmo.modeled_outdoor_min_rsrp_dbm, Some(-90));
+        assert!(tmo.signal_strength_dbm.is_none());
+
+        // Rural partial cell: null 5G-NR columns must report uncovered cleanly
+        let rural_payload = json!({
+            "features": [{
+                "attributes": {
+                    "h3_id": "880c76263dfffff",
+                    "state": "AK",
+                    "Best_Available_Tech": 5,
+                    "ATT_4GLTE_minsignal": -120,
+                    "ATT_4GLTE_environment": 0,
+                    "ATT_5GNR_7_1_minsignal": null,
+                    "ATT_5GNR_7_1_environment": null,
+                    "ATT_5GNR_35_3_minsignal": null,
+                    "ATT_5GNR_35_3_environment": null,
+                    "TMobile_4GLTE_minsignal": null,
+                    "TMobile_4GLTE_environment": null,
+                    "Verizon_4GLTE_minsignal": null,
+                    "Verizon_4GLTE_environment": null
+                }
+            }]
+        });
+        let rural = parse_fcc_mobile_h3_json(&rural_payload, FCC_BDC_MAP_HOME_URL)
+            .unwrap()
+            .unwrap();
+        assert_eq!(rural.carriers_5g_35x3_count, 0);
+        assert_eq!(rural.carriers_4g_lte_count, 1);
+        assert_eq!(
+            rural.best_available_tier,
+            "4G LTE 5/1 Mbps (Outdoor Stationary)"
+        );
+    }
+
+    #[tokio::test]
+    async fn fcc_fixed_block_fallback_and_mobile_adapter_loopback_and_offline_guardrails() {
+        use axum::{http::StatusCode, routing::get, Json, Router};
+        use tokio::net::TcpListener;
+
+        let app = Router::new()
+            .route(
+                "/fcc/fixed",
+                get(|| async { (StatusCode::METHOD_NOT_ALLOWED, Json(json!({"status_code": 405}))) }),
+            )
+            .route(
+                "/fcc/block",
+                get(|| async {
+                    Json(json!({
+                        "features": [{
+                            "attributes": {
+                                "GEOID": "060855066031015",
+                                "StateAbbr": "CA",
+                                "CountyName": "Santa Clara County",
+                                "TotalPop": 52,
+                                "TotalBSLs": 9,
+                                "ServedBSLs": 9,
+                                "UnderservedBSLs": 0,
+                                "UnservedBSLs": 0,
+                                "ServedBSLsFiber": 8,
+                                "ServedBSLsCable": 9,
+                                "ServedBSLsCopper": 0,
+                                "ServedBSLsLTFW": 9,
+                                "ServedBSLsLBRTFW": 8,
+                                "UniqueProviders": 13,
+                                "UniqueProvidersFiber": 1,
+                                "UniqueProvidersCable": 1,
+                                "UniqueProvidersCopper": 1,
+                                "UniqueProvidersLTFW": 4,
+                                "UniqueProvidersLBRTFW": 1
+                            }
+                        }]
+                    }))
+                }),
+            )
+            .route(
+                "/fcc/mobile_h3",
+                get(|| async {
+                    Json(json!({
+                        "features": [{
+                            "attributes": {
+                                "h3_id": "8828347265fffff",
+                                "state": "CA",
+                                "Best_Available_Tech": 1,
+                                "ATT_5GNR_35_3_minsignal": -110,
+                                "ATT_5GNR_35_3_environment": 1,
+                                "TMobile_5GNR_35_3_minsignal": -90,
+                                "TMobile_5GNR_35_3_environment": 0,
+                                "Verizon_5GNR_35_3_minsignal": -100,
+                                "Verizon_5GNR_35_3_environment": 0
+                            }
+                        }]
+                    }))
+                }),
+            );
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let srv = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let http = HttpClient::offline_loopback_only(None);
+
+        // 1. Default external URLs under offline_loopback_only return empty without fabricating
+        let empty_env = EnvConfig::from_map(HashMap::new());
+        let adapter = FccMobile5gAdapter;
+        let us_q = ExtensionQueryProto {
+            lat: Some(37.282147),
+            lon: Some(-121.961797),
+            state: "CA".to_string(),
+            ..Default::default()
+        };
+        let offline_envs = adapter
+            .execute_async(&us_q, &http, &empty_env)
+            .await
+            .expect("offline returns empty");
+        assert!(offline_envs.is_empty());
+
+        // 2. Non-US country returns empty_for_scope
+        let mut ca_q = us_q.clone();
+        ca_q.extra_params
+            .insert("country".to_string(), "CA".to_string());
+        let ca_envs = adapter
+            .execute_async(&ca_q, &http, &empty_env)
+            .await
+            .expect("non-US returns empty");
+        assert!(ca_envs.is_empty());
+
+        // 3. Loopback Fixed BDC 405 + Census Block summary fallback when FCC_BDC_API_TOKEN unset
+        let lb_env = EnvConfig::from_map(HashMap::from([
+            (
+                "FCC_BDC_API_URL".to_string(),
+                format!("http://{addr}/fcc/fixed"),
+            ),
+            (
+                "FCC_BDC_FIXED_BLOCK_URL".to_string(),
+                format!("http://{addr}/fcc/block"),
+            ),
+            (
+                "FCC_BDC_MOBILE_H3_URL".to_string(),
+                format!("http://{addr}/fcc/mobile_h3"),
+            ),
+        ]));
+
+        let fixed = check_fcc_fixed_broadband(&http, &lb_env, Some(37.282147), Some(-121.961797)).await;
+        assert_eq!(fixed.status, FccLookupStatus::Unavailable);
+        assert_eq!(fixed.http_status, Some(405));
+        assert!(fixed.providers.is_empty());
+        assert!(!fixed.fiber_available);
+        let blk = fixed.block_summary.expect("block summary populated when token unset");
+        assert_eq!(blk.geoid, "060855066031015");
+        assert_eq!(blk.total_bsls, 9);
+        assert_eq!(blk.served_bsls_fiber, 8);
+        assert_eq!(blk.served_bsls_cable, 9);
+        assert_eq!(blk.unique_providers_fiber, 1);
+        assert_eq!(blk.fiber_bsl_share_pct, Some(88.9));
+
+        // 4. Loopback Mobile H3 adapter returns valid RawJson envelope
+        let mob_envs = adapter
+            .execute_async(&us_q, &http, &lb_env)
+            .await
+            .expect("mobile H3 loopback succeeds");
+        assert_eq!(mob_envs.len(), 1);
+        if let Some(Payload::RawJson(raw)) = &mob_envs[0].payload {
+            let v: Value = serde_json::from_str(raw).unwrap();
+            assert_eq!(v["h3Id"].as_str(), Some("8828347265fffff"));
+            assert!(v["signalStrengthDbm"].is_null());
+            assert_eq!(v["carriers5g35x3Count"].as_u64(), Some(3));
+        } else {
+            panic!("expected RawJson payload");
+        }
+
+        srv.abort();
     }
 }

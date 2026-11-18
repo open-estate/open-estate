@@ -9,14 +9,18 @@
 use crate::db::{DbStore, InstalledExtensionRow, SystemModuleRow, DEFAULT_SYSTEM_MODULES};
 use crate::extensions::adapter::DataExtensionAdapter;
 use crate::extensions::aggregator::aggregate_envelopes;
-use crate::extensions::manifest::{parse_and_validate_package, ParsedExtensionPackage};
+use crate::extensions::manifest::{
+    classify_extension_connector, classify_extension_jurisdiction_tier, parse_and_validate_package,
+    CompiledGeoScope, ConnectorCategory, JurisdictionTier, NormalizedGeoQuery,
+    ParsedExtensionPackage,
+};
 use crate::extensions::proto::{
     capability_domain_slug, driver_kind_label, driver_kind_slug, encode_proto_base64,
     encode_proto_bytes, envelope_to_display_json, manifest_execution_mode, manifest_is_lazy,
     manifest_license_class, manifest_metering_dimensions, manifest_min_plan_tier,
     manifest_section_id, manifest_tier, manifest_to_active_llm_spec, provenance_tier_slug,
     AggregatedPropertyBundleProto, CapabilityDomain, DriverKind, ExtensionEnvelopeProto,
-    ExtensionManifestProto, ExtensionQueryProto, ProvenanceTier,
+    ExtensionManifestProto, ExtensionQueryProto, GeoScopeProto, ProvenanceTier,
 };
 use crate::extensions::yaml_runner::{
     build_extension_rate_limiter, execute_catalog_rules, execute_live_http,
@@ -249,29 +253,349 @@ const EMBEDDED_BUILTINS: &[EmbeddedBuiltinSpec] = &[
         manifest_yaml: include_str!("../../extensions/scc_sanitation_district/manifest.yaml"),
         openapi_yaml: None,
     },
+    EmbeddedBuiltinSpec {
+        id: "nws_weather",
+        manifest_yaml: include_str!("../../extensions/nws_weather/manifest.yaml"),
+        openapi_yaml: None,
+    },
+    EmbeddedBuiltinSpec {
+        id: "solar_potential",
+        manifest_yaml: include_str!("../../extensions/solar_potential/manifest.yaml"),
+        openapi_yaml: None,
+    },
+    EmbeddedBuiltinSpec {
+        id: "ev_fast_chargers_electrification",
+        manifest_yaml: include_str!(
+            "../../extensions/ev_fast_chargers_electrification/manifest.yaml"
+        ),
+        openapi_yaml: None,
+    },
+    EmbeddedBuiltinSpec {
+        id: "pipeline_row_easements",
+        manifest_yaml: include_str!("../../extensions/pipeline_row_easements/manifest.yaml"),
+        openapi_yaml: None,
+    },
+    EmbeddedBuiltinSpec {
+        id: "faa_flight_noise",
+        manifest_yaml: include_str!("../../extensions/faa_flight_noise/manifest.yaml"),
+        openapi_yaml: None,
+    },
+    EmbeddedBuiltinSpec {
+        id: "highway_traffic_noise",
+        manifest_yaml: include_str!("../../extensions/highway_traffic_noise/manifest.yaml"),
+        openapi_yaml: None,
+    },
+    EmbeddedBuiltinSpec {
+        id: "rail_transit_noise",
+        manifest_yaml: include_str!("../../extensions/rail_transit_noise/manifest.yaml"),
+        openapi_yaml: None,
+    },
+    EmbeddedBuiltinSpec {
+        id: "military_airspace_noise",
+        manifest_yaml: include_str!("../../extensions/military_airspace_noise/manifest.yaml"),
+        openapi_yaml: None,
+    },
+    EmbeddedBuiltinSpec {
+        id: "fire_protection_hydrants",
+        manifest_yaml: include_str!("../../extensions/fire_protection_hydrants/manifest.yaml"),
+        openapi_yaml: None,
+    },
+    EmbeddedBuiltinSpec {
+        id: "fcc_asr_cell_towers",
+        manifest_yaml: include_str!("../../extensions/fcc_asr_cell_towers/manifest.yaml"),
+        openapi_yaml: None,
+    },
+    EmbeddedBuiltinSpec {
+        id: "closing_contingency_calendar",
+        manifest_yaml: include_str!("../../extensions/closing_contingency_calendar/manifest.yaml"),
+        openapi_yaml: None,
+    },
+    EmbeddedBuiltinSpec {
+        id: "market_liquidity_stress",
+        manifest_yaml: include_str!("../../extensions/market_liquidity_stress/manifest.yaml"),
+        openapi_yaml: None,
+    },
+    EmbeddedBuiltinSpec {
+        id: "rainfall_climatology",
+        manifest_yaml: include_str!("../../extensions/rainfall_climatology/manifest.yaml"),
+        openapi_yaml: None,
+    },
+    EmbeddedBuiltinSpec {
+        id: "usda_soil_moisture",
+        manifest_yaml: include_str!("../../extensions/usda_soil_moisture/manifest.yaml"),
+        openapi_yaml: None,
+    },
 ];
 
-enum ExtensionDriverSlot {
+/// Process-wide cache of pre-parsed & descriptor-validated `EMBEDDED_BUILTINS` packages so
+/// `ExtensionHub::new_default()` clones `Arc<ParsedExtensionPackage>` in O(1) without re-parsing
+/// 48+ YAML + OpenAPI 3.x documents on every hub instantiation.
+static PARSED_EMBEDDED_BUILTINS: Lazy<Vec<(&'static str, Arc<ParsedExtensionPackage>)>> =
+    Lazy::new(|| {
+        EMBEDDED_BUILTINS
+            .iter()
+            .filter_map(|spec| {
+                parse_and_validate_package(spec.manifest_yaml, spec.openapi_yaml, Some(true))
+                    .ok()
+                    .map(|pkg| (spec.id, Arc::new(pkg)))
+            })
+            .collect()
+    });
+
+static EMBEDDED_BUILTIN_BY_ID: Lazy<
+    HashMap<&'static str, (&'static EmbeddedBuiltinSpec, Arc<ParsedExtensionPackage>)>,
+> = Lazy::new(|| {
+    let mut map = HashMap::with_capacity(EMBEDDED_BUILTINS.len());
+    for (id, pkg) in PARSED_EMBEDDED_BUILTINS.iter() {
+        if let Some(spec) = EMBEDDED_BUILTINS.iter().find(|s| s.id == *id) {
+            map.insert(*id, (spec, Arc::clone(pkg)));
+        }
+    }
+    map
+});
+
+pub(crate) enum ExtensionDriverSlot {
     DeclarativeOrOpenApi(Arc<ParsedExtensionPackage>),
     Native(Arc<dyn DataExtensionAdapter>),
 }
 
-#[derive(Clone)]
-struct RegisteredExtensionEntry {
-    extension_id: String,
-    manifest: ExtensionManifestProto,
-    driver_slot: Arc<ExtensionDriverSlot>,
-    manifest_yaml: Option<String>,
-    openapi_yaml: Option<String>,
-    config_json: String,
-    health_status: String,
-    last_checked_at: Option<String>,
-    installed_at: String,
-    updated_at: String,
+impl std::fmt::Debug for ExtensionDriverSlot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::DeclarativeOrOpenApi(pkg) => f
+                .debug_tuple("DeclarativeOrOpenApi")
+                .field(&pkg.extension_id)
+                .finish(),
+            Self::Native(adapter) => f
+                .debug_tuple("Native")
+                .field(&adapter.manifest().extension_id)
+                .finish(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct RegisteredExtensionEntry {
+    pub(crate) extension_id: String,
+    pub(crate) manifest: ExtensionManifestProto,
+    pub(crate) driver_slot: Arc<ExtensionDriverSlot>,
+    pub(crate) compiled_geo_scope: CompiledGeoScope,
+    pub(crate) jurisdiction_tier: JurisdictionTier,
+    pub(crate) connector_category: ConnectorCategory,
+    pub(crate) data_formats: Vec<String>,
+    pub(crate) manifest_yaml: Option<String>,
+    pub(crate) openapi_yaml: Option<String>,
+    pub(crate) config_json: String,
+    pub(crate) health_status: String,
+    pub(crate) last_checked_at: Option<String>,
+    pub(crate) installed_at: String,
+    pub(crate) updated_at: String,
+}
+
+/// Pre-indexed geographical lookup tables (`refresh_snapshot()`) with uppercase-normalized keys
+/// and dense `u64` bitsets so out-of-region extensions are pruned in O(1) with zero inner-loop
+/// `.to_ascii_uppercase()` allocations.
+#[derive(Debug, Clone, Default)]
+pub struct GeoIndex {
+    pub word_len: usize,
+    pub nationwide_wildcard_bits: Vec<u64>,
+    pub nationwide_us_bits: Vec<u64>,
+    pub nationwide_by_country: HashMap<String, Vec<usize>>,
+    pub by_state: HashMap<String, Vec<usize>>,
+    pub by_county: HashMap<String, Vec<usize>>,
+    pub by_zip: HashMap<String, Vec<usize>>,
+    pub by_zip_prefix: HashMap<String, Vec<usize>>,
+    pub other_zip_prefixes: Vec<(String, usize)>,
+    pub by_city: HashMap<String, Vec<usize>>,
+}
+
+impl GeoIndex {
+    fn push_unique(map: &mut HashMap<String, Vec<usize>>, key: &str, idx: usize) {
+        if key.is_empty() {
+            return;
+        }
+        let list = map.entry(key.to_string()).or_default();
+        if !list.contains(&idx) {
+            list.push(idx);
+        }
+    }
+
+    pub(crate) fn build(entries: &[RegisteredExtensionEntry]) -> Self {
+        let word_len = (entries.len() + 63) / 64;
+        let mut nationwide_wildcard_bits = vec![0u64; word_len];
+        let mut nationwide_us_bits = vec![0u64; word_len];
+        let mut nationwide_by_country: HashMap<String, Vec<usize>> = HashMap::new();
+        let mut by_state: HashMap<String, Vec<usize>> = HashMap::new();
+        let mut by_county: HashMap<String, Vec<usize>> = HashMap::new();
+        let mut by_zip: HashMap<String, Vec<usize>> = HashMap::new();
+        let mut by_zip_prefix: HashMap<String, Vec<usize>> = HashMap::new();
+        let mut other_zip_prefixes: Vec<(String, usize)> = Vec::new();
+        let mut by_city: HashMap<String, Vec<usize>> = HashMap::new();
+
+        for (idx, entry) in entries.iter().enumerate() {
+            let gs = &entry.compiled_geo_scope;
+            if gs.has_sub_state {
+                for z in &gs.zip_codes {
+                    Self::push_unique(&mut by_zip, z, idx);
+                }
+                for c in &gs.cities {
+                    Self::push_unique(&mut by_city, c, idx);
+                }
+                for p in &gs.zip_prefixes {
+                    if p.len() == 3 {
+                        Self::push_unique(&mut by_zip_prefix, p, idx);
+                    } else if !other_zip_prefixes.iter().any(|(ep, ei)| ep == p && *ei == idx) {
+                        other_zip_prefixes.push((p.clone(), idx));
+                    }
+                }
+                for cf in &gs.county_fips_or_raw {
+                    Self::push_unique(&mut by_county, cf, idx);
+                }
+                for cn in &gs.county_names_stripped {
+                    Self::push_unique(&mut by_county, cn, idx);
+                }
+            } else if !gs.states.is_empty() && !gs.wildcard_state {
+                for st in &gs.states {
+                    Self::push_unique(&mut by_state, st, idx);
+                }
+            } else if gs.nationwide || gs.wildcard_state {
+                match gs.country.as_deref() {
+                    None => {
+                        nationwide_wildcard_bits[idx >> 6] |= 1u64 << (idx & 63);
+                    }
+                    Some("US") => {
+                        nationwide_us_bits[idx >> 6] |= 1u64 << (idx & 63);
+                    }
+                    Some(cc) => {
+                        Self::push_unique(&mut nationwide_by_country, cc, idx);
+                    }
+                }
+            }
+        }
+
+        Self {
+            word_len,
+            nationwide_wildcard_bits,
+            nationwide_us_bits,
+            nationwide_by_country,
+            by_state,
+            by_county,
+            by_zip,
+            by_zip_prefix,
+            other_zip_prefixes,
+            by_city,
+        }
+    }
+
+    /// Computes a dense `u64` bitmask of all snapshot entries matching `q` in O(1) table lookups
+    /// with zero per-extension heap allocations.
+    pub(crate) fn matching_bitset(
+        &self,
+        q: &NormalizedGeoQuery,
+        entries: &[RegisteredExtensionEntry],
+    ) -> Vec<u64> {
+        let mut bits = self.nationwide_wildcard_bits.clone();
+        if q.country.as_ref() == "US" {
+            for (dst, &src) in bits.iter_mut().zip(&self.nationwide_us_bits) {
+                *dst |= src;
+            }
+        } else if let Some(list) = self.nationwide_by_country.get(q.country.as_ref()) {
+            for &idx in list {
+                bits[idx >> 6] |= 1u64 << (idx & 63);
+            }
+        }
+
+        if !q.state.is_empty() {
+            if let Some(list) = self.by_state.get(&q.state) {
+                for &idx in list {
+                    if entries[idx]
+                        .compiled_geo_scope
+                        .matches_country_norm(q.country.as_ref())
+                    {
+                        bits[idx >> 6] |= 1u64 << (idx & 63);
+                    }
+                }
+            }
+        }
+
+        #[inline]
+        fn check_candidates(
+            bits: &mut [u64],
+            cands: &[usize],
+            q: &NormalizedGeoQuery,
+            entries: &[RegisteredExtensionEntry],
+        ) {
+            for &idx in cands {
+                let word = idx >> 6;
+                let mask = 1u64 << (idx & 63);
+                if (bits[word] & mask) == 0
+                    && entries[idx].compiled_geo_scope.match_specificity(q).is_some()
+                {
+                    bits[word] |= mask;
+                }
+            }
+        }
+
+        if q.zip5.len() == 5 {
+            if let Some(list) = self.by_zip.get(&q.zip5) {
+                check_candidates(&mut bits, list, q, entries);
+            }
+        }
+        let z3 = q.zip3();
+        if !z3.is_empty() {
+            if let Some(list) = self.by_zip_prefix.get(z3) {
+                check_candidates(&mut bits, list, q, entries);
+            }
+            if !self.other_zip_prefixes.is_empty() && q.zip5.len() >= 3 {
+                for (pfx, idx) in &self.other_zip_prefixes {
+                    let word = *idx >> 6;
+                    let mask = 1u64 << (*idx & 63);
+                    if (bits[word] & mask) == 0
+                        && q.zip5.starts_with(pfx.as_str())
+                        && entries[*idx].compiled_geo_scope.match_specificity(q).is_some()
+                    {
+                        bits[word] |= mask;
+                    }
+                }
+            }
+        }
+        if !q.city.is_empty() {
+            if let Some(list) = self.by_city.get(&q.city) {
+                check_candidates(&mut bits, list, q, entries);
+            }
+        }
+        if !q.county_fips.is_empty() {
+            if let Some(list) = self.by_county.get(&q.county_fips) {
+                check_candidates(&mut bits, list, q, entries);
+            }
+        }
+        if !q.county_name.is_empty() {
+            if let Some(list) = self.by_county.get(&q.county_name) {
+                check_candidates(&mut bits, list, q, entries);
+            }
+        }
+
+        bits
+    }
+}
+
+/// Precomputed node inside a topological [`ExecutionWavePlan`].
+#[derive(Debug, Clone)]
+pub struct PlannedWaveNode {
+    pub entry_idx: usize,
+    pub extension_id: String,
+    pub upstream_ids: Vec<String>,
+    pub(crate) entry: RegisteredExtensionEntry,
+}
+
+/// Precomputed Kahn topological wave plan cached inside [`RuntimeRegistrySnapshot`].
+#[derive(Debug, Clone, Default)]
+pub struct ExecutionWavePlan {
+    pub waves: Vec<Vec<PlannedWaveNode>>,
 }
 
 /// Immutable point-in-time snapshot of active `system_modules` and `installed_extensions`
-/// held by `AppState` / `orchestrator` / `render` for lock-free per-request gating and cache invalidation.
+/// held by `AppState` / `orchestrator` / `render` / `cdn_cache` for lock-free per-request gating.
 #[derive(Debug, Clone)]
 pub struct RuntimeRegistrySnapshot {
     pub generation_version: u64,
@@ -323,6 +647,159 @@ impl RuntimeRegistrySnapshot {
     }
 }
 
+/// Pre-indexed immutable engine snapshot wrapping [`RuntimeRegistrySnapshot`] alongside
+/// O(1) [`GeoIndex`] region bitsets, orthogonal categorization maps, and precomputed
+/// Kahn topological [`ExecutionWavePlan`]s.
+#[derive(Debug, Clone)]
+pub struct RegistrySnapshot {
+    pub runtime: Arc<RuntimeRegistrySnapshot>,
+    pub geo_index: GeoIndex,
+    pub extension_ids_by_jurisdiction_tier: HashMap<JurisdictionTier, Vec<String>>,
+    pub extension_ids_by_connector_category: HashMap<ConnectorCategory, Vec<String>>,
+    pub extension_ids_by_data_format: HashMap<String, Vec<String>>,
+    pub all_domains_wave_plan: Arc<ExecutionWavePlan>,
+    pub domain_wave_plans: HashMap<i32, Arc<ExecutionWavePlan>>,
+    pub(crate) domain_transitive_bits: HashMap<i32, Vec<u64>>,
+    pub(crate) entries: Vec<RegisteredExtensionEntry>,
+    pub(crate) entry_index_by_id: HashMap<String, (usize, bool)>,
+}
+
+impl std::ops::Deref for RegistrySnapshot {
+    type Target = RuntimeRegistrySnapshot;
+
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        &self.runtime
+    }
+}
+
+impl RegistrySnapshot {
+    /// O(1) lookup of whether `extension_id` is registered and enabled.
+    #[inline]
+    pub fn is_extension_enabled_fast(&self, extension_id: &str) -> bool {
+        let target = extension_id.trim();
+        self.entry_index_by_id
+            .get(target)
+            .map(|&(idx, _)| self.entries[idx].manifest.enabled)
+            .unwrap_or(false)
+    }
+
+    /// Returns candidate `extension_id`s matching `query` via the pre-indexed [`GeoIndex`].
+    pub fn matching_extension_ids(&self, query: &ExtensionQueryProto) -> Vec<String> {
+        let q = NormalizedGeoQuery::from_proto(query);
+        let bits = self.geo_index.matching_bitset(&q, &self.entries);
+        let mut out = Vec::new();
+        for (idx, e) in self.entries.iter().enumerate() {
+            if (bits[idx >> 6] & (1u64 << (idx & 63))) != 0 {
+                out.push(e.extension_id.clone());
+            }
+        }
+        out
+    }
+
+    /// Selects a precomputed [`ExecutionWavePlan`] and optional upward-closed domain bitmask
+    /// in O(1) without rebuilding dependency maps or running Kahn's topological sort.
+    pub(crate) fn select_wave_plan<'a>(
+        &'a self,
+        domains: Option<&[CapabilityDomain]>,
+    ) -> Option<(&'a ExecutionWavePlan, Option<Vec<u64>>)> {
+        match domains {
+            None => Some((self.all_domains_wave_plan.as_ref(), None)),
+            Some([]) => None,
+            Some([single]) => {
+                let plan = self.domain_wave_plans.get(&(*single as i32))?;
+                if plan.waves.is_empty() {
+                    None
+                } else {
+                    Some((plan.as_ref(), None))
+                }
+            }
+            Some(many) => {
+                let mut filter_bits = vec![0u64; self.geo_index.word_len];
+                let mut any = false;
+                for dom in many {
+                    if let Some(dbits) = self.domain_transitive_bits.get(&(*dom as i32)) {
+                        for (dst, &src) in filter_bits.iter_mut().zip(dbits.iter()) {
+                            if src != 0 {
+                                any = true;
+                                *dst |= src;
+                            }
+                        }
+                    }
+                }
+                if !any {
+                    None
+                } else {
+                    Some((self.all_domains_wave_plan.as_ref(), Some(filter_bits)))
+                }
+            }
+        }
+    }
+
+    /// Pre-indexed orthogonal categorization summary (`byJurisdictionTier`, `byConnectorCategory`,
+    /// `byDataFormat`) for admin/ops catalog filtering and grouping.
+    pub fn categorization_summary(&self) -> Value {
+        let mut by_tier = serde_json::Map::new();
+        for tier in [
+            JurisdictionTier::National,
+            JurisdictionTier::State,
+            JurisdictionTier::County,
+            JurisdictionTier::Municipal,
+            JurisdictionTier::DistrictOrZip,
+        ] {
+            let ids = self
+                .extension_ids_by_jurisdiction_tier
+                .get(&tier)
+                .cloned()
+                .unwrap_or_default();
+            by_tier.insert(
+                tier.as_str().to_string(),
+                json!({ "count": ids.len(), "extensionIds": ids }),
+            );
+        }
+
+        let mut by_cat = serde_json::Map::new();
+        for cat in [
+            ConnectorCategory::ArcgisFeatureRest,
+            ConnectorCategory::OgcWmsWcs,
+            ConnectorCategory::SocrataCkanOpenData,
+            ConnectorCategory::OpenapiRestJson,
+            ConnectorCategory::CsvTabularStream,
+            ConnectorCategory::HtmlPortalScrape,
+            ConnectorCategory::MultiFeedNative,
+        ] {
+            let ids = self
+                .extension_ids_by_connector_category
+                .get(&cat)
+                .cloned()
+                .unwrap_or_default();
+            by_cat.insert(
+                cat.as_str().to_string(),
+                json!({ "count": ids.len(), "extensionIds": ids }),
+            );
+        }
+
+        let mut fmt_keys: Vec<&String> = self.extension_ids_by_data_format.keys().collect();
+        fmt_keys.sort();
+        let mut by_fmt = serde_json::Map::new();
+        for k in fmt_keys {
+            if let Some(ids) = self.extension_ids_by_data_format.get(k) {
+                by_fmt.insert(
+                    k.clone(),
+                    json!({ "count": ids.len(), "extensionIds": ids }),
+                );
+            }
+        }
+
+        json!({
+            "totalExtensions": self.entries.len(),
+            "byJurisdictionTier": by_tier,
+            "byConnectorCategory": by_cat,
+            "byDataFormat": by_fmt,
+        })
+    }
+}
+
 /// Result of an Admin Console `test_fetch` diagnostic run against a single extension.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -344,12 +821,12 @@ pub struct ExtensionTestFetchResult {
 struct HubInnerState {
     modules: BTreeMap<String, SystemModuleRow>,
     extensions: BTreeMap<String, RegisteredExtensionEntry>,
-    cached_snapshot: Option<Arc<RuntimeRegistrySnapshot>>,
 }
 
 /// Central thread-safe registry & execution hub for Open Estate's modular data extensions.
 pub struct ExtensionHub {
     state: RwLock<HubInnerState>,
+    snapshot_cell: RwLock<Arc<RegistrySnapshot>>,
     generation: AtomicU64,
     http_cache: Cache<String, CachedEnvelopeEntry>,
     shared_cache: crate::extensions::shared_cache::SharedExtensionCache,
@@ -366,15 +843,17 @@ impl ExtensionHub {
         &GLOBAL_EXTENSION_HUB
     }
 
-    /// Creates a fresh `ExtensionHub` preloaded with `DEFAULT_SYSTEM_MODULES`, all embedded
+    /// Creates a fresh `ExtensionHub` preloaded with `DEFAULT_SYSTEM_MODULES`, all cached embedded
     /// built-in extensions, and any additional `extensions/*/manifest.yaml` packages on disk.
     pub fn new_default() -> Arc<Self> {
+        let initial_state = HubInnerState {
+            modules: seed_default_modules_map(),
+            extensions: BTreeMap::new(),
+        };
+        let initial_snap = Arc::new(build_snapshot_from_state(&initial_state, 1));
         let hub = Arc::new(Self {
-            state: RwLock::new(HubInnerState {
-                modules: seed_default_modules_map(),
-                extensions: BTreeMap::new(),
-                cached_snapshot: None,
-            }),
+            state: RwLock::new(initial_state),
+            snapshot_cell: RwLock::new(initial_snap),
             generation: AtomicU64::new(1),
             http_cache: Cache::builder()
                 .max_capacity(4_096)
@@ -392,9 +871,9 @@ impl ExtensionHub {
         hub.load_builtin_packages();
         let default_dir = Path::new("extensions");
         if default_dir.is_dir() {
-            let _ = hub.load_directory(default_dir, true);
+            let _ = hub.load_directory_internal(default_dir, true, true, false);
         }
-        hub.install_builtin_native_adapters();
+        hub.install_builtin_native_adapters_no_refresh();
         hub.refresh_snapshot();
         hub
     }
@@ -420,8 +899,8 @@ impl ExtensionHub {
         ACTIVE_HOOK_STATE.scope(state, fut)
     }
 
-    /// Returns the task-local [`crate::web::server::AppState`] bound via `ExtensionHub::with_hook_state`
-    /// (or fallback `hook_state_builder` on the global hub).
+    /// Returns the active task-local `AppState` when executing inside `with_hook_state`
+    /// or native extension adapter dispatch (or fallback `hook_state_builder` on the global hub).
     pub fn active_hook_state() -> Option<crate::web::server::AppState> {
         ACTIVE_HOOK_STATE
             .try_with(Clone::clone)
@@ -459,9 +938,17 @@ impl ExtensionHub {
 
     /// Registers native adapters provided by `ServerExtensionHooks::extra_extension_adapters`.
     pub fn register_hook_adapters(&self, adapters: Vec<Arc<dyn DataExtensionAdapter>>) {
-        for adapter in adapters {
-            self.register_native_adapter(adapter);
+        if adapters.is_empty() {
+            return;
         }
+        {
+            let mut guard = self.state.write().expect("ExtensionHub write lock");
+            let now = now_iso();
+            for adapter in adapters {
+                insert_native_adapter_entry(&mut guard.extensions, adapter, &now);
+            }
+        }
+        self.bump_and_refresh();
     }
 
     /// Returns all registered manifests whose `execution_mode` is `"lazy"`.
@@ -572,173 +1059,269 @@ impl ExtensionHub {
     pub fn from_dir(dir: &Path) -> Result<Arc<Self>> {
         let hub = Self::new_default();
         if dir.is_dir() {
-            hub.load_directory(dir, true)?;
-            hub.install_builtin_native_adapters();
+            hub.load_directory_internal(dir, true, false, false)?;
+            hub.install_builtin_native_adapters_no_refresh();
             hub.refresh_snapshot();
         }
         Ok(hub)
     }
 
-    fn install_builtin_native_adapters(&self) {
-        use crate::modules::broadband_live::FccBroadbandBdcAdapter;
+    fn builtin_native_adapters_list() -> Vec<Arc<dyn DataExtensionAdapter>> {
+        use crate::modules::broadband_live::{FccBroadbandBdcAdapter, FccMobile5gAdapter};
+        use crate::modules::ev_electrification::EvFastChargersElectrificationAdapter;
+        use crate::modules::fire_protection::FireProtectionHydrantsAdapter;
         use crate::modules::live_tariffs::all_live_tariff_adapters;
+        use crate::modules::noise_feeds::all_noise_feed_adapters;
+        use crate::modules::pipeline_easements::PipelineRowEasementsAdapter;
+        use crate::modules::rainfall_climatology::RainfallClimatologyAdapter;
+        use crate::modules::soil_moisture::UsdaSoilMoistureAdapter;
+        use crate::modules::solar::SolarPotentialAdapter;
         use crate::modules::title_legal_radar::TitleUnderwriterRatesAdapter;
+        use crate::modules::weather::NwsWeatherAdapter;
         use crate::property::permit_pipeline::{
             CampbellMgoPermitsAdapter, MunicipalOpenDataPermitsAdapter,
             PermitCodeEnforcementExtractorAdapter, PermitMepExtractorAdapter,
             PermitRemodelExtractorAdapter, PermitRoofExtractorAdapter, PermitSolarExtractorAdapter,
         };
 
+        let mut list: Vec<Arc<dyn DataExtensionAdapter>> = Vec::with_capacity(32);
         // Stage-1 Open-Data Permit Fetchers & Stage-2 Linked Extractors
-        self.register_native_adapter(Arc::new(CampbellMgoPermitsAdapter));
-        self.register_native_adapter(Arc::new(MunicipalOpenDataPermitsAdapter));
-        self.register_native_adapter(Arc::new(PermitRoofExtractorAdapter));
-        self.register_native_adapter(Arc::new(PermitSolarExtractorAdapter));
-        self.register_native_adapter(Arc::new(PermitMepExtractorAdapter));
-        self.register_native_adapter(Arc::new(PermitRemodelExtractorAdapter));
-        self.register_native_adapter(Arc::new(PermitCodeEnforcementExtractorAdapter));
+        list.push(Arc::new(CampbellMgoPermitsAdapter));
+        list.push(Arc::new(MunicipalOpenDataPermitsAdapter));
+        list.push(Arc::new(PermitRoofExtractorAdapter));
+        list.push(Arc::new(PermitSolarExtractorAdapter));
+        list.push(Arc::new(PermitMepExtractorAdapter));
+        list.push(Arc::new(PermitRemodelExtractorAdapter));
+        list.push(Arc::new(PermitCodeEnforcementExtractorAdapter));
 
         // Real Live Utility & Open Broadband Adapters
-        for adapter in all_live_tariff_adapters() {
-            self.register_native_adapter(adapter);
+        list.extend(all_live_tariff_adapters());
+        list.push(Arc::new(FccBroadbandBdcAdapter));
+        list.push(Arc::new(FccMobile5gAdapter));
+        list.push(Arc::new(FireProtectionHydrantsAdapter));
+        list.push(Arc::new(TitleUnderwriterRatesAdapter));
+        list.push(Arc::new(NwsWeatherAdapter));
+        list.push(Arc::new(SolarPotentialAdapter));
+        list.push(Arc::new(EvFastChargersElectrificationAdapter));
+        list.push(Arc::new(PipelineRowEasementsAdapter));
+        list.extend(all_noise_feed_adapters());
+        list.push(Arc::new(
+            crate::modules::tod_cell_radar::PlanningRezoningRadarAdapter,
+        ));
+        list.push(Arc::new(
+            crate::modules::tod_cell_radar::FccAsrCellTowersAdapter,
+        ));
+        list.push(Arc::new(
+            crate::modules::closing_contingency::ClosingContingencyCalendarAdapter,
+        ));
+        list.push(Arc::new(
+            crate::modules::market_liquidity_stress::MarketLiquidityStressAdapter,
+        ));
+        list.push(Arc::new(RainfallClimatologyAdapter));
+        list.push(Arc::new(UsdaSoilMoistureAdapter));
+        list
+    }
+
+    fn install_builtin_native_adapters_no_refresh(&self) {
+        let adapters = Self::builtin_native_adapters_list();
+        let now = now_iso();
+        let mut guard = self.state.write().expect("ExtensionHub write lock");
+        for adapter in adapters {
+            insert_native_adapter_entry(&mut guard.extensions, adapter, &now);
         }
-        self.register_native_adapter(Arc::new(FccBroadbandBdcAdapter));
-        self.register_native_adapter(Arc::new(TitleUnderwriterRatesAdapter));
     }
 
     fn load_builtin_packages(&self) {
         let now = now_iso();
         let mut guard = self.state.write().expect("ExtensionHub write lock");
-        for spec in EMBEDDED_BUILTINS {
-            if let Ok(pkg) =
-                parse_and_validate_package(spec.manifest_yaml, spec.openapi_yaml, Some(true))
-            {
-                let enabled = pkg.doc.enabled_by_default;
-                let priority = pkg.doc.priority;
-                let manifest = pkg.to_manifest_proto(enabled, priority);
-                let health = if pkg.has_catalog_rules() && !pkg.has_live_http() {
-                    "healthy"
-                } else {
-                    "ready"
-                };
-                let manifest_yaml = Some(pkg.manifest_yaml.clone());
-                let openapi_yaml = pkg.openapi_yaml.clone();
-                guard.extensions.insert(
-                    pkg.extension_id.clone(),
-                    RegisteredExtensionEntry {
-                        extension_id: pkg.extension_id.clone(),
-                        manifest,
-                        driver_slot: Arc::new(ExtensionDriverSlot::DeclarativeOrOpenApi(Arc::new(
-                            pkg,
-                        ))),
-                        manifest_yaml,
-                        openapi_yaml,
-                        config_json: "{}".to_string(),
-                        health_status: health.to_string(),
-                        last_checked_at: None,
-                        installed_at: now.clone(),
-                        updated_at: now.clone(),
-                    },
-                );
-            }
+        for (_id, pkg_arc) in PARSED_EMBEDDED_BUILTINS.iter() {
+            let pkg = pkg_arc.as_ref();
+            let enabled = pkg.doc.enabled_by_default;
+            let priority = pkg.doc.priority;
+            let manifest = pkg.to_manifest_proto(enabled, priority);
+            let health = if pkg.has_catalog_rules() && !pkg.has_live_http() {
+                "healthy"
+            } else {
+                "ready"
+            };
+            let manifest_yaml = Some(pkg.manifest_yaml.clone());
+            let openapi_yaml = pkg.openapi_yaml.clone();
+            let compiled_geo_scope = pkg.compiled_geo_scope.clone();
+            let jurisdiction_tier = pkg.jurisdiction_tier;
+            let connector_category = pkg.connector_category;
+            let data_formats = pkg.data_formats.clone();
+            guard.extensions.insert(
+                pkg.extension_id.clone(),
+                RegisteredExtensionEntry {
+                    extension_id: pkg.extension_id.clone(),
+                    manifest,
+                    driver_slot: Arc::new(ExtensionDriverSlot::DeclarativeOrOpenApi(Arc::clone(
+                        pkg_arc,
+                    ))),
+                    compiled_geo_scope,
+                    jurisdiction_tier,
+                    connector_category,
+                    data_formats,
+                    manifest_yaml,
+                    openapi_yaml,
+                    config_json: "{}".to_string(),
+                    health_status: health.to_string(),
+                    last_checked_at: None,
+                    installed_at: now.clone(),
+                    updated_at: now.clone(),
+                },
+            );
         }
     }
 
     /// Scans `dir/*/manifest.yaml` (and optional sibling `openapi.yaml`) and registers packages.
     pub fn load_directory(&self, dir: &Path, mark_builtin: bool) -> Result<usize> {
+        self.load_directory_internal(dir, mark_builtin, false, true)
+    }
+
+    fn load_directory_internal(
+        &self,
+        dir: &Path,
+        mark_builtin: bool,
+        skip_unchanged_embedded: bool,
+        refresh_after: bool,
+    ) -> Result<usize> {
         let entries = match std::fs::read_dir(dir) {
             Ok(rd) => rd,
             Err(_) => return Ok(0),
         };
         let now = now_iso();
         let mut loaded = 0usize;
-        let mut parsed_list = Vec::new();
+        let mut parsed_list: Vec<Arc<ParsedExtensionPackage>> = Vec::new();
 
         for ent in entries.flatten() {
             let sub = ent.path();
             if !sub.is_dir() {
                 continue;
             }
+            if mark_builtin && skip_unchanged_embedded {
+                if let Some(dir_name) = sub.file_name().and_then(|n| n.to_str()) {
+                    if EMBEDDED_BUILTIN_BY_ID.contains_key(dir_name) {
+                        continue;
+                    }
+                }
+            }
             let manifest_path = sub.join("manifest.yaml");
             if !manifest_path.is_file() {
                 continue;
             }
-            let manifest_yaml = std::fs::read_to_string(&manifest_path).with_context(|| {
-                format!("Failed reading {}", manifest_path.display())
-            })?;
+            let manifest_yaml = std::fs::read_to_string(&manifest_path)
+                .with_context(|| format!("Failed reading {}", manifest_path.display()))?;
             let openapi_path = sub.join("openapi.yaml");
             let openapi_yaml = if openapi_path.is_file() {
-                Some(std::fs::read_to_string(&openapi_path).with_context(|| {
-                    format!("Failed reading {}", openapi_path.display())
-                })?)
+                Some(
+                    std::fs::read_to_string(&openapi_path)
+                        .with_context(|| format!("Failed reading {}", openapi_path.display()))?,
+                )
             } else {
                 None
             };
+
+            if mark_builtin {
+                if let Some(dir_name) = sub.file_name().and_then(|n| n.to_str()) {
+                    if let Some((spec, cached_pkg)) = EMBEDDED_BUILTIN_BY_ID.get(dir_name) {
+                        if manifest_yaml == spec.manifest_yaml
+                            && openapi_yaml.as_deref() == spec.openapi_yaml
+                        {
+                            if skip_unchanged_embedded {
+                                continue;
+                            }
+                            parsed_list.push(Arc::clone(cached_pkg));
+                            continue;
+                        }
+                    }
+                }
+            }
+
             let pkg = parse_and_validate_package(
                 &manifest_yaml,
                 openapi_yaml.as_deref(),
                 Some(mark_builtin),
             )
             .with_context(|| format!("Invalid extension package in {}", sub.display()))?;
-            parsed_list.push(pkg);
+            parsed_list.push(Arc::new(pkg));
         }
 
         if !parsed_list.is_empty() {
-            let mut guard = self.state.write().expect("ExtensionHub write lock");
-            for pkg in parsed_list {
-                let preserve = guard
-                    .extensions
-                    .get(&pkg.extension_id)
-                    .map(|e| (e.manifest.enabled, e.manifest.priority, e.installed_at.clone()));
-                let (enabled, priority, installed_at) =
-                    preserve.unwrap_or((pkg.doc.enabled_by_default, pkg.doc.priority, now.clone()));
-                let manifest = pkg.to_manifest_proto(enabled, priority);
-                let health = if pkg.has_catalog_rules() && !pkg.has_live_http() {
-                    "healthy"
-                } else {
-                    "ready"
-                };
-                let manifest_yaml = Some(pkg.manifest_yaml.clone());
-                let openapi_yaml = pkg.openapi_yaml.clone();
-                let preserve_native_slot = if pkg.driver == DriverKind::DriverNativeAdapter {
-                    guard.extensions.get(&pkg.extension_id).and_then(|existing| {
-                        match existing.driver_slot.as_ref() {
-                            ExtensionDriverSlot::Native(_) => {
-                                Some((Arc::clone(&existing.driver_slot), existing.health_status.clone()))
-                            }
-                            _ => None,
-                        }
-                    })
-                } else {
-                    None
-                };
-                let (driver_slot, final_health) = match preserve_native_slot {
-                    Some((slot, prev_health)) => (slot, prev_health),
-                    None => (
-                        Arc::new(ExtensionDriverSlot::DeclarativeOrOpenApi(Arc::new(pkg))),
-                        health.to_string(),
-                    ),
-                };
-                let ext_id = manifest.extension_id.clone();
-                guard.extensions.insert(
-                    ext_id.clone(),
-                    RegisteredExtensionEntry {
-                        extension_id: ext_id,
-                        manifest,
-                        driver_slot,
-                        manifest_yaml,
-                        openapi_yaml,
-                        config_json: "{}".to_string(),
-                        health_status: final_health,
-                        last_checked_at: None,
-                        installed_at,
-                        updated_at: now.clone(),
-                    },
-                );
-                loaded += 1;
+            {
+                let mut guard = self.state.write().expect("ExtensionHub write lock");
+                for pkg_arc in parsed_list {
+                    let pkg = pkg_arc.as_ref();
+                    let preserve = guard.extensions.get(&pkg.extension_id).map(|e| {
+                        (
+                            e.manifest.enabled,
+                            e.manifest.priority,
+                            e.installed_at.clone(),
+                        )
+                    });
+                    let (enabled, priority, installed_at) = preserve
+                        .unwrap_or((pkg.doc.enabled_by_default, pkg.doc.priority, now.clone()));
+                    let manifest = pkg.to_manifest_proto(enabled, priority);
+                    let health = if pkg.has_catalog_rules() && !pkg.has_live_http() {
+                        "healthy"
+                    } else {
+                        "ready"
+                    };
+                    let manifest_yaml = Some(pkg.manifest_yaml.clone());
+                    let openapi_yaml = pkg.openapi_yaml.clone();
+                    let compiled_geo_scope = pkg.compiled_geo_scope.clone();
+                    let jurisdiction_tier = pkg.jurisdiction_tier;
+                    let connector_category = pkg.connector_category;
+                    let data_formats = pkg.data_formats.clone();
+                    let preserve_native_slot = if pkg.driver == DriverKind::DriverNativeAdapter {
+                        guard
+                            .extensions
+                            .get(&pkg.extension_id)
+                            .and_then(|existing| match existing.driver_slot.as_ref() {
+                                ExtensionDriverSlot::Native(_) => Some((
+                                    Arc::clone(&existing.driver_slot),
+                                    existing.health_status.clone(),
+                                )),
+                                _ => None,
+                            })
+                    } else {
+                        None
+                    };
+                    let (driver_slot, final_health) = match preserve_native_slot {
+                        Some((slot, prev_health)) => (slot, prev_health),
+                        None => (
+                            Arc::new(ExtensionDriverSlot::DeclarativeOrOpenApi(pkg_arc)),
+                            health.to_string(),
+                        ),
+                    };
+                    let ext_id = manifest.extension_id.clone();
+                    guard.extensions.insert(
+                        ext_id.clone(),
+                        RegisteredExtensionEntry {
+                            extension_id: ext_id,
+                            manifest,
+                            driver_slot,
+                            compiled_geo_scope,
+                            jurisdiction_tier,
+                            connector_category,
+                            data_formats,
+                            manifest_yaml,
+                            openapi_yaml,
+                            config_json: "{}".to_string(),
+                            health_status: final_health,
+                            last_checked_at: None,
+                            installed_at,
+                            updated_at: now.clone(),
+                        },
+                    );
+                    loaded += 1;
+                }
             }
-            guard.cached_snapshot = None;
-            self.generation.fetch_add(1, Ordering::SeqCst);
+            if refresh_after {
+                self.bump_and_refresh();
+            } else {
+                self.generation.fetch_add(1, Ordering::SeqCst);
+            }
         }
 
         Ok(loaded)
@@ -751,40 +1334,44 @@ impl ExtensionHub {
 
     fn bump_and_refresh(&self) -> Arc<RuntimeRegistrySnapshot> {
         self.generation.fetch_add(1, Ordering::SeqCst);
-        self.refresh_snapshot()
+        Arc::clone(&self.refresh_snapshot().runtime)
     }
 
-    fn refresh_snapshot(&self) -> Arc<RuntimeRegistrySnapshot> {
+    fn refresh_snapshot(&self) -> Arc<RegistrySnapshot> {
         let gen_v = self.generation.load(Ordering::SeqCst);
-        let mut guard = self.state.write().expect("ExtensionHub write lock");
-        let snap = Arc::new(build_snapshot_from_state(&guard, gen_v));
-        guard.cached_snapshot = Some(Arc::clone(&snap));
+        let snap = {
+            let guard = self.state.read().expect("ExtensionHub read lock");
+            Arc::new(build_snapshot_from_state(&guard, gen_v))
+        };
+        let mut cell = self
+            .snapshot_cell
+            .write()
+            .expect("ExtensionHub snapshot_cell write");
+        *cell = Arc::clone(&snap);
         snap
     }
 
+    /// Returns an immutable `Arc<RegistrySnapshot>` with precomputed `GeoIndex`, categorization
+    /// tables, and Kahn topological `ExecutionWavePlan`s.
+    #[inline]
+    pub fn registry_snapshot(&self) -> Arc<RegistrySnapshot> {
+        Arc::clone(
+            &*self
+                .snapshot_cell
+                .read()
+                .expect("ExtensionHub snapshot_cell read"),
+        )
+    }
+
     /// Returns an immutable `Arc<RuntimeRegistrySnapshot>` for fast lock-free per-request checks.
+    #[inline]
     pub fn snapshot(&self) -> Arc<RuntimeRegistrySnapshot> {
-        {
-            let guard = self.state.read().expect("ExtensionHub read lock");
-            if let Some(ref snap) = guard.cached_snapshot {
-                return Arc::clone(snap);
-            }
-        }
-        self.refresh_snapshot()
+        Arc::clone(&self.registry_snapshot().runtime)
     }
 
     /// Checks whether a core `system_module` (e.g. `"utilities_broadband"`) is enabled.
     pub fn is_module_enabled(&self, module_id: &str) -> bool {
-        let clean = module_id.trim();
-        if clean == "geocode" {
-            return true;
-        }
-        let guard = self.state.read().expect("ExtensionHub read lock");
-        guard
-            .modules
-            .get(clean)
-            .map(|m| m.enabled)
-            .unwrap_or(true)
+        self.registry_snapshot().is_module_enabled(module_id)
     }
 
     /// Enables or disables a core `system_module` at runtime and bumps `generation_version`.
@@ -798,7 +1385,6 @@ impl ExtensionHub {
             if let Some(m) = guard.modules.get_mut(clean) {
                 m.enabled = enabled;
                 m.updated_at = now_iso();
-                guard.cached_snapshot = None;
                 true
             } else {
                 false
@@ -812,29 +1398,21 @@ impl ExtensionHub {
 
     /// Checks whether a specific `extension_id` is currently registered and enabled.
     pub fn is_enabled(&self, extension_id: &str) -> bool {
-        let guard = self.state.read().expect("ExtensionHub read lock");
-        guard
-            .extensions
-            .get(extension_id.trim())
-            .map(|e| e.manifest.enabled)
-            .unwrap_or(false)
+        self.registry_snapshot()
+            .is_extension_enabled_fast(extension_id)
     }
 
     /// Enables or disables an extension at runtime (`zero restart`).
     pub fn enable(&self, extension_id: &str, enabled: bool) -> Result<ExtensionManifestProto> {
         let updated = {
             let mut guard = self.state.write().expect("ExtensionHub write lock");
-            let manifest = {
-                let entry = guard
-                    .extensions
-                    .get_mut(extension_id.trim())
-                    .ok_or_else(|| anyhow!("Extension '{}' not found", extension_id.trim()))?;
-                entry.manifest.enabled = enabled;
-                entry.updated_at = now_iso();
-                entry.manifest.clone()
-            };
-            guard.cached_snapshot = None;
-            manifest
+            let entry = guard
+                .extensions
+                .get_mut(extension_id.trim())
+                .ok_or_else(|| anyhow!("Extension '{}' not found", extension_id.trim()))?;
+            entry.manifest.enabled = enabled;
+            entry.updated_at = now_iso();
+            entry.manifest.clone()
         };
         self.bump_and_refresh();
         Ok(updated)
@@ -849,17 +1427,13 @@ impl ExtensionHub {
         let clamped = priority.clamp(0, 10_000);
         let updated = {
             let mut guard = self.state.write().expect("ExtensionHub write lock");
-            let manifest = {
-                let entry = guard
-                    .extensions
-                    .get_mut(extension_id.trim())
-                    .ok_or_else(|| anyhow!("Extension '{}' not found", extension_id.trim()))?;
-                entry.manifest.priority = clamped;
-                entry.updated_at = now_iso();
-                entry.manifest.clone()
-            };
-            guard.cached_snapshot = None;
-            manifest
+            let entry = guard
+                .extensions
+                .get_mut(extension_id.trim())
+                .ok_or_else(|| anyhow!("Extension '{}' not found", extension_id.trim()))?;
+            entry.manifest.priority = clamped;
+            entry.updated_at = now_iso();
+            entry.manifest.clone()
         };
         self.bump_and_refresh();
         Ok(updated)
@@ -913,6 +1487,10 @@ impl ExtensionHub {
             };
             let manifest_yaml_owned = Some(pkg_mut.manifest_yaml.clone());
             let openapi_yaml_owned = pkg_mut.openapi_yaml.clone();
+            let compiled_geo_scope = pkg_mut.compiled_geo_scope.clone();
+            let jurisdiction_tier = pkg_mut.jurisdiction_tier;
+            let connector_category = pkg_mut.connector_category;
+            let data_formats = pkg_mut.data_formats.clone();
             guard.extensions.insert(
                 pkg_mut.extension_id.clone(),
                 RegisteredExtensionEntry {
@@ -921,6 +1499,10 @@ impl ExtensionHub {
                     driver_slot: Arc::new(ExtensionDriverSlot::DeclarativeOrOpenApi(Arc::new(
                         pkg_mut,
                     ))),
+                    compiled_geo_scope,
+                    jurisdiction_tier,
+                    connector_category,
+                    data_formats,
                     manifest_yaml: manifest_yaml_owned,
                     openapi_yaml: openapi_yaml_owned,
                     config_json: cfg,
@@ -930,7 +1512,6 @@ impl ExtensionHub {
                     updated_at: now,
                 },
             );
-            guard.cached_snapshot = None;
             manifest
         };
 
@@ -975,6 +1556,10 @@ impl ExtensionHub {
             };
             let manifest_yaml_owned = Some(pkg_mut.manifest_yaml.clone());
             let openapi_yaml_owned = pkg_mut.openapi_yaml.clone();
+            let compiled_geo_scope = pkg_mut.compiled_geo_scope.clone();
+            let jurisdiction_tier = pkg_mut.jurisdiction_tier;
+            let connector_category = pkg_mut.connector_category;
+            let data_formats = pkg_mut.data_formats.clone();
             guard.extensions.insert(
                 pkg_mut.extension_id.clone(),
                 RegisteredExtensionEntry {
@@ -983,6 +1568,10 @@ impl ExtensionHub {
                     driver_slot: Arc::new(ExtensionDriverSlot::DeclarativeOrOpenApi(Arc::new(
                         pkg_mut,
                     ))),
+                    compiled_geo_scope,
+                    jurisdiction_tier,
+                    connector_category,
+                    data_formats,
                     manifest_yaml: manifest_yaml_owned,
                     openapi_yaml: openapi_yaml_owned,
                     config_json: "{}".to_string(),
@@ -992,7 +1581,6 @@ impl ExtensionHub {
                     updated_at: now,
                 },
             );
-            guard.cached_snapshot = None;
             manifest
         };
 
@@ -1012,11 +1600,7 @@ impl ExtensionHub {
                     ));
                 }
             }
-            let r = guard.extensions.remove(clean).is_some();
-            if r {
-                guard.cached_snapshot = None;
-            }
-            r
+            guard.extensions.remove(clean).is_some()
         };
         if removed {
             self.bump_and_refresh();
@@ -1026,135 +1610,17 @@ impl ExtensionHub {
 
     /// Registers a compiled native Rust `DataExtensionAdapter` (`DRIVER_NATIVE_ADAPTER`).
     pub fn register_native_adapter(&self, adapter: Arc<dyn DataExtensionAdapter>) {
-        let mut manifest = adapter.manifest();
         let now = now_iso();
         {
             let mut guard = self.state.write().expect("ExtensionHub write lock");
-            let (existing_manifest_yaml, existing_openapi_yaml, preserved_cfg, installed_at) =
-                if let Some(prev) = guard.extensions.get(&manifest.extension_id) {
-                    if prev.manifest.builtin {
-                        manifest.builtin = true;
-                        manifest.enabled = prev.manifest.enabled;
-                        manifest.priority = prev.manifest.priority;
-                    }
-                    if manifest.depends_on.is_empty() && !prev.manifest.depends_on.is_empty() {
-                        manifest.depends_on = prev.manifest.depends_on.clone();
-                    }
-                    if manifest.input_from_domains.is_empty()
-                        && !prev.manifest.input_from_domains.is_empty()
-                    {
-                        manifest.input_from_domains = prev.manifest.input_from_domains.clone();
-                    }
-                    if manifest.upstream_require_mode.is_empty()
-                        && !prev.manifest.upstream_require_mode.is_empty()
-                    {
-                        manifest.upstream_require_mode =
-                            prev.manifest.upstream_require_mode.clone();
-                    }
-                    if manifest.tier == 0 && prev.manifest.tier != 0 {
-                        manifest.tier = prev.manifest.tier;
-                    }
-                    if manifest.license_class == 0 && prev.manifest.license_class != 0 {
-                        manifest.license_class = prev.manifest.license_class;
-                    }
-                    if manifest.execution_mode == 0 && prev.manifest.execution_mode != 0 {
-                        manifest.execution_mode = prev.manifest.execution_mode;
-                    }
-                    if prev.manifest.requires_manual_approval {
-                        manifest.requires_manual_approval = true;
-                    }
-                    if manifest.min_plan_tier.trim().is_empty()
-                        && !prev.manifest.min_plan_tier.trim().is_empty()
-                    {
-                        manifest.min_plan_tier = prev.manifest.min_plan_tier.clone();
-                    }
-                    if manifest.metering.is_none() && prev.manifest.metering.is_some() {
-                        manifest.metering = prev.manifest.metering.clone();
-                    }
-                    if manifest.section_id.trim().is_empty()
-                        && !prev.manifest.section_id.trim().is_empty()
-                    {
-                        manifest.section_id = prev.manifest.section_id.clone();
-                    }
-                    if manifest.enabled_by_default.is_none() {
-                        manifest.enabled_by_default = prev.manifest.enabled_by_default;
-                    }
-                    if manifest.llm.is_none() {
-                        manifest.llm = prev.manifest.llm.clone();
-                    }
-                    if manifest.sharing.is_none() {
-                        manifest.sharing = prev.manifest.sharing.clone();
-                    }
-                    if manifest.source_attribution.is_none()
-                        && prev.manifest.source_attribution.is_some()
-                    {
-                        manifest.source_attribution = prev.manifest.source_attribution.clone();
-                    }
-                    if manifest
-                        .homepage_url
-                        .as_deref()
-                        .map(|s| s.trim().is_empty())
-                        .unwrap_or(true)
-                        && prev
-                            .manifest
-                            .homepage_url
-                            .as_deref()
-                            .map(|s| !s.trim().is_empty())
-                            .unwrap_or(false)
-                    {
-                        manifest.homepage_url = prev.manifest.homepage_url.clone();
-                    }
-                    if manifest
-                        .documentation_url
-                        .as_deref()
-                        .map(|s| s.trim().is_empty())
-                        .unwrap_or(true)
-                        && prev
-                            .manifest
-                            .documentation_url
-                            .as_deref()
-                            .map(|s| !s.trim().is_empty())
-                            .unwrap_or(false)
-                    {
-                        manifest.documentation_url = prev.manifest.documentation_url.clone();
-                    }
-                    (
-                        prev.manifest_yaml.clone(),
-                        prev.openapi_yaml.clone(),
-                        prev.config_json.clone(),
-                        prev.installed_at.clone(),
-                    )
-                } else {
-                    (None, None, "{}".to_string(), now.clone())
-                };
-            guard.extensions.insert(
-                manifest.extension_id.clone(),
-                RegisteredExtensionEntry {
-                    extension_id: manifest.extension_id.clone(),
-                    manifest,
-                    driver_slot: Arc::new(ExtensionDriverSlot::Native(adapter)),
-                    manifest_yaml: existing_manifest_yaml,
-                    openapi_yaml: existing_openapi_yaml,
-                    config_json: preserved_cfg,
-                    health_status: "healthy".to_string(),
-                    last_checked_at: None,
-                    installed_at,
-                    updated_at: now,
-                },
-            );
-            guard.cached_snapshot = None;
+            insert_native_adapter_entry(&mut guard.extensions, adapter, &now);
         }
         self.bump_and_refresh();
     }
 
     /// Lists all registered `ExtensionManifestProto` messages sorted by `(domain, -priority, id)`.
     pub fn list_manifests(&self) -> Vec<ExtensionManifestProto> {
-        let guard = self.state.read().expect("ExtensionHub read lock");
-        let mut out: Vec<ExtensionManifestProto> = guard
-            .extensions
-            .values()
-            .map(|e| e.manifest.clone())
-            .collect();
+        let mut out = self.snapshot().manifests.clone();
         out.sort_by(|a, b| {
             a.domain
                 .cmp(&b.domain)
@@ -1182,14 +1648,18 @@ impl ExtensionHub {
             "usgs_asce7" => "usgs_asce7_seismic",
             other => other,
         };
-        let manifest_opt = {
-            let guard = self.state.read().expect("ExtensionHub read lock");
-            guard.extensions.get(clean_id).map(|e| e.manifest.clone())
-        }
-        .or_else(|| {
-            let guard = Self::global().state.read().expect("ExtensionHub read lock");
-            guard.extensions.get(clean_id).map(|e| e.manifest.clone())
-        });
+        let snap = self.registry_snapshot();
+        let manifest_opt = snap
+            .entry_index_by_id
+            .get(clean_id)
+            .map(|&(idx, _)| snap.entries[idx].manifest.clone())
+            .or_else(|| {
+                let gsnap = Self::global().registry_snapshot();
+                gsnap
+                    .entry_index_by_id
+                    .get(clean_id)
+                    .map(|&(idx, _)| gsnap.entries[idx].manifest.clone())
+            });
         let manifest = manifest_opt?;
         crate::extensions::yaml_runner::resolve_manifest_proto_reference_url(
             &manifest, rule_id, query,
@@ -1273,6 +1743,12 @@ impl ExtensionHub {
             .map(|e| entry_to_admin_json(e, env, true))
     }
 
+    /// Pre-indexed orthogonal categorization summary (`byJurisdictionTier`, `byConnectorCategory`,
+    /// `byDataFormat`) read directly from the immutable [`RegistrySnapshot`].
+    pub fn catalog_categorization_summary(&self) -> Value {
+        self.registry_snapshot().categorization_summary()
+    }
+
     /// Synchronously resolves enabled extensions for `domain` in DAG topological order.
     pub fn execute_domain_sync(
         &self,
@@ -1308,6 +1784,65 @@ impl ExtensionHub {
     ) -> Vec<ExtensionEnvelopeProto> {
         let (envelopes, _, _) = self.execute_waves_async(Some(&[domain]), query, http, env).await;
         filter_envelopes_for_domains(&envelopes, Some(&[domain]))
+    }
+
+    /// Executes a single enabled extension by ID through authorization, metering, and
+    /// `SharedExtensionCache`, returning an empty vector in O(1) if disabled, absent, or
+    /// out of `geo_scope` (before entering metering, authorization, cache, or DB).
+    pub async fn execute_enabled_extension(
+        &self,
+        extension_id: &str,
+        query: &ExtensionQueryProto,
+        http: &HttpClient,
+        env: &EnvConfig,
+    ) -> Result<Vec<ExtensionEnvelopeProto>> {
+        let snap = self.registry_snapshot();
+        let Some(&(entry_idx, active)) = snap.entry_index_by_id.get(extension_id.trim()) else {
+            return Ok(Vec::new());
+        };
+        if !active {
+            return Ok(Vec::new());
+        }
+        let entry = &snap.entries[entry_idx];
+        let q_norm = NormalizedGeoQuery::from_proto(query);
+        if entry.compiled_geo_scope.match_specificity(&q_norm).is_none() {
+            return Ok(Vec::new());
+        }
+
+        let parent_inv_id = crate::metering::current_invocation_id();
+        let ctx = Self::invocation_ctx_for(
+            &entry.manifest,
+            InvocationTrigger::UserRequest,
+            parent_inv_id,
+            Some(query),
+        );
+        let (res, event) = MeterScope::run(ctx.clone(), async {
+            let dec = self.authorize_invocation(&ctx, &entry.manifest).await;
+            if !matches!(dec, InvocationDecision::Allow) {
+                mark_denied();
+                return Ok(Vec::new());
+            }
+            let exec_res = self
+                .execute_single_entry_internal(entry, query, &[], http, env, false)
+                .await;
+            match &exec_res {
+                Err(_) => mark_failed(),
+                Ok(Some(envs))
+                    if !envs.is_empty()
+                        && envs.iter().all(|e| e.cached)
+                        && crate::metering::current_dims()
+                            .map(|d| d.external_api_calls == 0)
+                            .unwrap_or(false) =>
+                {
+                    mark_cached();
+                }
+                _ => {}
+            }
+            exec_res.map(|opt| opt.unwrap_or_default())
+        })
+        .await;
+        self.record_usage_event(&event).await;
+        res
     }
 
     /// Asynchronously executes enabled extensions across `domains` (or all domains when `None`)
@@ -1419,17 +1954,39 @@ impl ExtensionHub {
         HashMap<i32, u32>,
         HashMap<i32, Vec<String>>,
     ) {
-        let plan = self.plan_execution_waves(domains);
+        let snap = self.registry_snapshot();
+        let Some((plan, domain_filter_bits)) = snap.select_wave_plan(domains) else {
+            return (Vec::new(), HashMap::new(), HashMap::new());
+        };
+        let q_norm = NormalizedGeoQuery::from_proto(query);
+        let geo_bits = snap.geo_index.matching_bitset(&q_norm, &snap.entries);
+
         let mut envelopes_by_id: HashMap<String, Vec<ExtensionEnvelopeProto>> = HashMap::new();
         let mut invocation_ids_by_ext: HashMap<String, String> = HashMap::new();
         let mut succeeded_ids: HashSet<String> = HashSet::new();
         let mut max_wave_by_domain: HashMap<i32, u32> = HashMap::new();
         let mut skipped_by_domain: HashMap<i32, Vec<String>> = HashMap::new();
 
-        for (wave_idx, wave) in plan.waves.into_iter().enumerate() {
+        for (wave_idx, wave) in plan.waves.iter().enumerate() {
             for planned in wave {
-                let entry = planned.entry;
+                let word = planned.entry_idx >> 6;
+                let mask = 1u64 << (planned.entry_idx & 63);
+                if let Some(ref fbits) = domain_filter_bits {
+                    if (fbits[word] & mask) == 0 {
+                        continue;
+                    }
+                }
+                let entry = &planned.entry;
                 let dom = entry.manifest.domain;
+                // Strict O(1) geo_scope short-circuit BEFORE MeterScope, authorization, cache, or adapter calls.
+                if (geo_bits[word] & mask) == 0 {
+                    skipped_by_domain
+                        .entry(dom)
+                        .or_default()
+                        .push(entry.extension_id.clone());
+                    continue;
+                }
+
                 if let Some(upstream_envs) = collect_upstream_if_satisfied(
                     &entry.manifest,
                     &planned.upstream_ids,
@@ -1437,10 +1994,14 @@ impl ExtensionHub {
                     &envelopes_by_id,
                     &query.upstream_envelopes,
                 ) {
-                    let mut sub_query = query.clone();
-                    if sub_query.upstream_envelopes.is_empty() && !upstream_envs.is_empty() {
-                        sub_query.upstream_envelopes = upstream_envs.clone();
-                    }
+                    let sub_query: std::borrow::Cow<'_, ExtensionQueryProto> =
+                        if query.upstream_envelopes.is_empty() && !upstream_envs.is_empty() {
+                            let mut q_owned = query.clone();
+                            q_owned.upstream_envelopes = upstream_envs.clone();
+                            std::borrow::Cow::Owned(q_owned)
+                        } else {
+                            std::borrow::Cow::Borrowed(query)
+                        };
                     let trigger = if wave_idx > 0 && !planned.upstream_ids.is_empty() {
                         InvocationTrigger::Dependency
                     } else {
@@ -1454,7 +2015,7 @@ impl ExtensionHub {
                         &entry.manifest,
                         trigger,
                         parent_inv_id,
-                        Some(&sub_query),
+                        Some(sub_query.as_ref()),
                     );
                     let (exec_res, event) = MeterScope::run_sync(ctx.clone(), || {
                         let dec = Self::default_authorize_manifest(&ctx, &entry.manifest);
@@ -1465,17 +2026,25 @@ impl ExtensionHub {
                         let res = match entry.driver_slot.as_ref() {
                             ExtensionDriverSlot::DeclarativeOrOpenApi(pkg) => {
                                 if pkg.has_catalog_rules() {
-                                    Ok(execute_catalog_rules(pkg, &entry.manifest, &sub_query))
+                                    Ok(execute_catalog_rules(
+                                        pkg,
+                                        &entry.manifest,
+                                        sub_query.as_ref(),
+                                    ))
                                 } else if has_declared_upstream(&entry.manifest)
                                     && !pkg.has_live_http()
                                 {
-                                    execute_upstream_yaml_mapper(pkg, &entry.manifest, &sub_query)
+                                    execute_upstream_yaml_mapper(
+                                        pkg,
+                                        &entry.manifest,
+                                        sub_query.as_ref(),
+                                    )
                                 } else {
                                     Ok(Vec::new())
                                 }
                             }
                             ExtensionDriverSlot::Native(adapter) => {
-                                adapter.execute_with_upstream_sync(&sub_query, &upstream_envs)
+                                adapter.execute_with_upstream_sync(sub_query.as_ref(), &upstream_envs)
                             }
                         };
                         if res.is_err() {
@@ -1524,17 +2093,38 @@ impl ExtensionHub {
         HashMap<i32, u32>,
         HashMap<i32, Vec<String>>,
     ) {
-        let plan = self.plan_execution_waves(domains);
+        let snap = self.registry_snapshot();
+        let Some((plan, domain_filter_bits)) = snap.select_wave_plan(domains) else {
+            return (Vec::new(), HashMap::new(), HashMap::new());
+        };
+        let q_norm = NormalizedGeoQuery::from_proto(query);
+        let geo_bits = snap.geo_index.matching_bitset(&q_norm, &snap.entries);
+
         let mut envelopes_by_id: HashMap<String, Vec<ExtensionEnvelopeProto>> = HashMap::new();
         let mut invocation_ids_by_ext: HashMap<String, String> = HashMap::new();
         let mut succeeded_ids: HashSet<String> = HashSet::new();
         let mut max_wave_by_domain: HashMap<i32, u32> = HashMap::new();
         let mut skipped_by_domain: HashMap<i32, Vec<String>> = HashMap::new();
 
-        for (wave_idx, wave) in plan.waves.into_iter().enumerate() {
+        for (wave_idx, wave) in plan.waves.iter().enumerate() {
             let mut runnable = Vec::new();
             for planned in wave {
+                let word = planned.entry_idx >> 6;
+                let mask = 1u64 << (planned.entry_idx & 63);
+                if let Some(ref fbits) = domain_filter_bits {
+                    if (fbits[word] & mask) == 0 {
+                        continue;
+                    }
+                }
                 let dom = planned.entry.manifest.domain;
+                // Strict O(1) geo_scope short-circuit BEFORE MeterScope, authorization, cache, or UsageEvent!
+                if (geo_bits[word] & mask) == 0 {
+                    skipped_by_domain
+                        .entry(dom)
+                        .or_default()
+                        .push(planned.entry.extension_id.clone());
+                    continue;
+                }
                 if let Some(upstream_envs) = collect_upstream_if_satisfied(
                     &planned.entry.manifest,
                     &planned.upstream_ids,
@@ -1542,7 +2132,7 @@ impl ExtensionHub {
                     &envelopes_by_id,
                     &query.upstream_envelopes,
                 ) {
-                    runnable.push((planned.entry, planned.upstream_ids, upstream_envs));
+                    runnable.push((&planned.entry, planned.upstream_ids.as_slice(), upstream_envs));
                 } else {
                     skipped_by_domain
                         .entry(dom)
@@ -1557,10 +2147,14 @@ impl ExtensionHub {
                 .map(|(entry, upstream_ids, upstream_envs)| async move {
                     let id = entry.extension_id.clone();
                     let dom = entry.manifest.domain;
-                    let mut sub_query = query.clone();
-                    if sub_query.upstream_envelopes.is_empty() && !upstream_envs.is_empty() {
-                        sub_query.upstream_envelopes = upstream_envs.clone();
-                    }
+                    let sub_query: std::borrow::Cow<'_, ExtensionQueryProto> =
+                        if query.upstream_envelopes.is_empty() && !upstream_envs.is_empty() {
+                            let mut q_owned = query.clone();
+                            q_owned.upstream_envelopes = upstream_envs.clone();
+                            std::borrow::Cow::Owned(q_owned)
+                        } else {
+                            std::borrow::Cow::Borrowed(query)
+                        };
                     let trigger = if wave_idx > 0 && !upstream_ids.is_empty() {
                         InvocationTrigger::Dependency
                     } else {
@@ -1573,7 +2167,7 @@ impl ExtensionHub {
                         &entry.manifest,
                         trigger,
                         parent_inv_id,
-                        Some(&sub_query),
+                        Some(sub_query.as_ref()),
                     );
                     let (res, event) = MeterScope::run(ctx.clone(), async {
                         let dec = self.authorize_invocation(&ctx, &entry.manifest).await;
@@ -1583,8 +2177,8 @@ impl ExtensionHub {
                         }
                         let exec_res = self
                             .execute_single_entry_internal(
-                                &entry,
-                                &sub_query,
+                                entry,
+                                sub_query.as_ref(),
                                 &upstream_envs,
                                 http,
                                 env,
@@ -1632,92 +2226,6 @@ impl ExtensionHub {
         let all_envelopes: Vec<ExtensionEnvelopeProto> =
             envelopes_by_id.into_values().flatten().collect();
         (all_envelopes, max_wave_by_domain, skipped_by_domain)
-    }
-
-    fn plan_execution_waves(&self, domains: Option<&[CapabilityDomain]>) -> ExecutionWavePlan {
-        let guard = self.state.read().expect("ExtensionHub read lock");
-        let enabled_entries: HashMap<String, RegisteredExtensionEntry> = guard
-            .extensions
-            .iter()
-            .filter(|(_, e)| {
-                if !e.manifest.enabled || manifest_is_lazy(&e.manifest) {
-                    return false;
-                }
-                let prim = CapabilityDomain::try_from(e.manifest.domain)
-                    .unwrap_or(CapabilityDomain::DomainUnspecified);
-                self.is_domain_module_enabled_with_map(&guard.modules, prim)
-            })
-            .map(|(id, e)| (id.clone(), e.clone()))
-            .collect();
-
-        // Start from entries matching requested domain(s), then include transitive upstream dependencies.
-        let mut selected: HashSet<String> = enabled_entries
-            .values()
-            .filter(|e| entry_matches_domains(e, domains))
-            .map(|e| e.extension_id.clone())
-            .collect();
-
-        let mut stack: Vec<String> = selected.iter().cloned().collect();
-        while let Some(curr_id) = stack.pop() {
-            if let Some(entry) = enabled_entries.get(&curr_id) {
-                for up_id in resolve_declared_upstream_ids(&entry.manifest, &enabled_entries) {
-                    if selected.insert(up_id.clone()) {
-                        stack.push(up_id);
-                    }
-                }
-            }
-        }
-
-        let mut deps_map: HashMap<String, Vec<String>> = HashMap::new();
-        let mut remaining: HashSet<String> = selected.clone();
-        for id in &selected {
-            if let Some(entry) = enabled_entries.get(id) {
-                let ups = resolve_declared_upstream_ids(&entry.manifest, &enabled_entries)
-                    .into_iter()
-                    .filter(|u| selected.contains(u) && u != id)
-                    .collect();
-                deps_map.insert(id.clone(), ups);
-            }
-        }
-
-        let mut waves: Vec<Vec<PlannedEntry>> = Vec::new();
-        let mut done: HashSet<String> = HashSet::new();
-        while !remaining.is_empty() {
-            let mut ready: Vec<PlannedEntry> = remaining
-                .iter()
-                .filter_map(|id| {
-                    let ups = deps_map.get(id)?;
-                    if ups.iter().all(|u| done.contains(u)) {
-                        let entry = enabled_entries.get(id)?.clone();
-                        Some(PlannedEntry {
-                            entry,
-                            upstream_ids: ups.clone(),
-                        })
-                    } else {
-                        None
-                    }
-                })
-                .collect();
-
-            if ready.is_empty() {
-                // Defensive guard against unexpected cycles: break gracefully rather than looping.
-                break;
-            }
-            ready.sort_by(|a, b| {
-                b.entry
-                    .manifest
-                    .priority
-                    .cmp(&a.entry.manifest.priority)
-                    .then_with(|| a.entry.extension_id.cmp(&b.entry.extension_id))
-            });
-            for item in &ready {
-                remaining.remove(&item.entry.extension_id);
-                done.insert(item.entry.extension_id.clone());
-            }
-            waves.push(ready);
-        }
-
-        ExecutionWavePlan { waves }
     }
 
     fn limiter_for(&self, manifest: &ExtensionManifestProto) -> Arc<DefaultDirectRateLimiter> {
@@ -1770,6 +2278,7 @@ impl ExtensionHub {
             match query
                 .extra_params
                 .get("lazy_trigger_kind")
+                .or_else(|| query.extra_params.get("trigger_kind"))
                 .map(|s| s.trim().to_ascii_lowercase())
                 .as_deref()
             {
@@ -1870,7 +2379,7 @@ impl ExtensionHub {
                         }
                         let prim = CapabilityDomain::try_from(e.manifest.domain)
                             .unwrap_or(CapabilityDomain::DomainUnspecified);
-                        self.is_domain_module_enabled_with_map(&guard.modules, prim)
+                        is_domain_module_enabled_in_map(&guard.modules, prim)
                     })
                     .map(|(k, v)| (k.clone(), v.clone()))
                     .collect();
@@ -1879,8 +2388,13 @@ impl ExtensionHub {
                     .filter_map(|id| active.get(&id).cloned())
                     .collect()
             };
+            let q_norm = NormalizedGeoQuery::from_proto(query);
+            let q_norm_ref = &q_norm;
             let up_futs = upstream_entries.into_iter().map(|up| async move {
                 let id = up.extension_id.clone();
+                if up.compiled_geo_scope.match_specificity(q_norm_ref).is_none() {
+                    return (id, Ok(Some(Vec::new())));
+                }
                 let up_ctx = Self::invocation_ctx_for(
                     &up.manifest,
                     InvocationTrigger::Dependency,
@@ -2044,7 +2558,14 @@ impl ExtensionHub {
         env: &EnvConfig,
         is_test_fetch: bool,
     ) -> Result<Option<Vec<ExtensionEnvelopeProto>>> {
-        let db_opt = self.resolve_hook_state().map(|s| s.db);
+        // Enforce geo_scope uniformly for BOTH DeclarativeOrOpenApi and Native drivers BEFORE
+        // touching hook state, DB, SharedExtensionCache, rate limiters, or adapter execution!
+        if entry.compiled_geo_scope.match_query(query).is_none() {
+            return Ok(Some(Vec::new()));
+        }
+
+        let hook_state_opt = self.resolve_hook_state();
+        let db_opt = hook_state_opt.as_ref().map(|s| s.db.clone());
         let hub_arc = self
             .self_weak
             .read()
@@ -2133,57 +2654,17 @@ impl ExtensionHub {
                 &entry.manifest,
                 query,
                 || async {
-                    adapter
-                        .execute_with_upstream(query, upstream, http, env)
-                        .await
+                    let fut = adapter.execute_with_upstream(query, upstream, http, env);
+                    if let Some(st) = hook_state_opt.clone() {
+                        ACTIVE_HOOK_STATE.scope(st, fut).await
+                    } else {
+                        fut.await
+                    }
                 },
             )
             .await
             .map(Some),
         }
-    }
-
-    fn is_domain_module_enabled_with_map(
-        &self,
-        modules: &BTreeMap<String, SystemModuleRow>,
-        domain: CapabilityDomain,
-    ) -> bool {
-        let mod_id = match domain {
-            CapabilityDomain::DomainGeocode => return true,
-            CapabilityDomain::DomainPropertyFacts => "property_facts",
-            CapabilityDomain::DomainValuation => "valuation",
-            CapabilityDomain::DomainMarketTrends => "market_trends",
-            CapabilityDomain::DomainElectricUtility
-            | CapabilityDomain::DomainGasUtility
-            | CapabilityDomain::DomainWaterSewerTrash
-            | CapabilityDomain::DomainBroadband => "utilities_broadband",
-            CapabilityDomain::DomainNaturalHazards => "natural_hazards",
-            CapabilityDomain::DomainEnvironmental => "environmental_risk",
-            CapabilityDomain::DomainLivability
-            | CapabilityDomain::DomainSchools
-            | CapabilityDomain::DomainCrime => "neighborhood_livability",
-            CapabilityDomain::DomainHouse3d => "house_3d_lidar",
-            CapabilityDomain::DomainListingsFeed => "property_search_shop",
-            CapabilityDomain::DomainInsurance | CapabilityDomain::DomainTaxMandates => {
-                "buyer_diligence"
-            }
-            CapabilityDomain::DomainPermits | CapabilityDomain::DomainPermitIntel => {
-                "property_facts"
-            }
-            CapabilityDomain::DomainRouting => {
-                let liv = modules
-                    .get("neighborhood_livability")
-                    .map(|m| m.enabled)
-                    .unwrap_or(true);
-                let com = modules
-                    .get("commute_transit")
-                    .map(|m| m.enabled)
-                    .unwrap_or(true);
-                return liv && com;
-            }
-            CapabilityDomain::DomainUnspecified => return true,
-        };
-        modules.get(mod_id).map(|m| m.enabled).unwrap_or(true)
     }
 
     /// Exports all currently registered extensions as `InstalledExtensionRow` records for DB persistence.
@@ -2254,6 +2735,10 @@ impl ExtensionHub {
                         );
                         let manifest_yaml_owned = Some(pkg.manifest_yaml.clone());
                         let openapi_yaml_owned = pkg.openapi_yaml.clone();
+                        let compiled_geo_scope = pkg.compiled_geo_scope.clone();
+                        let jurisdiction_tier = pkg.jurisdiction_tier;
+                        let connector_category = pkg.connector_category;
+                        let data_formats = pkg.data_formats.clone();
                         guard.extensions.insert(
                             pkg.extension_id.clone(),
                             RegisteredExtensionEntry {
@@ -2262,6 +2747,10 @@ impl ExtensionHub {
                                 driver_slot: Arc::new(
                                     ExtensionDriverSlot::DeclarativeOrOpenApi(Arc::new(pkg)),
                                 ),
+                                compiled_geo_scope,
+                                jurisdiction_tier,
+                                connector_category,
+                                data_formats,
                                 manifest_yaml: manifest_yaml_owned,
                                 openapi_yaml: openapi_yaml_owned,
                                 config_json: row.config_json.clone(),
@@ -2274,7 +2763,6 @@ impl ExtensionHub {
                     }
                 }
             }
-            guard.cached_snapshot = None;
         }
         Ok(self.bump_and_refresh())
     }
@@ -2325,28 +2813,280 @@ fn seed_default_modules_map() -> BTreeMap<String, SystemModuleRow> {
     map
 }
 
-fn build_snapshot_from_state(state: &HubInnerState, gen_v: u64) -> RuntimeRegistrySnapshot {
+fn insert_native_adapter_entry(
+    extensions: &mut BTreeMap<String, RegisteredExtensionEntry>,
+    adapter: Arc<dyn DataExtensionAdapter>,
+    now: &str,
+) {
+    let mut manifest = adapter.manifest();
+    let mut prev_pkg: Option<Arc<ParsedExtensionPackage>> = None;
+    let (existing_manifest_yaml, existing_openapi_yaml, preserved_cfg, installed_at) =
+        if let Some(prev) = extensions.get(&manifest.extension_id) {
+            if let ExtensionDriverSlot::DeclarativeOrOpenApi(pkg) = prev.driver_slot.as_ref() {
+                prev_pkg = Some(Arc::clone(pkg));
+            }
+            if prev.manifest.builtin {
+                manifest.builtin = true;
+                manifest.enabled = prev.manifest.enabled;
+                manifest.priority = prev.manifest.priority;
+                if prev.manifest.geo_scope.is_some() {
+                    manifest.geo_scope = prev.manifest.geo_scope.clone();
+                }
+            } else if manifest.geo_scope.is_none() && prev.manifest.geo_scope.is_some() {
+                manifest.geo_scope = prev.manifest.geo_scope.clone();
+            }
+            if manifest.depends_on.is_empty() && !prev.manifest.depends_on.is_empty() {
+                manifest.depends_on = prev.manifest.depends_on.clone();
+            }
+            if manifest.input_from_domains.is_empty()
+                && !prev.manifest.input_from_domains.is_empty()
+            {
+                manifest.input_from_domains = prev.manifest.input_from_domains.clone();
+            }
+            if manifest.upstream_require_mode.is_empty()
+                && !prev.manifest.upstream_require_mode.is_empty()
+            {
+                manifest.upstream_require_mode = prev.manifest.upstream_require_mode.clone();
+            }
+            if manifest.tier == 0 && prev.manifest.tier != 0 {
+                manifest.tier = prev.manifest.tier;
+            }
+            if manifest.license_class == 0 && prev.manifest.license_class != 0 {
+                manifest.license_class = prev.manifest.license_class;
+            }
+            if manifest.execution_mode == 0 && prev.manifest.execution_mode != 0 {
+                manifest.execution_mode = prev.manifest.execution_mode;
+            }
+            if prev.manifest.requires_manual_approval {
+                manifest.requires_manual_approval = true;
+            }
+            if manifest.min_plan_tier.trim().is_empty()
+                && !prev.manifest.min_plan_tier.trim().is_empty()
+            {
+                manifest.min_plan_tier = prev.manifest.min_plan_tier.clone();
+            }
+            if manifest.metering.is_none() && prev.manifest.metering.is_some() {
+                manifest.metering = prev.manifest.metering.clone();
+            }
+            if manifest.section_id.trim().is_empty()
+                && !prev.manifest.section_id.trim().is_empty()
+            {
+                manifest.section_id = prev.manifest.section_id.clone();
+            }
+            if manifest.enabled_by_default.is_none() {
+                manifest.enabled_by_default = prev.manifest.enabled_by_default;
+            }
+            if manifest.llm.is_none() {
+                manifest.llm = prev.manifest.llm.clone();
+            }
+            if manifest.sharing.is_none() {
+                manifest.sharing = prev.manifest.sharing.clone();
+            }
+            if manifest.source_attribution.is_none()
+                && prev.manifest.source_attribution.is_some()
+            {
+                manifest.source_attribution = prev.manifest.source_attribution.clone();
+            }
+            if manifest
+                .homepage_url
+                .as_deref()
+                .map(|s| s.trim().is_empty())
+                .unwrap_or(true)
+                && prev
+                    .manifest
+                    .homepage_url
+                    .as_deref()
+                    .map(|s| !s.trim().is_empty())
+                    .unwrap_or(false)
+            {
+                manifest.homepage_url = prev.manifest.homepage_url.clone();
+            }
+            if manifest
+                .documentation_url
+                .as_deref()
+                .map(|s| s.trim().is_empty())
+                .unwrap_or(true)
+                && prev
+                    .manifest
+                    .documentation_url
+                    .as_deref()
+                    .map(|s| !s.trim().is_empty())
+                    .unwrap_or(false)
+            {
+                manifest.documentation_url = prev.manifest.documentation_url.clone();
+            }
+            (
+                prev.manifest_yaml.clone(),
+                prev.openapi_yaml.clone(),
+                prev.config_json.clone(),
+                prev.installed_at.clone(),
+            )
+        } else {
+            (None, None, "{}".to_string(), now.to_string())
+        };
+
+    if prev_pkg.is_none() && manifest.builtin {
+        if let Some((_, cached_pkg)) = EMBEDDED_BUILTIN_BY_ID.get(manifest.extension_id.as_str()) {
+            prev_pkg = Some(Arc::clone(cached_pkg));
+        }
+    }
+
+    match manifest.geo_scope.as_mut() {
+        Some(gs) => {
+            if gs.country.trim().is_empty() {
+                gs.country = "US".to_string();
+            }
+            if gs.states.iter().any(|s| s.trim() == "*") {
+                gs.nationwide = true;
+            }
+        }
+        None => {
+            manifest.geo_scope = Some(GeoScopeProto {
+                country: "US".to_string(),
+                nationwide: true,
+                ..Default::default()
+            });
+        }
+    }
+
+    let compiled_geo_scope = CompiledGeoScope::from_proto(manifest.geo_scope.as_ref());
+    let prev_doc = prev_pkg.as_ref().map(|p| &p.doc);
+    let prev_oas = prev_pkg.as_ref().and_then(|p| p.openapi_doc.as_ref());
+    let jurisdiction_tier = classify_extension_jurisdiction_tier(&manifest, prev_doc);
+    let (connector_category, data_formats) =
+        classify_extension_connector(&manifest, prev_doc, prev_oas);
+
+    let ext_id = manifest.extension_id.clone();
+    extensions.insert(
+        ext_id.clone(),
+        RegisteredExtensionEntry {
+            extension_id: ext_id,
+            manifest,
+            driver_slot: Arc::new(ExtensionDriverSlot::Native(adapter)),
+            compiled_geo_scope,
+            jurisdiction_tier,
+            connector_category,
+            data_formats,
+            manifest_yaml: existing_manifest_yaml,
+            openapi_yaml: existing_openapi_yaml,
+            config_json: preserved_cfg,
+            health_status: "healthy".to_string(),
+            last_checked_at: None,
+            installed_at,
+            updated_at: now.to_string(),
+        },
+    );
+}
+
+fn is_domain_module_enabled_in_map(
+    modules: &BTreeMap<String, SystemModuleRow>,
+    domain: CapabilityDomain,
+) -> bool {
+    let mod_id = match domain {
+        CapabilityDomain::DomainGeocode => return true,
+        CapabilityDomain::DomainPropertyFacts => "property_facts",
+        CapabilityDomain::DomainValuation => "valuation",
+        CapabilityDomain::DomainMarketTrends => "market_trends",
+        CapabilityDomain::DomainElectricUtility
+        | CapabilityDomain::DomainGasUtility
+        | CapabilityDomain::DomainWaterSewerTrash
+        | CapabilityDomain::DomainBroadband => "utilities_broadband",
+        CapabilityDomain::DomainNaturalHazards => "natural_hazards",
+        CapabilityDomain::DomainEnvironmental => "environmental_risk",
+        CapabilityDomain::DomainLivability
+        | CapabilityDomain::DomainSchools
+        | CapabilityDomain::DomainCrime => "neighborhood_livability",
+        CapabilityDomain::DomainHouse3d => "house_3d_lidar",
+        CapabilityDomain::DomainListingsFeed => "property_search_shop",
+        CapabilityDomain::DomainInsurance | CapabilityDomain::DomainTaxMandates => {
+            "buyer_diligence"
+        }
+        CapabilityDomain::DomainPermits | CapabilityDomain::DomainPermitIntel => "property_facts",
+        CapabilityDomain::DomainRouting => {
+            let liv = modules
+                .get("neighborhood_livability")
+                .map(|m| m.enabled)
+                .unwrap_or(true);
+            let com = modules
+                .get("commute_transit")
+                .map(|m| m.enabled)
+                .unwrap_or(true);
+            return liv && com;
+        }
+        CapabilityDomain::DomainUnspecified => return true,
+    };
+    modules.get(mod_id).map(|m| m.enabled).unwrap_or(true)
+}
+
+fn build_snapshot_from_state(state: &HubInnerState, gen_v: u64) -> RegistrySnapshot {
     let modules: HashMap<String, SystemModuleRow> = state
         .modules
         .iter()
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
 
-    let mut manifests: Vec<ExtensionManifestProto> = state
-        .extensions
-        .values()
-        .map(|e| e.manifest.clone())
-        .collect();
-    manifests.sort_by(|a, b| {
-        b.priority
-            .cmp(&a.priority)
+    let mut entries: Vec<RegisteredExtensionEntry> =
+        state.extensions.values().cloned().collect();
+    entries.sort_by(|a, b| {
+        b.manifest
+            .priority
+            .cmp(&a.manifest.priority)
             .then_with(|| a.extension_id.cmp(&b.extension_id))
     });
 
+    let manifests: Vec<ExtensionManifestProto> =
+        entries.iter().map(|e| e.manifest.clone()).collect();
+
+    let mut entry_index_by_id: HashMap<String, (usize, bool)> =
+        HashMap::with_capacity(entries.len());
+    let mut eager_active_indices: Vec<usize> = Vec::with_capacity(entries.len());
+    let mut active_by_id: HashMap<String, usize> = HashMap::with_capacity(entries.len());
     let mut by_domain: HashMap<i32, Vec<String>> = HashMap::new();
-    for m in &manifests {
+    let mut by_tier: HashMap<JurisdictionTier, Vec<String>> = HashMap::new();
+    let mut by_cat: HashMap<ConnectorCategory, Vec<String>> = HashMap::new();
+    let mut by_fmt: HashMap<String, Vec<String>> = HashMap::new();
+    let mut distinct_domains: Vec<CapabilityDomain> = Vec::new();
+
+    for (idx, entry) in entries.iter().enumerate() {
+        let m = &entry.manifest;
+        let prim =
+            CapabilityDomain::try_from(m.domain).unwrap_or(CapabilityDomain::DomainUnspecified);
+        let mod_active = is_domain_module_enabled_in_map(&state.modules, prim);
+        let active = m.enabled && mod_active;
+        entry_index_by_id.insert(entry.extension_id.clone(), (idx, active));
+
+        by_tier
+            .entry(entry.jurisdiction_tier)
+            .or_default()
+            .push(entry.extension_id.clone());
+        by_cat
+            .entry(entry.connector_category)
+            .or_default()
+            .push(entry.extension_id.clone());
+        for fmt in &entry.data_formats {
+            by_fmt
+                .entry(fmt.clone())
+                .or_default()
+                .push(entry.extension_id.clone());
+        }
+
+        if prim != CapabilityDomain::DomainUnspecified && !distinct_domains.contains(&prim) {
+            distinct_domains.push(prim);
+        }
+        for &ad in &m.additional_domains {
+            if let Ok(dom) = CapabilityDomain::try_from(ad) {
+                if dom != CapabilityDomain::DomainUnspecified && !distinct_domains.contains(&dom) {
+                    distinct_domains.push(dom);
+                }
+            }
+        }
+
         if !m.enabled {
             continue;
+        }
+        if mod_active && !manifest_is_lazy(m) {
+            eager_active_indices.push(idx);
+            active_by_id.insert(entry.extension_id.clone(), idx);
         }
         by_domain
             .entry(m.domain)
@@ -2360,12 +3100,182 @@ fn build_snapshot_from_state(state: &HubInnerState, gen_v: u64) -> RuntimeRegist
         }
     }
 
-    RuntimeRegistrySnapshot {
+    let geo_index = GeoIndex::build(&entries);
+    let (all_plan, _) = build_wave_plan_for_domains(
+        &entries,
+        &eager_active_indices,
+        &active_by_id,
+        geo_index.word_len,
+        None,
+    );
+    let all_domains_wave_plan = Arc::new(all_plan);
+
+    let mut domain_wave_plans: HashMap<i32, Arc<ExecutionWavePlan>> =
+        HashMap::with_capacity(distinct_domains.len());
+    let mut domain_transitive_bits: HashMap<i32, Vec<u64>> =
+        HashMap::with_capacity(distinct_domains.len());
+    for dom in distinct_domains {
+        let (d_plan, d_bits) = build_wave_plan_for_domains(
+            &entries,
+            &eager_active_indices,
+            &active_by_id,
+            geo_index.word_len,
+            Some(&[dom]),
+        );
+        domain_wave_plans.insert(dom as i32, Arc::new(d_plan));
+        domain_transitive_bits.insert(dom as i32, d_bits);
+    }
+
+    let runtime = Arc::new(RuntimeRegistrySnapshot {
         generation_version: gen_v,
         modules,
         enabled_extension_ids_by_domain: by_domain,
         manifests,
+    });
+
+    RegistrySnapshot {
+        runtime,
+        geo_index,
+        extension_ids_by_jurisdiction_tier: by_tier,
+        extension_ids_by_connector_category: by_cat,
+        extension_ids_by_data_format: by_fmt,
+        all_domains_wave_plan,
+        domain_wave_plans,
+        domain_transitive_bits,
+        entries,
+        entry_index_by_id,
     }
+}
+
+fn build_wave_plan_for_domains(
+    entries: &[RegisteredExtensionEntry],
+    eager_active_indices: &[usize],
+    active_by_id: &HashMap<String, usize>,
+    word_len: usize,
+    domains: Option<&[CapabilityDomain]>,
+) -> (ExecutionWavePlan, Vec<u64>) {
+    let mut selected_bits = vec![0u64; word_len];
+    let mut selected_indices: HashSet<usize> = HashSet::new();
+    let mut stack: Vec<usize> = Vec::new();
+
+    for &idx in eager_active_indices {
+        if entry_matches_domains(&entries[idx], domains) && selected_indices.insert(idx) {
+            selected_bits[idx >> 6] |= 1u64 << (idx & 63);
+            stack.push(idx);
+        }
+    }
+
+    while let Some(curr_idx) = stack.pop() {
+        for up_id in resolve_declared_upstream_ids_indexed(
+            &entries[curr_idx].manifest,
+            entries,
+            eager_active_indices,
+            active_by_id,
+        ) {
+            if let Some(&up_idx) = active_by_id.get(&up_id) {
+                if selected_indices.insert(up_idx) {
+                    selected_bits[up_idx >> 6] |= 1u64 << (up_idx & 63);
+                    stack.push(up_idx);
+                }
+            }
+        }
+    }
+
+    if selected_indices.is_empty() {
+        return (ExecutionWavePlan::default(), selected_bits);
+    }
+
+    let mut deps_map: HashMap<usize, Vec<String>> = HashMap::with_capacity(selected_indices.len());
+    let mut remaining: HashSet<usize> = selected_indices.clone();
+    for &idx in &selected_indices {
+        let self_id = &entries[idx].extension_id;
+        let ups = resolve_declared_upstream_ids_indexed(
+            &entries[idx].manifest,
+            entries,
+            eager_active_indices,
+            active_by_id,
+        )
+        .into_iter()
+        .filter(|u| {
+            u != self_id
+                && active_by_id
+                    .get(u)
+                    .map(|ui| selected_indices.contains(ui))
+                    .unwrap_or(false)
+        })
+        .collect();
+        deps_map.insert(idx, ups);
+    }
+
+    let mut waves: Vec<Vec<PlannedWaveNode>> = Vec::new();
+    let mut done_ids: HashSet<String> = HashSet::with_capacity(selected_indices.len());
+    while !remaining.is_empty() {
+        let mut ready: Vec<PlannedWaveNode> = remaining
+            .iter()
+            .filter_map(|&idx| {
+                let ups = deps_map.get(&idx)?;
+                if ups.iter().all(|u| done_ids.contains(u)) {
+                    let entry = entries[idx].clone();
+                    Some(PlannedWaveNode {
+                        entry_idx: idx,
+                        extension_id: entry.extension_id.clone(),
+                        upstream_ids: ups.clone(),
+                        entry,
+                    })
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        if ready.is_empty() {
+            break;
+        }
+        ready.sort_by(|a, b| {
+            b.entry
+                .manifest
+                .priority
+                .cmp(&a.entry.manifest.priority)
+                .then_with(|| a.extension_id.cmp(&b.extension_id))
+        });
+        for item in &ready {
+            remaining.remove(&item.entry_idx);
+            done_ids.insert(item.extension_id.clone());
+        }
+        waves.push(ready);
+    }
+
+    (ExecutionWavePlan { waves }, selected_bits)
+}
+
+fn resolve_declared_upstream_ids_indexed(
+    manifest: &ExtensionManifestProto,
+    entries: &[RegisteredExtensionEntry],
+    eager_active_indices: &[usize],
+    active_by_id: &HashMap<String, usize>,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    for dep in &manifest.depends_on {
+        if dep != &manifest.extension_id
+            && active_by_id.contains_key(dep)
+            && !out.contains(dep)
+        {
+            out.push(dep.clone());
+        }
+    }
+    for &dom_i32 in &manifest.input_from_domains {
+        for &idx in eager_active_indices {
+            let e = &entries[idx];
+            if e.extension_id != manifest.extension_id
+                && (e.manifest.domain == dom_i32
+                    || e.manifest.additional_domains.contains(&dom_i32))
+                && !out.contains(&e.extension_id)
+            {
+                out.push(e.extension_id.clone());
+            }
+        }
+    }
+    out
 }
 
 fn entry_to_db_row(entry: &RegisteredExtensionEntry) -> InstalledExtensionRow {
@@ -2398,15 +3308,6 @@ fn entry_to_db_row(entry: &RegisteredExtensionEntry) -> InstalledExtensionRow {
         installed_at: entry.installed_at.clone(),
         updated_at: entry.updated_at.clone(),
     }
-}
-
-struct PlannedEntry {
-    entry: RegisteredExtensionEntry,
-    upstream_ids: Vec<String>,
-}
-
-struct ExecutionWavePlan {
-    waves: Vec<Vec<PlannedEntry>>,
 }
 
 fn has_declared_upstream(manifest: &ExtensionManifestProto) -> bool {
@@ -2667,6 +3568,9 @@ fn entry_to_admin_json(
         "additionalDomains": m.additional_domains.iter().filter_map(|&d| CapabilityDomain::try_from(d).ok()).map(capability_domain_slug).collect::<Vec<_>>(),
         "driverKind": driver_kind_slug(driver),
         "driverLabel": driver_kind_label(driver),
+        "jurisdictionTier": entry.jurisdiction_tier.as_str(),
+        "connectorCategory": entry.connector_category.as_str(),
+        "dataFormats": entry.data_formats,
         "tier": tier,
         "licenseClass": license_class,
         "executionMode": execution_mode,

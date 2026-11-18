@@ -6752,6 +6752,26 @@ pub fn run_valuation_with_rental(
             "downside": downside_arr,
         },
     });
+    if crate::extensions::ExtensionHub::global()
+        .snapshot()
+        .is_extension_enabled("market_liquidity_stress")
+    {
+        let synth_rep = json!({
+            "geo": g,
+            "facts": f,
+            "market": m,
+            "valuation": val_data,
+        });
+        if let Some(stress_val) =
+            crate::modules::market_liquidity_stress::compute_market_liquidity_stress_from_report(
+                &synth_rep, None,
+            )
+        {
+            if let Some(vobj) = val_data.as_object_mut() {
+                vobj.insert("liquidityAndRateStress".to_string(), stress_val);
+            }
+        }
+    }
     scrub_valuation_output_value(&mut val_data);
     let warnings = warnings
         .into_iter()

@@ -449,6 +449,7 @@ fn extract_report_slug_for_share_check(path: &str, raw_query: &str) -> Option<St
     }
     for prefix in [
         "/api/house3d/",
+        "/api/solar/",
         "/api/media/",
         "/api/buyer-diligence/",
         "/api/report/",

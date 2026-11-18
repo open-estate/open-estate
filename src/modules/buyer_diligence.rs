@@ -187,6 +187,7 @@ use crate::modules::broadband_live::{
 #[derive(Debug, Clone)]
 struct LiveBroadbandCheck {
     fcc_fixed: FccFixedBroadbandResult,
+    fcc_mobile_5g: Option<Value>,
     confirmed_options: Vec<crate::extensions::proto::BroadbandOptionProto>,
     confirmed_sources: Vec<SourceItem>,
 }
@@ -5052,6 +5053,79 @@ fn build_post_closing_and_climate(ctx: &ReportContext, has_hoa: bool) -> Value {
 
 // ------------------------- Public Orchestration Entry Points -------------------------
 
+fn build_closing_contingency_for_ctx(
+    ctx: &ReportContext<'_>,
+    has_hoa: bool,
+    hoa_monthly: f64,
+) -> Option<Value> {
+    if !crate::extensions::ExtensionHub::global()
+        .snapshot()
+        .is_extension_enabled("closing_contingency_calendar")
+    {
+        return None;
+    }
+    let mut extra = std::collections::HashMap::new();
+    if ctx.price_reported && ctx.price > 0.0 {
+        extra.insert("price".to_string(), format!("{}", ctx.price));
+        if ctx.annual_tax > 0.0 {
+            extra.insert(
+                "annual_tax_usd".to_string(),
+                format!("{}", ctx.annual_tax),
+            );
+        }
+        if ctx.annual_ins > 0.0 {
+            extra.insert(
+                "annual_insurance_usd".to_string(),
+                format!("{}", ctx.annual_ins),
+            );
+        }
+    }
+    if ctx.rate30_reported {
+        extra.insert("rate30".to_string(), format!("{}", ctx.rate30));
+    }
+    if ctx.tax_rate_reported {
+        extra.insert("tax_rate".to_string(), format!("{}", ctx.tax_rate));
+    }
+    if has_hoa {
+        extra.insert("has_hoa".to_string(), "true".to_string());
+        if hoa_monthly > 0.0 {
+            extra.insert("hoa_monthly_usd".to_string(), format!("{hoa_monthly}"));
+        }
+    }
+    if let Some(assessed) = val_f64(ctx.facts.get("assessedValue"))
+        .or_else(|| val_f64(ctx.facts.pointer("/taxAssessment/totalValue")))
+        .or_else(|| val_f64(ctx.facts.pointer("/countyRecords/taxAssessment/assessedTotal")))
+        .filter(|&a| a > 0.0)
+    {
+        extra.insert("assessed_value_usd".to_string(), format!("{assessed}"));
+    }
+    if let Some(d) = val_str(ctx.facts.pointer("/lastSale/date")) {
+        extra.insert("prior_sale_date".to_string(), d.to_string());
+    }
+    if let Some(p) = val_f64(ctx.facts.pointer("/lastSale/price")).filter(|&p| p > 0.0) {
+        extra.insert("prior_sale_price".to_string(), format!("{p}"));
+    }
+    let ptype_lc = ctx.property_type.to_ascii_lowercase();
+    let is_condo_attached = ptype_lc.contains("condo")
+        || ptype_lc.contains("town")
+        || ptype_lc.contains("co-op")
+        || ptype_lc.contains("attached");
+    let cc_query = crate::extensions::proto::ExtensionQueryProto {
+        city: ctx.city.clone(),
+        state: ctx.state.clone(),
+        zip: ctx.zip.clone(),
+        county_fips: ctx.county_fips.clone(),
+        county_name: (!ctx.county.is_empty()).then(|| ctx.county.clone()),
+        lat: ctx.lat,
+        lon: ctx.lon,
+        year_built: ctx.year_built,
+        is_condo_or_attached: Some(is_condo_attached),
+        extra_params: extra,
+        ..Default::default()
+    };
+    crate::modules::closing_contingency::compute_closing_contingency_bundle(&cc_query)
+}
+
 fn build_bundle_with_live(
     report: &Value,
     live_bb_opt: Option<&LiveBroadbandCheck>,
@@ -5078,7 +5152,12 @@ fn build_bundle_with_live(
 
     let (utilities_and_mandates, is_septic, is_well) =
         build_utilities_and_mandates(&ctx, live_util_opt);
-    let cash_to_close = build_cash_to_close(&ctx, hoa_monthly);
+    let mut cash_to_close = build_cash_to_close(&ctx, hoa_monthly);
+    let closing_calendar_opt = build_closing_contingency_for_ctx(&ctx, has_hoa, hoa_monthly);
+    if let (Some(ref cc_val), Some(c2c_obj)) = (&closing_calendar_opt, cash_to_close.as_object_mut())
+    {
+        c2c_obj.insert("closingContingencyCalendar".to_string(), cc_val.clone());
+    }
     let ongoing_costs = build_ongoing_costs(
         &ctx,
         hoa_monthly,
@@ -5087,7 +5166,28 @@ fn build_bundle_with_live(
         has_hoa_water_trash,
         live_util_opt,
     );
-    let connectivity = build_connectivity(&ctx, live_bb_opt);
+    let mut connectivity = build_connectivity(&ctx, live_bb_opt);
+    let mut bd_map_layers: Vec<Value> = Vec::new();
+    if let Some(bb) = live_bb_opt {
+        if let Some(ref blk) = bb.fcc_fixed.block_summary {
+            if let Some(fcc_obj) = connectivity
+                .get_mut("fcc")
+                .and_then(Value::as_object_mut)
+            {
+                if let Ok(blk_val) = serde_json::to_value(blk) {
+                    fcc_obj.insert("blockSummary".to_string(), blk_val);
+                }
+            }
+        }
+        if let Some(ref mob_val) = bb.fcc_mobile_5g {
+            if let Some(conn_obj) = connectivity.as_object_mut() {
+                conn_obj.insert("mobile5gCoverage".to_string(), mob_val.clone());
+            }
+            if let Some(lyr) = mob_val.get("mapLayer").filter(|v| v.is_object()) {
+                bd_map_layers.push(lyr.clone());
+            }
+        }
+    }
     let neighborhood_pipeline = build_neighborhood_pipeline(&ctx);
 
     let special_dist_ann =
@@ -5185,7 +5285,17 @@ fn build_bundle_with_live(
         ));
     }
 
-    let buyer_diligence = json!({
+    if closing_calendar_opt.is_some() {
+        let cf_url = "https://www.consumerfinance.gov/owning-a-home/closing-disclosure/";
+        if !sources.iter().any(|s| s.url == cf_url) {
+            sources.push(SourceItem::new(
+                "CFPB TRID Closing Disclosure Rules, State Title Rate Filings & County Transfer Tax Schedules",
+                cf_url,
+            ));
+        }
+    }
+
+    let mut buyer_diligence = json!({
         "cashToClose": cash_to_close,
         "ongoingCosts": ongoing_costs,
         "connectivity": connectivity,
@@ -5199,6 +5309,14 @@ fn build_bundle_with_live(
         },
         "disclaimer": BUYER_DILIGENCE_DISCLAIMER,
     });
+    if let Some(bd_obj) = buyer_diligence.as_object_mut() {
+        if let Some(cc_val) = closing_calendar_opt {
+            bd_obj.insert("closingContingencyCalendar".to_string(), cc_val);
+        }
+        if !bd_map_layers.is_empty() {
+            bd_obj.insert("mapLayers".to_string(), Value::Array(bd_map_layers));
+        }
+    }
 
     BuyerDiligenceBundle {
         hoa_profile,
@@ -5233,53 +5351,80 @@ fn boxed_check_broadband<'a>(
                 env,
             )
             .await;
+        let mut fcc_mobile_5g: Option<Value> = None;
+        let mut fcc_mobile_src: Option<SourceItem> = None;
         let mut confirmed_options = Vec::new();
         let mut confirmed_sources: Vec<SourceItem> = Vec::new();
-        let mut collect_opt =
-            |opt: &crate::extensions::proto::BroadbandOptionProto,
-             attr: Option<&crate::extensions::proto::SourceAttributionProto>| {
-                if matches!(
-                    opt.availability_status.as_str(),
-                    "confirmed_address" | "address_verified"
-                ) {
-                    if let Some(a) = attr {
-                        if !a.source_url.trim().is_empty()
-                            && !confirmed_sources.iter().any(|s| s.url == a.source_url)
+        {
+            let mut collect_opt =
+                |opt: &crate::extensions::proto::BroadbandOptionProto,
+                 attr: Option<&crate::extensions::proto::SourceAttributionProto>| {
+                    if matches!(
+                        opt.availability_status.as_str(),
+                        "confirmed_address" | "address_verified"
+                    ) {
+                        if let Some(a) = attr {
+                            if !a.source_url.trim().is_empty()
+                                && !confirmed_sources.iter().any(|s| s.url == a.source_url)
+                            {
+                                confirmed_sources.push(SourceItem::new(
+                                    a.source_name.clone(),
+                                    a.source_url.clone(),
+                                ));
+                            }
+                        }
+                        confirmed_options.push(opt.clone());
+                    }
+                };
+            for env_msg in &envs {
+                let attr = env_msg.attribution.as_ref();
+                match &env_msg.payload {
+                    Some(
+                        crate::extensions::proto::extension_envelope_proto::Payload::BroadbandOption(
+                            opt,
+                        ),
+                    ) => collect_opt(opt, attr),
+                    Some(
+                        crate::extensions::proto::extension_envelope_proto::Payload::BroadbandCatalog(
+                            cat,
+                        ),
+                    ) => {
+                        for opt in cat
+                            .fiber_carriers
+                            .iter()
+                            .chain(&cat.cable_carriers)
+                            .chain(&cat.wireless_carriers)
                         {
-                            confirmed_sources
-                                .push(SourceItem::new(a.source_name.clone(), a.source_url.clone()));
+                            collect_opt(opt, attr);
                         }
                     }
-                    confirmed_options.push(opt.clone());
-                }
-            };
-        for env_msg in &envs {
-            let attr = env_msg.attribution.as_ref();
-            match &env_msg.payload {
-                Some(
-                    crate::extensions::proto::extension_envelope_proto::Payload::BroadbandOption(
-                        opt,
-                    ),
-                ) => collect_opt(opt, attr),
-                Some(
-                    crate::extensions::proto::extension_envelope_proto::Payload::BroadbandCatalog(
-                        cat,
-                    ),
-                ) => {
-                    for opt in cat
-                        .fiber_carriers
-                        .iter()
-                        .chain(&cat.cable_carriers)
-                        .chain(&cat.wireless_carriers)
-                    {
-                        collect_opt(opt, attr);
+                    Some(crate::extensions::proto::extension_envelope_proto::Payload::RawJson(
+                        raw,
+                    )) if env_msg.extension_id == "fcc_mobile_5g" => {
+                        if let Ok(parsed) = serde_json::from_str::<Value>(raw) {
+                            if let Some(a) = attr {
+                                if !a.source_url.trim().is_empty() {
+                                    fcc_mobile_src = Some(SourceItem::new(
+                                        a.source_name.clone(),
+                                        a.source_url.clone(),
+                                    ));
+                                }
+                            }
+                            fcc_mobile_5g = Some(parsed);
+                        }
                     }
+                    _ => {}
                 }
-                _ => {}
+            }
+        }
+        if let Some(ms) = fcc_mobile_src {
+            if !confirmed_sources.iter().any(|s| s.url == ms.url) {
+                confirmed_sources.push(ms);
             }
         }
         Some(LiveBroadbandCheck {
             fcc_fixed,
+            fcc_mobile_5g,
             confirmed_options,
             confirmed_sources,
         })

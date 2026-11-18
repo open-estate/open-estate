@@ -222,6 +222,53 @@ pub fn normalize_stored_report(report: &mut Value) -> bool {
         {
             crate::modules::buyer_living_nuances::ensure_buyer_living_nuances_on_report(report);
         }
+        if report
+            .pointer("/buyerDiligence/closingContingencyCalendar")
+            .is_none()
+            && report.get("buyerDiligence").is_some_and(Value::is_object)
+        {
+            let det_bd =
+                crate::modules::buyer_diligence::build_buyer_diligence_and_hoa_deterministic(report);
+            if let Some(cc) = det_bd
+                .buyer_diligence
+                .get("closingContingencyCalendar")
+                .cloned()
+            {
+                if let Some(bd_obj) = report
+                    .get_mut("buyerDiligence")
+                    .and_then(Value::as_object_mut)
+                {
+                    if let Some(c2c_obj) = bd_obj
+                        .get_mut("cashToClose")
+                        .and_then(Value::as_object_mut)
+                    {
+                        c2c_obj.insert("closingContingencyCalendar".into(), cc.clone());
+                    }
+                    bd_obj.insert("closingContingencyCalendar".into(), cc);
+                }
+            }
+        }
+        if report.get("liquidityAndRateStress").is_none()
+            && report
+                .pointer("/modules/valuation/data/liquidityAndRateStress")
+                .is_none()
+        {
+            if let Some(stress) =
+                crate::modules::market_liquidity_stress::compute_market_liquidity_stress_from_report(
+                    report, None,
+                )
+            {
+                if let Some(v_obj) = report
+                    .pointer_mut("/modules/valuation/data")
+                    .and_then(Value::as_object_mut)
+                {
+                    v_obj.insert("liquidityAndRateStress".into(), stress.clone());
+                }
+                if let Some(root) = report.as_object_mut() {
+                    root.insert("liquidityAndRateStress".into(), stress);
+                }
+            }
+        }
     }
     before != report_display_fingerprint(report)
 }
@@ -262,6 +309,248 @@ pub fn apply_runtime_module_filter(
 
     if !snap.is_enabled("natural_hazards") {
         strip_mod_key(report, "hazards");
+    }
+    if !snap.is_enabled("natural_hazards") || !snap.is_extension_enabled("nws_weather") {
+        if let Some(hz_data) = report
+            .pointer_mut("/modules/hazards/data")
+            .and_then(Value::as_object_mut)
+        {
+            hz_data.remove("weather");
+        }
+        if let Some(hz_top) = report.get_mut("hazards").and_then(Value::as_object_mut) {
+            hz_top.remove("weather");
+        }
+        if let Some(obj) = report.as_object_mut() {
+            obj.insert("nwsWeatherDisabled".to_string(), Value::Bool(true));
+        }
+    } else if let Some(obj) = report.as_object_mut() {
+        obj.remove("nwsWeatherDisabled");
+    }
+
+    if !snap.is_enabled("natural_hazards") || !snap.is_extension_enabled("rainfall_climatology") {
+        if let Some(hz_data) = report
+            .pointer_mut("/modules/hazards/data")
+            .and_then(Value::as_object_mut)
+        {
+            hz_data.remove("rainfall");
+        }
+        if let Some(hz_top) = report.get_mut("hazards").and_then(Value::as_object_mut) {
+            hz_top.remove("rainfall");
+        }
+        if let Some(obj) = report.as_object_mut() {
+            obj.insert("rainfallClimatologyDisabled".to_string(), Value::Bool(true));
+        }
+    } else if let Some(obj) = report.as_object_mut() {
+        obj.remove("rainfallClimatologyDisabled");
+    }
+
+    if !snap.is_enabled("natural_hazards") || !snap.is_extension_enabled("usda_soil_moisture") {
+        if let Some(hz_data) = report
+            .pointer_mut("/modules/hazards/data")
+            .and_then(Value::as_object_mut)
+        {
+            hz_data.remove("soilMoisture");
+        }
+        if let Some(hz_top) = report.get_mut("hazards").and_then(Value::as_object_mut) {
+            hz_top.remove("soilMoisture");
+        }
+        if let Some(obj) = report.as_object_mut() {
+            obj.insert("usdaSoilMoistureDisabled".to_string(), Value::Bool(true));
+        }
+    } else if let Some(obj) = report.as_object_mut() {
+        obj.remove("usdaSoilMoistureDisabled");
+    }
+
+    let strip_map_layers_at = |rep: &mut Value, ptrs: &[&str], drop_ids: &[&str]| {
+        for ptr in ptrs {
+            if let Some(arr) = rep.pointer_mut(ptr).and_then(Value::as_array_mut) {
+                arr.retain(|lyr| {
+                    let lid = lyr.get("id").and_then(Value::as_str).unwrap_or("");
+                    !drop_ids.contains(&lid)
+                });
+            }
+        }
+    };
+
+    for (ext_id, ext_key, layer_ids) in [
+        (
+            "faa_flight_noise",
+            "faaFlight",
+            &["noise-flight-corridors"][..],
+        ),
+        (
+            "highway_traffic_noise",
+            "highwayTraffic",
+            &["noise-highway-aadt"][..],
+        ),
+        (
+            "rail_transit_noise",
+            "railTransit",
+            &["noise-rail-lines", "noise-rail-crossings"][..],
+        ),
+        (
+            "military_airspace_noise",
+            "militaryAirspace",
+            &["noise-military-airspace"][..],
+        ),
+    ] {
+        if !snap.is_enabled("environmental_risk") || !snap.is_extension_enabled(ext_id) {
+            for ptr in [
+                "/modules/environment/data/noise/extensions",
+                "/environment/noise/extensions",
+            ] {
+                if let Some(exts) = report.pointer_mut(ptr).and_then(Value::as_object_mut) {
+                    exts.remove(ext_key);
+                }
+            }
+            strip_map_layers_at(
+                report,
+                &["/modules/environment/data/mapLayers", "/environment/mapLayers"],
+                layer_ids,
+            );
+        }
+    }
+
+    if !snap.is_extension_enabled("solar_potential") {
+        if let Some(obj) = report.as_object_mut() {
+            obj.remove("solarPotential");
+            obj.insert("solarPotentialDisabled".to_string(), Value::Bool(true));
+        }
+        strip_mod_key(report, "solar");
+        if let Some(mods) = report.get_mut("modules").and_then(Value::as_object_mut) {
+            mods.remove("solarPotential");
+        }
+    } else if let Some(obj) = report.as_object_mut() {
+        obj.remove("solarPotentialDisabled");
+    }
+
+    if !snap.is_extension_enabled("fire_protection_hydrants") {
+        for ptr in ["/insurance", "/modules/insurance/data"] {
+            if let Some(ins) = report.pointer_mut(ptr).and_then(Value::as_object_mut) {
+                ins.remove("fireProtection");
+            }
+        }
+        strip_map_layers_at(
+            report,
+            &["/insurance/mapLayers", "/modules/insurance/data/mapLayers"],
+            &["fire-protection"],
+        );
+    }
+
+    if !snap.is_extension_enabled("ev_fast_chargers_electrification") {
+        if let Some(obj) = report.as_object_mut() {
+            obj.remove("evElectrification");
+        }
+        for ptr in ["/buyerLivingIntel", "/modules/buyerLivingIntel/data"] {
+            if let Some(bli) = report.pointer_mut(ptr).and_then(Value::as_object_mut) {
+                bli.remove("evElectrification");
+            }
+        }
+        strip_map_layers_at(
+            report,
+            &[
+                "/buyerLivingIntel/mapLayers",
+                "/modules/buyerLivingIntel/data/mapLayers",
+                "/modules/amenities/data/mapLayers",
+                "/amenities/mapLayers",
+            ],
+            &["ev-chargers"],
+        );
+    }
+
+    if !snap.is_extension_enabled("pipeline_row_easements") {
+        for ptr in ["/remodelAndRebuild", "/modules/remodel/data"] {
+            if let Some(rm) = report.pointer_mut(ptr).and_then(Value::as_object_mut) {
+                rm.insert("pipelineRowEasements".to_string(), Value::Null);
+            }
+        }
+        strip_map_layers_at(
+            report,
+            &[
+                "/remodelAndRebuild/mapLayers",
+                "/modules/remodel/data/mapLayers",
+            ],
+            &["pipeline-easements"],
+        );
+    }
+
+    if !snap.is_extension_enabled("fcc_mobile_5g") {
+        for ptr in ["/buyerLivingIntel", "/modules/buyerLivingIntel/data"] {
+            if let Some(bli) = report.pointer_mut(ptr).and_then(Value::as_object_mut) {
+                bli.insert("mobile5gCoverage".to_string(), Value::Null);
+                bli.remove("mobile5gH3");
+            }
+        }
+        if let Some(conn) = report
+            .pointer_mut("/buyerDiligence/connectivity")
+            .and_then(Value::as_object_mut)
+        {
+            conn.remove("mobile5gCoverage");
+        }
+        strip_map_layers_at(
+            report,
+            &[
+                "/buyerLivingIntel/mapLayers",
+                "/modules/buyerLivingIntel/data/mapLayers",
+                "/buyerDiligence/mapLayers",
+                "/modules/amenities/data/mapLayers",
+            ],
+            &["fcc-mobile-5g-h3"],
+        );
+    }
+
+    if !snap.is_extension_enabled("planning_rezoning_radar") {
+        for ptr in ["/buyerLivingIntel", "/modules/buyerLivingIntel/data"] {
+            if let Some(bli) = report.pointer_mut(ptr).and_then(Value::as_object_mut) {
+                bli.remove("todRezoningRadar");
+            }
+        }
+        strip_map_layers_at(
+            report,
+            &[
+                "/buyerLivingIntel/mapLayers",
+                "/modules/buyerLivingIntel/data/mapLayers",
+                "/modules/amenities/data/mapLayers",
+            ],
+            &["tod-transit-stops"],
+        );
+    }
+
+    if !snap.is_extension_enabled("fcc_asr_cell_towers") {
+        for ptr in ["/buyerLivingIntel", "/modules/buyerLivingIntel/data"] {
+            if let Some(bli) = report.pointer_mut(ptr).and_then(Value::as_object_mut) {
+                bli.remove("cellTowers");
+            }
+        }
+        strip_map_layers_at(
+            report,
+            &[
+                "/buyerLivingIntel/mapLayers",
+                "/modules/buyerLivingIntel/data/mapLayers",
+                "/modules/amenities/data/mapLayers",
+            ],
+            &["fcc-cell-towers"],
+        );
+    }
+
+    if !snap.is_extension_enabled("closing_contingency_calendar") {
+        if let Some(bd) = report.get_mut("buyerDiligence").and_then(Value::as_object_mut) {
+            bd.remove("closingContingencyCalendar");
+            if let Some(c2c) = bd.get_mut("cashToClose").and_then(Value::as_object_mut) {
+                c2c.remove("closingContingencyCalendar");
+            }
+        }
+    }
+
+    if !snap.is_extension_enabled("market_liquidity_stress") {
+        if let Some(obj) = report.as_object_mut() {
+            obj.remove("liquidityAndRateStress");
+        }
+        for ptr in ["/valuation", "/modules/valuation/data"] {
+            if let Some(v) = report.pointer_mut(ptr).and_then(Value::as_object_mut) {
+                v.remove("liquidityAndRateStress");
+            }
+        }
     }
     if !snap.is_enabled("environmental_risk") {
         strip_mod_key(report, "environment");
@@ -350,6 +639,8 @@ fn report_display_fingerprint(report: &Value) -> String {
         "/propertyTags",
         "/buyerDiligence/ongoingCosts/monthlyUtilities/electricCarrier",
         "/buyerDiligence/connectivity/broadbandCatalog",
+        "/buyerDiligence/closingContingencyCalendar/state",
+        "/liquidityAndRateStress/baseNoteRatePct",
         "/titleLegalRadar",
         "/buyerLivingIntel",
         "/sellerSuite",
@@ -373,6 +664,15 @@ pub fn safe_open_estate_core_js() -> String {
 }
 /// Interactive 3D home model + embedded listing tours (`#house3d`, `assets/house3d.js`).
 pub const HOUSE3D_JS: &str = include_str!("../../assets/house3d.js");
+/// Standalone themed Leaflet weather radar, alerts & forecast widget (`#weather`, `assets/weather_widget.js`).
+pub const WEATHER_WIDGET_JS: &str = include_str!("../../assets/weather_widget.js");
+/// Standalone Sunroof-equivalent rooftop solar heatmap & 20-yr financial widget (`#solar`, `assets/solar_widget.js`).
+pub const SOLAR_WIDGET_JS: &str = include_str!("../../assets/solar_widget.js");
+/// Standalone acoustic dBA & route corridor enhancer (`#environment`, `assets/noise_widget.js`).
+pub const NOISE_WIDGET_JS: &str = include_str!("../../assets/noise_widget.js");
+/// Standalone rainfall climatology, design storms & USDA soil moisture enhancer (`#risk`, `assets/rainfall_moisture_widget.js`).
+pub const RAINFALL_MOISTURE_WIDGET_JS: &str =
+    include_str!("../../assets/rainfall_moisture_widget.js");
 pub const REPORT_WORKSPACE_JS: &str = include_str!("../../assets/report_workspace.js");
 pub const WALKIN_MEDIA_JS: &str = include_str!("../../assets/walkin_media.js");
 pub const PDF_STUDIO_JS: &str = include_str!("../../assets/pdf_studio.js");
@@ -510,6 +810,10 @@ impl CompiledReportTemplate {
         i18next_js: &str,
         core_js: &str,
         house3d_js: &str,
+        weather_widget_js: &str,
+        solar_widget_js: &str,
+        noise_widget_js: &str,
+        rainfall_moisture_widget_js: &str,
         report_workspace_js: &str,
         walkin_media_js: &str,
         pdf_studio_js: &str,
@@ -523,6 +827,10 @@ impl CompiledReportTemplate {
         let safe_i18next = safe_inline_js(i18next_js);
         let safe_core_js = safe_inline_js(core_js);
         let safe_house3d = safe_inline_js(house3d_js);
+        let safe_weather_widget = safe_inline_js(weather_widget_js);
+        let safe_solar_widget = safe_inline_js(solar_widget_js);
+        let safe_noise_widget = safe_inline_js(noise_widget_js);
+        let safe_rainfall_moisture_widget = safe_inline_js(rainfall_moisture_widget_js);
         let combined_workspace_js = format!(
             "{report_workspace_js}\n;\n{walkin_media_js}\n;\n{pdf_studio_js}\n;\n{buyer_copilot_js}"
         );
@@ -550,7 +858,7 @@ impl CompiledReportTemplate {
             Slot(ReportTemplatePart),
         }
 
-        let specs: [(&str, Action<'_>); 17] = [
+        let specs: [(&str, Action<'_>); 21] = [
             ("__REPORT_TITLE__", Action::Slot(ReportTemplatePart::Title)),
             ("__REPORT_DESC__", Action::Slot(ReportTemplatePart::Desc)),
             (
@@ -579,6 +887,22 @@ impl CompiledReportTemplate {
                 Action::Static(safe_core_js.as_str()),
             ),
             ("__HOUSE3D_JS__", Action::Static(safe_house3d.as_str())),
+            (
+                "__WEATHER_WIDGET_JS__",
+                Action::Static(safe_weather_widget.as_str()),
+            ),
+            (
+                "__SOLAR_WIDGET_JS__",
+                Action::Static(safe_solar_widget.as_str()),
+            ),
+            (
+                "__NOISE_WIDGET_JS__",
+                Action::Static(safe_noise_widget.as_str()),
+            ),
+            (
+                "__RAINFALL_MOISTURE_WIDGET_JS__",
+                Action::Static(safe_rainfall_moisture_widget.as_str()),
+            ),
             (
                 "__REPORT_WORKSPACE_JS__",
                 Action::Static(safe_report_workspace.as_str()),
@@ -745,6 +1069,10 @@ static COMPILED_EMBEDDED_TEMPLATE: Lazy<CompiledReportTemplate> = Lazy::new(|| {
         I18NEXT_JS,
         OPEN_ESTATE_CORE_JS,
         HOUSE3D_JS,
+        WEATHER_WIDGET_JS,
+        SOLAR_WIDGET_JS,
+        NOISE_WIDGET_JS,
+        RAINFALL_MOISTURE_WIDGET_JS,
         REPORT_WORKSPACE_JS,
         WALKIN_MEDIA_JS,
         PDF_STUDIO_JS,
@@ -790,6 +1118,14 @@ fn load_live_compiled_template(dir: &Path) -> CompiledReportTemplate {
     let i18next = read_asset_or_fallback(dir, "vendor/i18next.min.js", I18NEXT_JS);
     let core = read_asset_or_fallback(dir, "shared/open_estate_core.js", OPEN_ESTATE_CORE_JS);
     let house3d = read_asset_or_fallback(dir, "house3d.js", HOUSE3D_JS);
+    let weather_widget = read_asset_or_fallback(dir, "weather_widget.js", WEATHER_WIDGET_JS);
+    let solar_widget = read_asset_or_fallback(dir, "solar_widget.js", SOLAR_WIDGET_JS);
+    let noise_widget = read_asset_or_fallback(dir, "noise_widget.js", NOISE_WIDGET_JS);
+    let rainfall_moisture_widget = read_asset_or_fallback(
+        dir,
+        "rainfall_moisture_widget.js",
+        RAINFALL_MOISTURE_WIDGET_JS,
+    );
     let workspace = read_asset_or_fallback(dir, "report_workspace.js", REPORT_WORKSPACE_JS);
     let walkin = read_asset_or_fallback(dir, "walkin_media.js", WALKIN_MEDIA_JS);
     let pdf_studio = read_asset_or_fallback(dir, "pdf_studio.js", PDF_STUDIO_JS);
@@ -805,6 +1141,10 @@ fn load_live_compiled_template(dir: &Path) -> CompiledReportTemplate {
         &i18next,
         &core,
         &house3d,
+        &weather_widget,
+        &solar_widget,
+        &noise_widget,
+        &rainfall_moisture_widget,
         &workspace,
         &walkin,
         &pdf_studio,
@@ -817,11 +1157,15 @@ fn load_live_compiled_template(dir: &Path) -> CompiledReportTemplate {
     )
 }
 
-const LIVE_ASSET_REL_PATHS: [&str; 13] = [
+const LIVE_ASSET_REL_PATHS: [&str; 17] = [
     "template.html",
     "vendor/i18next.min.js",
     "shared/open_estate_core.js",
     "house3d.js",
+    "weather_widget.js",
+    "solar_widget.js",
+    "noise_widget.js",
+    "rainfall_moisture_widget.js",
     "report_workspace.js",
     "walkin_media.js",
     "pdf_studio.js",
@@ -833,7 +1177,7 @@ const LIVE_ASSET_REL_PATHS: [&str; 13] = [
     "locales/es.json",
 ];
 
-type LiveAssetMetadata = [Option<(u64, Option<SystemTime>)>; 13];
+type LiveAssetMetadata = [Option<(u64, Option<SystemTime>)>; 17];
 
 struct LiveTemplateCache {
     dir: PathBuf,
@@ -1766,5 +2110,164 @@ mod tests {
         assert!(r3
             .pointer("/modules/buyerLivingIntel/data")
             .is_some_and(Value::is_null));
+    }
+
+    #[test]
+    fn apply_runtime_module_filter_strips_nws_weather_when_disabled() {
+        let hub = ExtensionHub::new_default();
+        let report_with_weather = json!({
+            "modules": {
+                "hazards": {
+                    "data": {
+                        "flood": { "zone": "X" },
+                        "weather": { "office": "MTR", "radarStation": "KMUX" }
+                    }
+                }
+            }
+        });
+
+        let mut r_enabled = report_with_weather.clone();
+        apply_runtime_module_filter(&mut r_enabled, &hub.snapshot());
+        assert!(r_enabled
+            .pointer("/modules/hazards/data/weather/office")
+            .is_some());
+        assert!(r_enabled.get("nwsWeatherDisabled").is_none());
+
+        hub.enable("nws_weather", false).unwrap();
+        let mut r_disabled = report_with_weather;
+        apply_runtime_module_filter(&mut r_disabled, &hub.snapshot());
+        assert!(r_disabled
+            .pointer("/modules/hazards/data/weather")
+            .is_none());
+        assert_eq!(
+            r_disabled.pointer("/modules/hazards/data/flood/zone"),
+            Some(&json!("X"))
+        );
+        assert_eq!(r_disabled.get("nwsWeatherDisabled"), Some(&json!(true)));
+    }
+
+    #[test]
+    fn apply_runtime_module_filter_strips_wave2_extensions_when_disabled() {
+        let hub = ExtensionHub::new_default();
+        let base = json!({
+            "solarPotential": { "recommendedKw": 6.56 },
+            "liquidityAndRateStress": { "baseNoteRatePct": 6.5 },
+            "evElectrification": { "extensionId": "ev_fast_chargers_electrification" },
+            "insurance": {
+                "fireProtection": { "isoPpcProxy": { "ppcClass": 3 } },
+                "mapLayers": [{ "id": "fire-protection", "features": [] }]
+            },
+            "remodelAndRebuild": {
+                "pipelineRowEasements": { "extensionId": "pipeline_row_easements" },
+                "mapLayers": [{ "id": "pipeline-easements", "features": [] }]
+            },
+            "buyerDiligence": {
+                "closingContingencyCalendar": { "state": "CA" },
+                "cashToClose": { "closingContingencyCalendar": { "state": "CA" } },
+                "connectivity": { "mobile5gCoverage": { "h3Id": "88283472a7fffff" } },
+                "mapLayers": [{ "id": "fcc-mobile-5g-h3", "features": [] }]
+            },
+            "buyerLivingIntel": {
+                "mobile5gCoverage": { "available": true },
+                "evElectrification": { "extensionId": "ev_fast_chargers_electrification" },
+                "todRezoningRadar": { "extensionId": "planning_rezoning_radar" },
+                "cellTowers": { "extensionId": "fcc_asr_cell_towers" },
+                "mapLayers": [
+                    { "id": "fcc-mobile-5g-h3", "features": [] },
+                    { "id": "ev-chargers", "features": [] },
+                    { "id": "tod-transit-stops", "features": [] },
+                    { "id": "fcc-cell-towers", "features": [] }
+                ]
+            },
+            "modules": {
+                "solar": { "data": { "recommendedKw": 6.56 }, "warnings": [] },
+                "valuation": { "data": { "liquidityAndRateStress": { "baseNoteRatePct": 6.5 } } },
+                "hazards": {
+                    "data": {
+                        "rainfall": { "annualNormalIn": 16.2 },
+                        "soilMoisture": { "drainageClass": "Well drained" }
+                    }
+                },
+                "environment": {
+                    "data": {
+                        "noise": {
+                            "extensions": {
+                                "faaFlight": { "estLdnDba": 52.0 },
+                                "highwayTraffic": { "estLdnDba": 58.0 },
+                                "railTransit": { "estLdnDba": 49.0 },
+                                "militaryAirspace": { "estLdnDba": 41.0 }
+                            }
+                        },
+                        "mapLayers": [
+                            { "id": "noise-flight-corridors", "features": [] },
+                            { "id": "noise-highway-aadt", "features": [] },
+                            { "id": "noise-rail-lines", "features": [] },
+                            { "id": "noise-rail-crossings", "features": [] },
+                            { "id": "noise-military-airspace", "features": [] },
+                            { "id": "env-npl", "features": [] }
+                        ]
+                    }
+                }
+            }
+        });
+
+        for ext in [
+            "rainfall_climatology",
+            "usda_soil_moisture",
+            "faa_flight_noise",
+            "highway_traffic_noise",
+            "rail_transit_noise",
+            "military_airspace_noise",
+            "solar_potential",
+            "fire_protection_hydrants",
+            "ev_fast_chargers_electrification",
+            "pipeline_row_easements",
+            "fcc_mobile_5g",
+            "planning_rezoning_radar",
+            "fcc_asr_cell_towers",
+            "closing_contingency_calendar",
+            "market_liquidity_stress",
+        ] {
+            hub.enable(ext, false).unwrap();
+        }
+
+        let mut filtered = base;
+        apply_runtime_module_filter(&mut filtered, &hub.snapshot());
+
+        assert!(filtered.pointer("/modules/hazards/data/rainfall").is_none());
+        assert!(filtered.pointer("/modules/hazards/data/soilMoisture").is_none());
+        assert_eq!(filtered.get("rainfallClimatologyDisabled"), Some(&json!(true)));
+        assert_eq!(filtered.get("usdaSoilMoistureDisabled"), Some(&json!(true)));
+        assert_eq!(filtered.get("solarPotentialDisabled"), Some(&json!(true)));
+        assert!(filtered.get("solarPotential").is_none());
+        assert_eq!(filtered.pointer("/modules/solar/disabled"), Some(&json!(true)));
+        assert!(filtered.pointer("/modules/environment/data/noise/extensions/faaFlight").is_none());
+        assert!(filtered.pointer("/modules/environment/data/noise/extensions/highwayTraffic").is_none());
+        assert!(filtered.pointer("/modules/environment/data/noise/extensions/railTransit").is_none());
+        assert!(filtered.pointer("/modules/environment/data/noise/extensions/militaryAirspace").is_none());
+        assert_eq!(
+            filtered
+                .pointer("/modules/environment/data/mapLayers")
+                .and_then(Value::as_array)
+                .map(Vec::len),
+            Some(1)
+        );
+        assert!(filtered.pointer("/insurance/fireProtection").is_none());
+        assert!(filtered.pointer("/remodelAndRebuild/pipelineRowEasements").is_some_and(Value::is_null));
+        assert!(filtered.get("evElectrification").is_none());
+        assert!(filtered.pointer("/buyerLivingIntel/evElectrification").is_none());
+        assert!(filtered.pointer("/buyerLivingIntel/todRezoningRadar").is_none());
+        assert!(filtered.pointer("/buyerLivingIntel/cellTowers").is_none());
+        assert!(filtered.pointer("/buyerLivingIntel/mobile5gCoverage").is_some_and(Value::is_null));
+        assert_eq!(
+            filtered
+                .pointer("/buyerLivingIntel/mapLayers")
+                .and_then(Value::as_array)
+                .map(Vec::len),
+            Some(0)
+        );
+        assert!(filtered.pointer("/buyerDiligence/closingContingencyCalendar").is_none());
+        assert!(filtered.pointer("/valuation/liquidityAndRateStress").is_none());
+        assert!(filtered.pointer("/modules/valuation/data/liquidityAndRateStress").is_none());
     }
 }

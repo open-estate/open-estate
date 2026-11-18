@@ -1687,7 +1687,7 @@ fn render_ssr_routes(snapshot: &Value) -> String {
             "0".to_string()
         };
         out.push_str(&format!(
-            r#"<tr><td class="mono" style="font-weight:700;color:#0f172a;white-space:nowrap">{route}</td><td class="mono">{reqs}</td><td class="mono">{err_cell}</td><td class="mono" style="white-space:nowrap">{mean_ms:.2} ms</td><td class="mono" style="white-space:nowrap">{p50_ms:.2} ms</td><td class="mono" style="white-space:nowrap">{p95_ms:.2} ms <span class="lat-bar-bg"><span class="lat-bar-fg" style="width:{bar_pct:.1}%"></span></span></td><td class="mono" style="white-space:nowrap">{max_ms:.2} ms</td></tr>"#
+            r#"<tr><td class="mono" style="font-weight:700;color:var(--ink);white-space:nowrap">{route}</td><td class="mono">{reqs}</td><td class="mono">{err_cell}</td><td class="mono" style="white-space:nowrap">{mean_ms:.2} ms</td><td class="mono" style="white-space:nowrap">{p50_ms:.2} ms</td><td class="mono" style="white-space:nowrap">{p95_ms:.2} ms <span class="lat-bar-bg"><span class="lat-bar-fg" style="width:{bar_pct:.1}%"></span></span></td><td class="mono" style="white-space:nowrap">{max_ms:.2} ms</td></tr>"#
         ));
     }
     out
@@ -1703,7 +1703,7 @@ fn render_ssr_recent_reports(snapshot: &Value, brand_name: &str) -> String {
     };
     if items.is_empty() {
         return format!(
-            r#"<tr><td colspan="6" style="text-align:center;color:#64748b;padding:18px">No cached reports yet. Search an address on {eff_brand} to populate reports.</td></tr>"#
+            r#"<tr><td colspan="6" style="text-align:center;color:var(--muted);padding:18px">No cached reports yet. Search an address on {eff_brand} to populate reports.</td></tr>"#
         );
     }
     let mut out = String::new();
@@ -1748,7 +1748,7 @@ fn render_ssr_recent_reports(snapshot: &Value, brand_name: &str) -> String {
                 .unwrap_or("/"),
         );
         out.push_str(&format!(
-            r#"<tr><td><div style="font-weight:700;color:#0f172a">{addr}</div><div class="mono" style="font-size:11px;color:#64748b">{slug}{zip_suffix}</div></td><td><span class="pill {score_cls}">{score_txt}</span></td><td class="mono" style="white-space:nowrap">{val_txt}</td><td><span class="pill {ai_cls}">{ai_txt}</span></td><td class="mono" style="white-space:nowrap">{updated}</td><td><div class="act-links"><a class="act-btn" href="{rep_url}">Open Report ↗</a><a class="act-btn cmd" href="{cmd_url}">⚡ Buyer Command Center ↗</a></div></td></tr>"#
+            r#"<tr><td><div style="font-weight:700;color:var(--ink)">{addr}</div><div class="mono" style="font-size:11px;color:var(--muted)">{slug}{zip_suffix}</div></td><td><span class="pill {score_cls}">{score_txt}</span></td><td class="mono" style="white-space:nowrap">{val_txt}</td><td><span class="pill {ai_cls}">{ai_txt}</span></td><td class="mono" style="white-space:nowrap">{updated}</td><td><div class="act-links"><a class="act-btn" href="{rep_url}">Open Report ↗</a><a class="act-btn cmd" href="{cmd_url}">⚡ Buyer Command Center ↗</a></div></td></tr>"#
         ));
     }
     out
@@ -1830,6 +1830,7 @@ pub fn render_ops_dashboard_html(snapshot: &Value, brand_name: &str) -> String {
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="light dark">
 <title>{safe_brand} — Platform Ops &amp; Telemetry</title>
 {favicon_tags}
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -1837,7 +1838,8 @@ pub fn render_ops_dashboard_html(snapshot: &Value, brand_name: &str) -> String {
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.1/dist/echarts.min.js"></script>
 <style>
-:root{{
+:root,html[data-theme="light"],html[data-ops-rt-theme="light"]{{
+  color-scheme:light;
   --cmd-bg:#0b1120;
   --cmd-surface:#0f172a;
   --cmd-surface2:#1e293b;
@@ -1846,10 +1848,36 @@ pub fn render_ops_dashboard_html(snapshot: &Value, brand_name: &str) -> String {
   --cmd-muted:#94a3b8;
   --canvas:#f1f5f9;
   --card:#ffffff;
+  --card-sub:#f8fafc;
   --ink:#0f172a;
   --ink2:#334155;
   --muted:#64748b;
   --line:#e2e8f0;
+  --line-subtle:#f1f5f9;
+  --line-strong:#cbd5e1;
+  --track:#e2e8f0;
+  --filter-bg:#f1f5f9;
+  --filter-on-bg:#ffffff;
+  --filter-on-fg:#0f766e;
+  --filter-on-shadow:0 1px 2px rgba(15,23,42,.08);
+  --conn-ready-bg:#ffffff;
+  --conn-ready-bd:#cbd5e1;
+  --tbl-th-bg:#f8fafc;
+  --tbl-row-bd:#f1f5f9;
+  --tbl-hover:#f8fafc;
+  --input-bg:#ffffff;
+  --input-bd:#cbd5e1;
+  --act-bg:#ffffff;
+  --act-hover-bg:#ecfdf5;
+  --act-cmd-bg:#f0fdfa;
+  --act-cmd-bd:#99f6e4;
+  --act-cmd-fg:#0f766e;
+  --act-cmd-hover:#ccfbf1;
+  --pill-good-bg:#ecfdf5;--pill-good-fg:#15803d;--pill-good-bd:#bbf7d0;
+  --pill-warn-bg:#fffbeb;--pill-warn-fg:#b45309;--pill-warn-bd:#fde68a;
+  --pill-bad-bg:#fef2f2;--pill-bad-fg:#b91c1c;--pill-bad-bd:#fecaca;
+  --pill-info-bg:#eff6ff;--pill-info-fg:#1d4ed8;--pill-info-bd:#bfdbfe;
+  --pill-muted-bg:#f1f5f9;--pill-muted-fg:#475569;--pill-muted-bd:#cbd5e1;
   --brand:#0f766e;
   --brand2:#14b8a6;
   --brand-soft:#ecfdf5;
@@ -1862,11 +1890,93 @@ pub fn render_ops_dashboard_html(snapshot: &Value, brand_name: &str) -> String {
   --radius:14px;
   --shadow:0 1px 3px rgba(15,23,42,.06),0 12px 28px -18px rgba(15,23,42,.18);
 }}
+@media (prefers-color-scheme: dark){{
+  :root:not([data-theme="light"]):not([data-ops-rt-theme="light"]){{
+    color-scheme:dark;
+    --canvas:#0b1120;
+    --card:#111827;
+    --card-sub:#1e293b;
+    --ink:#f1f5f9;
+    --ink2:#cbd5e1;
+    --muted:#94a3b8;
+    --line:#334155;
+    --line-subtle:#1e293b;
+    --line-strong:#475569;
+    --track:#334155;
+    --filter-bg:#1e293b;
+    --filter-on-bg:#0f766e;
+    --filter-on-fg:#ffffff;
+    --filter-on-shadow:0 1px 2px rgba(0,0,0,.35);
+    --conn-ready-bg:#1e293b;
+    --conn-ready-bd:#475569;
+    --tbl-th-bg:#1e293b;
+    --tbl-row-bd:#1e293b;
+    --tbl-hover:#172033;
+    --input-bg:#1e293b;
+    --input-bd:#334155;
+    --act-bg:#1e293b;
+    --act-hover-bg:rgba(20,184,166,.16);
+    --act-cmd-bg:rgba(15,118,110,.32);
+    --act-cmd-bd:rgba(45,212,191,.45);
+    --act-cmd-fg:#5eead4;
+    --act-cmd-hover:rgba(15,118,110,.48);
+    --pill-good-bg:rgba(16,185,129,.2);--pill-good-fg:#a7f3d0;--pill-good-bd:rgba(52,211,153,.4);
+    --pill-warn-bg:rgba(217,119,6,.22);--pill-warn-fg:#fde68a;--pill-warn-bd:rgba(251,191,36,.4);
+    --pill-bad-bg:rgba(220,38,38,.22);--pill-bad-fg:#fecaca;--pill-bad-bd:rgba(248,113,113,.4);
+    --pill-info-bg:rgba(37,99,235,.22);--pill-info-fg:#bfdbfe;--pill-info-bd:rgba(96,165,250,.4);
+    --pill-muted-bg:#1e293b;--pill-muted-fg:#cbd5e1;--pill-muted-bd:#334155;
+    --brand:#14b8a6;
+    --brand2:#2dd4bf;
+    --brand-soft:rgba(20,184,166,.16);
+    --shadow:0 2px 8px rgba(0,0,0,.45),0 16px 32px -18px rgba(0,0,0,.68);
+  }}
+}}
+html[data-theme="dark"],html[data-ops-rt-theme="dark"]{{
+  color-scheme:dark;
+  --canvas:#0b1120;
+  --card:#111827;
+  --card-sub:#1e293b;
+  --ink:#f1f5f9;
+  --ink2:#cbd5e1;
+  --muted:#94a3b8;
+  --line:#334155;
+  --line-subtle:#1e293b;
+  --line-strong:#475569;
+  --track:#334155;
+  --filter-bg:#1e293b;
+  --filter-on-bg:#0f766e;
+  --filter-on-fg:#ffffff;
+  --filter-on-shadow:0 1px 2px rgba(0,0,0,.35);
+  --conn-ready-bg:#1e293b;
+  --conn-ready-bd:#475569;
+  --tbl-th-bg:#1e293b;
+  --tbl-row-bd:#1e293b;
+  --tbl-hover:#172033;
+  --input-bg:#1e293b;
+  --input-bd:#334155;
+  --act-bg:#1e293b;
+  --act-hover-bg:rgba(20,184,166,.16);
+  --act-cmd-bg:rgba(15,118,110,.32);
+  --act-cmd-bd:rgba(45,212,191,.45);
+  --act-cmd-fg:#5eead4;
+  --act-cmd-hover:rgba(15,118,110,.48);
+  --pill-good-bg:rgba(16,185,129,.2);--pill-good-fg:#a7f3d0;--pill-good-bd:rgba(52,211,153,.4);
+  --pill-warn-bg:rgba(217,119,6,.22);--pill-warn-fg:#fde68a;--pill-warn-bd:rgba(251,191,36,.4);
+  --pill-bad-bg:rgba(220,38,38,.22);--pill-bad-fg:#fecaca;--pill-bad-bd:rgba(248,113,113,.4);
+  --pill-info-bg:rgba(37,99,235,.22);--pill-info-fg:#bfdbfe;--pill-info-bd:rgba(96,165,250,.4);
+  --pill-muted-bg:#1e293b;--pill-muted-fg:#cbd5e1;--pill-muted-bd:#334155;
+  --brand:#14b8a6;
+  --brand2:#2dd4bf;
+  --brand-soft:rgba(20,184,166,.16);
+  --shadow:0 2px 8px rgba(0,0,0,.45),0 16px 32px -18px rgba(0,0,0,.68);
+}}
 *{{box-sizing:border-box}}
 html,body{{margin:0;padding:0;max-width:100%;overflow-x:hidden;background:var(--canvas);color:var(--ink);font:14px/1.5 var(--font);-webkit-font-smoothing:antialiased}}
 a{{color:var(--brand);text-decoration:none}}
 a:hover{{text-decoration:underline}}
 .mono{{font-family:var(--mono);font-variant-numeric:tabular-nums}}
+:where(.wrap input,.wrap select,.wrap textarea){{background:var(--input-bg);color:var(--ink);border:1px solid var(--input-bd);border-radius:8px;font-family:var(--font)}}
+:where(.wrap input,.wrap select,.wrap textarea):focus{{outline:none;border-color:var(--brand)}}
 
 /* Command Header Shell */
 .cmd-shell{{
@@ -1927,7 +2037,7 @@ a:hover{{text-decoration:underline}}
 .strip-item{{display:inline-flex;align-items:center;gap:6px}}
 .strip-item strong{{color:#f1f5f9;font-family:var(--mono);font-weight:700}}
 
-/* Main Light-Card Workspace */
+/* Main Workspace */
 .wrap{{max-width:1400px;margin:0 auto;padding:20px 20px 56px}}
 .kpi-grid{{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:12px;margin-bottom:16px}}
 .grid-2{{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px;margin-bottom:16px}}
@@ -1966,11 +2076,11 @@ a:hover{{text-decoration:underline}}
   display:inline-flex;align-items:center;gap:4px;padding:2px 8px;border-radius:999px;
   font:700 11px/1.35 var(--mono);white-space:nowrap
 }}
-.pill-good{{background:#ecfdf5;color:#15803d;border:1px solid #bbf7d0}}
-.pill-warn{{background:#fffbeb;color:#b45309;border:1px solid #fde68a}}
-.pill-bad{{background:#fef2f2;color:#b91c1c;border:1px solid #fecaca}}
-.pill-info{{background:#eff6ff;color:#1d4ed8;border:1px solid #bfdbfe}}
-.pill-muted{{background:#f1f5f9;color:#475569;border:1px solid #cbd5e1}}
+.pill-good{{background:var(--pill-good-bg);color:var(--pill-good-fg);border:1px solid var(--pill-good-bd)}}
+.pill-warn{{background:var(--pill-warn-bg);color:var(--pill-warn-fg);border:1px solid var(--pill-warn-bd)}}
+.pill-bad{{background:var(--pill-bad-bg);color:var(--pill-bad-fg);border:1px solid var(--pill-bad-bd)}}
+.pill-info{{background:var(--pill-info-bg);color:var(--pill-info-fg);border:1px solid var(--pill-info-bd)}}
+.pill-muted{{background:var(--pill-muted-bg);color:var(--pill-muted-fg);border:1px solid var(--pill-muted-bd)}}
 
 .chart-box{{width:100%;height:280px;min-height:240px;position:relative}}
 .chart-box.compact{{height:215px;min-height:200px}}
@@ -1981,22 +2091,22 @@ a:hover{{text-decoration:underline}}
 .meter-top{{display:flex;justify-content:space-between;align-items:center;font-size:12.5px;gap:8px}}
 .meter-top span:first-child{{color:var(--ink2);font-weight:600}}
 .meter-top span:last-child{{font-family:var(--mono);font-weight:700;color:var(--ink)}}
-.meter-track{{height:8px;background:#e2e8f0;border-radius:999px;overflow:hidden}}
+.meter-track{{height:8px;background:var(--track);border-radius:999px;overflow:hidden}}
 .meter-fill{{height:100%;border-radius:999px;background:linear-gradient(90deg,var(--brand),var(--brand2));transition:width .35s ease}}
 .meter-fill.blue{{background:linear-gradient(90deg,#2563eb,#38bdf8)}}
 .meter-fill.amber{{background:linear-gradient(90deg,#d97706,#fbbf24)}}
 
 /* Connector Grid */
-.conn-filters{{display:inline-flex;gap:4px;background:#f1f5f9;padding:3px;border-radius:9px;border:1px solid var(--line)}}
+.conn-filters{{display:inline-flex;gap:4px;background:var(--filter-bg);padding:3px;border-radius:9px;border:1px solid var(--line)}}
 .conn-filters button{{border:0;background:transparent;padding:4px 10px;border-radius:7px;font:700 11.5px var(--font);color:var(--muted);cursor:pointer}}
-.conn-filters button.on{{background:#fff;color:var(--brand);box-shadow:0 1px 2px rgba(15,23,42,.08)}}
+.conn-filters button.on{{background:var(--filter-on-bg);color:var(--filter-on-fg);box-shadow:var(--filter-on-shadow)}}
 .conn-grid{{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:10px}}
 @media(max-width:520px){{.conn-grid{{grid-template-columns:minmax(0,1fr)}}}}
 .conn-card{{
-  border:1px solid var(--line);border-radius:11px;padding:11px 12px;background:#f8fafc;
+  border:1px solid var(--line);border-radius:11px;padding:11px 12px;background:var(--card-sub);
   display:flex;flex-direction:column;gap:6px;transition:border-color .15s,background .15s
 }}
-.conn-card.ready{{background:#fff;border-color:#cbd5e1}}
+.conn-card.ready{{background:var(--conn-ready-bg);border-color:var(--conn-ready-bd)}}
 .conn-card:hover{{border-color:var(--brand2)}}
 .conn-top{{display:flex;justify-content:space-between;align-items:flex-start;gap:8px}}
 .conn-name{{font-weight:700;font-size:13px;color:var(--ink);line-height:1.3}}
@@ -2004,29 +2114,29 @@ a:hover{{text-decoration:underline}}
 
 /* Tables */
 .tbl-wrap{{width:100%;max-width:100%;overflow-x:auto;-webkit-overflow-scrolling:touch;border:1px solid var(--line);border-radius:10px}}
-table.ops-tbl{{width:100%;border-collapse:collapse;font-size:12.5px;background:#fff}}
+table.ops-tbl{{width:100%;border-collapse:collapse;font-size:12.5px;background:var(--card)}}
 table.ops-tbl th{{
-  background:#f8fafc;color:var(--muted);font:700 11px/1.2 var(--font);text-transform:uppercase;
+  background:var(--tbl-th-bg);color:var(--muted);font:700 11px/1.2 var(--font);text-transform:uppercase;
   letter-spacing:.04em;text-align:left;padding:9px 11px;border-bottom:1px solid var(--line);white-space:nowrap
 }}
-table.ops-tbl td{{padding:9px 11px;border-bottom:1px solid #f1f5f9;vertical-align:middle;color:var(--ink2)}}
+table.ops-tbl td{{padding:9px 11px;border-bottom:1px solid var(--tbl-row-bd);vertical-align:middle;color:var(--ink2)}}
 table.ops-tbl tr:last-child td{{border-bottom:0}}
-table.ops-tbl tr:hover td{{background:#f8fafc}}
-.lat-bar-bg{{width:72px;height:6px;background:#e2e8f0;border-radius:999px;overflow:hidden;display:inline-block;vertical-align:middle;margin-left:6px}}
+table.ops-tbl tr:hover td{{background:var(--tbl-hover)}}
+.lat-bar-bg{{width:72px;height:6px;background:var(--track);border-radius:999px;overflow:hidden;display:inline-block;vertical-align:middle;margin-left:6px}}
 .lat-bar-fg{{height:100%;background:var(--brand2);border-radius:999px}}
 
 .act-links{{display:flex;align-items:center;gap:6px;flex-wrap:wrap}}
 .act-btn{{
   display:inline-flex;align-items:center;gap:4px;padding:5px 9px;border-radius:8px;
-  font:700 11.5px/1.2 var(--font);border:1px solid var(--line);background:#fff;color:var(--ink);
+  font:700 11.5px/1.2 var(--font);border:1px solid var(--line);background:var(--act-bg);color:var(--ink);
   white-space:nowrap;transition:all .15s
 }}
-.act-btn:hover{{border-color:var(--brand);color:var(--brand);text-decoration:none;background:var(--brand-soft)}}
-.act-btn.cmd{{border-color:#99f6e4;background:#f0fdfa;color:#0f766e}}
-.act-btn.cmd:hover{{background:#ccfbf1}}
+.act-btn:hover{{border-color:var(--brand);color:var(--brand);text-decoration:none;background:var(--act-hover-bg)}}
+.act-btn.cmd{{border-color:var(--act-cmd-bd);background:var(--act-cmd-bg);color:var(--act-cmd-fg)}}
+.act-btn.cmd:hover{{background:var(--act-cmd-hover)}}
 
 .inv-strip{{display:grid;grid-template-columns:repeat(auto-fill,minmax(145px,1fr));gap:8px;margin-top:12px}}
-.inv-mini{{background:#f8fafc;border:1px solid var(--line);border-radius:10px;padding:9px 11px}}
+.inv-mini{{background:var(--card-sub);border:1px solid var(--line);border-radius:10px;padding:9px 11px}}
 .inv-mini .k{{font-size:11px;color:var(--muted);font-weight:600}}
 .inv-mini .v{{font:800 16px/1.2 var(--mono);color:var(--ink);margin-top:2px}}
 
@@ -2596,13 +2706,24 @@ table.ops-tbl tr:hover td{{background:#f8fafc}}
     `).join('');
   }}
 
+  function isOpsDark() {{
+    const root = document.documentElement;
+    const t = (root.getAttribute('data-theme') || '').toLowerCase();
+    if (t === 'dark') return true;
+    if (t === 'light') return false;
+    const rt = (root.getAttribute('data-ops-rt-theme') || '').toLowerCase();
+    if (rt === 'dark') return true;
+    if (rt === 'light') return false;
+    return typeof window.matchMedia === 'function' && window.matchMedia('(prefers-color-scheme: dark)').matches;
+  }}
+
   function renderFallbackBars(container, items) {{
     container.innerHTML = `<div style="display:flex;flex-direction:column;gap:8px;padding:6px 0">` +
       items.map(it => `
         <div style="display:grid;grid-template-columns:130px 1fr 72px;gap:8px;align-items:center;font-size:12px">
           <span class="mono" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${{esc(it.label)}}</span>
-          <div style="height:10px;background:#e2e8f0;border-radius:999px;overflow:hidden">
-            <div style="height:100%;width:${{Math.min(100, it.pct).toFixed(1)}}%;background:${{it.color || '#0f766e'}};border-radius:999px"></div>
+          <div style="height:10px;background:var(--track);border-radius:999px;overflow:hidden">
+            <div style="height:100%;width:${{Math.min(100, it.pct).toFixed(1)}}%;background:${{it.color || 'var(--brand)'}};border-radius:999px"></div>
           </div>
           <span class="mono" style="text-align:right;font-weight:700">${{esc(it.valText)}}</span>
         </div>
@@ -2619,6 +2740,21 @@ table.ops-tbl tr:hover td{{background:#f8fafc}}
   }}
 
   function renderCharts(d) {{
+    const dark = isOpsDark();
+    const ink = dark ? '#f1f5f9' : '#0f172a';
+    const ink2 = dark ? '#cbd5e1' : '#334155';
+    const muted = dark ? '#94a3b8' : '#64748b';
+    const legInk = dark ? '#cbd5e1' : '#475569';
+    const splitCol = dark ? '#1e293b' : '#f1f5f9';
+    const trackCol = dark ? '#334155' : '#e2e8f0';
+    const tipBg = dark ? '#1e293b' : '#ffffff';
+    const tipBd = dark ? '#334155' : '#e2e8f0';
+    const p95Col = dark ? '#cbd5e1' : '#0f172a';
+    const reqBarCol = dark ? '#14b8a6' : '#0f766e';
+    const meanLineCol = dark ? '#60a5fa' : '#2563eb';
+    const meanAreaCol = dark ? 'rgba(96,165,250,.18)' : 'rgba(37,99,235,.12)';
+    const chartTip = {{ backgroundColor: tipBg, borderColor: tipBd, textStyle: {{ color: ink }} }};
+
     const routes = Array.isArray(d.routes) ? d.routes : [];
     const primaryRoutes = routes.filter(r => r.route !== 'other' || r.requests > 0);
     const latEl = document.getElementById('latencyRouteChart');
@@ -2627,14 +2763,14 @@ table.ops-tbl tr:hover td{{background:#f8fafc}}
     const latChart = getOrCreateChart('lat', 'latencyRouteChart');
     if (latChart) {{
       latChart.setOption({{
-        tooltip: {{ trigger: 'axis', axisPointer: {{ type: 'shadow' }} }},
-        legend: {{ data: ['P50', 'P95', 'Mean'], top: 0, textStyle: {{ fontSize: 11, color: '#475569' }} }},
+        tooltip: Object.assign({{ trigger: 'axis', axisPointer: {{ type: 'shadow' }} }}, chartTip),
+        legend: {{ data: ['P50', 'P95', 'Mean'], top: 0, textStyle: {{ fontSize: 11, color: legInk }} }},
         grid: {{ left: 10, right: 16, top: 34, bottom: 8, containLabel: true }},
-        xAxis: {{ type: 'value', axisLabel: {{ fontSize: 11, color: '#64748b', formatter: '{{value}} ms' }}, splitLine: {{ lineStyle: {{ color: '#f1f5f9' }} }} }},
-        yAxis: {{ type: 'category', data: primaryRoutes.map(r => r.route), axisLabel: {{ fontSize: 11, color: '#334155', fontFamily: 'JetBrains Mono, monospace' }} }},
+        xAxis: {{ type: 'value', axisLabel: {{ fontSize: 11, color: muted, formatter: '{{value}} ms' }}, splitLine: {{ lineStyle: {{ color: splitCol }} }} }},
+        yAxis: {{ type: 'category', data: primaryRoutes.map(r => r.route), axisLabel: {{ fontSize: 11, color: ink2, fontFamily: 'JetBrains Mono, monospace' }} }},
         series: [
           {{ name: 'P50', type: 'bar', data: primaryRoutes.map(r => r.p50Ms || 0), itemStyle: {{ color: '#14b8a6', borderRadius: [0, 3, 3, 0] }} }},
-          {{ name: 'P95', type: 'bar', data: primaryRoutes.map(r => r.p95Ms || 0), itemStyle: {{ color: '#0f172a', borderRadius: [0, 3, 3, 0] }} }},
+          {{ name: 'P95', type: 'bar', data: primaryRoutes.map(r => r.p95Ms || 0), itemStyle: {{ color: p95Col, borderRadius: [0, 3, 3, 0] }} }},
           {{ name: 'Mean', type: 'bar', data: primaryRoutes.map(r => r.meanMs || 0), itemStyle: {{ color: '#3b82f6', borderRadius: [0, 3, 3, 0] }} }}
         ]
       }}, true);
@@ -2643,7 +2779,7 @@ table.ops-tbl tr:hover td{{background:#f8fafc}}
         label: r.route,
         pct: (Number(r.p95Ms || 0) / maxP95) * 100,
         valText: `${{Number(r.p95Ms || 0).toFixed(1)}} ms`,
-        color: '#0f766e'
+        color: reqBarCol
       }})));
     }}
 
@@ -2655,17 +2791,17 @@ table.ops-tbl tr:hover td{{background:#f8fafc}}
       const reqs = ts.length ? ts.map(p => p.requests) : [0];
       const avgs = ts.length ? ts.map(p => p.avgMs) : [0];
       trendChart.setOption({{
-        tooltip: {{ trigger: 'axis' }},
-        legend: {{ data: [tr('thReq'), tr('thMean')], top: 0, textStyle: {{ fontSize: 11, color: '#475569' }} }},
+        tooltip: Object.assign({{ trigger: 'axis' }}, chartTip),
+        legend: {{ data: [tr('thReq'), tr('thMean')], top: 0, textStyle: {{ fontSize: 11, color: legInk }} }},
         grid: {{ left: 10, right: 12, top: 34, bottom: 8, containLabel: true }},
-        xAxis: {{ type: 'category', data: labels, axisLabel: {{ fontSize: 11, color: '#64748b' }} }},
+        xAxis: {{ type: 'category', data: labels, axisLabel: {{ fontSize: 11, color: muted }} }},
         yAxis: [
-          {{ type: 'value', name: tr('thReq'), minInterval: 1, axisLabel: {{ fontSize: 11, color: '#64748b' }}, splitLine: {{ lineStyle: {{ color: '#f1f5f9' }} }} }},
-          {{ type: 'value', name: 'ms', axisLabel: {{ fontSize: 11, color: '#64748b' }}, splitLine: {{ show: false }} }}
+          {{ type: 'value', name: tr('thReq'), nameTextStyle: {{ color: muted }}, minInterval: 1, axisLabel: {{ fontSize: 11, color: muted }}, splitLine: {{ lineStyle: {{ color: splitCol }} }} }},
+          {{ type: 'value', name: 'ms', nameTextStyle: {{ color: muted }}, axisLabel: {{ fontSize: 11, color: muted }}, splitLine: {{ show: false }} }}
         ],
         series: [
-          {{ name: tr('thReq'), type: 'bar', barMaxWidth: 22, data: reqs, itemStyle: {{ color: '#0f766e', borderRadius: [4, 4, 0, 0] }} }},
-          {{ name: tr('thMean'), type: 'line', yAxisIndex: 1, smooth: true, data: avgs, lineStyle: {{ color: '#2563eb', width: 2.5 }}, itemStyle: {{ color: '#2563eb' }}, areaStyle: {{ color: 'rgba(37,99,235,.12)' }} }}
+          {{ name: tr('thReq'), type: 'bar', barMaxWidth: 22, data: reqs, itemStyle: {{ color: reqBarCol, borderRadius: [4, 4, 0, 0] }} }},
+          {{ name: tr('thMean'), type: 'line', yAxisIndex: 1, smooth: true, data: avgs, lineStyle: {{ color: meanLineCol, width: 2.5 }}, itemStyle: {{ color: meanLineCol }}, areaStyle: {{ color: meanAreaCol }} }}
         ]
       }}, true);
     }} else if (trendEl) {{
@@ -2674,7 +2810,7 @@ table.ops-tbl tr:hover td{{background:#f8fafc}}
         label: p.label,
         pct: (Number(p.requests || 0) / maxReq) * 100,
         valText: `${{p.requests}} req`,
-        color: '#2563eb'
+        color: meanLineCol
       }})));
     }}
 
@@ -2692,19 +2828,19 @@ table.ops-tbl tr:hover td{{background:#f8fafc}}
           max: 100,
           radius: '92%',
           center: ['50%', '58%'],
-          progress: {{ show: true, width: 12, itemStyle: {{ color: '#0f766e' }} }},
-          axisLine: {{ lineStyle: {{ width: 12, color: [[1, '#e2e8f0']] }} }},
+          progress: {{ show: true, width: 12, itemStyle: {{ color: reqBarCol }} }},
+          axisLine: {{ lineStyle: {{ width: 12, color: [[1, trackCol]] }} }},
           axisTick: {{ show: false }},
           splitLine: {{ show: false }},
           axisLabel: {{ show: false }},
           pointer: {{ show: false }},
-          detail: {{ valueAnimation: true, fontSize: 22, fontWeight: 800, fontFamily: 'JetBrains Mono, monospace', color: '#0f172a', formatter: '{{value}}%', offsetCenter: [0, '8%'] }},
-          title: {{ fontSize: 11, color: '#64748b', offsetCenter: [0, '38%'] }},
+          detail: {{ valueAnimation: true, fontSize: 22, fontWeight: 800, fontFamily: 'JetBrains Mono, monospace', color: ink, formatter: '{{value}}%', offsetCenter: [0, '8%'] }},
+          title: {{ fontSize: 11, color: muted, offsetCenter: [0, '38%'] }},
           data: [{{ value: dedupPct, name: tr('tileDedup') }}]
         }}]
       }}, true);
     }} else if (gaugeEl) {{
-      renderFallbackBars(gaugeEl, [{{ label: tr('tileDedup'), pct: dedupPct, valText: `${{dedupPct.toFixed(1)}}%`, color: '#0f766e' }}]);
+      renderFallbackBars(gaugeEl, [{{ label: tr('tileDedup'), pct: dedupPct, valText: `${{dedupPct.toFixed(1)}}%`, color: reqBarCol }}]);
     }}
   }}
 
@@ -2840,7 +2976,7 @@ table.ops-tbl tr:hover td{{background:#f8fafc}}
       const barPct = Math.min(100, (Number(r.p95Ms || 0) / maxRouteP95) * 100);
       return `
         <tr>
-          <td class="mono" style="font-weight:700;color:#0f172a;white-space:nowrap">${{esc(r.route)}}</td>
+          <td class="mono" style="font-weight:700;color:var(--ink);white-space:nowrap">${{esc(r.route)}}</td>
           <td class="mono">${{fmtNum(r.requests)}}</td>
           <td class="mono">${{r.errors > 0 ? `<span class="pill pill-warn">${{fmtNum(r.errors)}}</span>` : '0'}}</td>
           <td class="mono" style="white-space:nowrap">${{Number(r.meanMs || 0).toFixed(2)}} ms</td>
@@ -2855,7 +2991,7 @@ table.ops-tbl tr:hover td{{background:#f8fafc}}
     const events = Array.isArray(d.recentEvents) ? d.recentEvents : [];
     const evBody = document.getElementById('eventsTableBody');
     if (!events.length) {{
-      evBody.innerHTML = `<tr><td colspan="5" style="text-align:center;color:#64748b;padding:18px">${{esc(tr('noEvents'))}}</td></tr>`;
+      evBody.innerHTML = `<tr><td colspan="5" style="text-align:center;color:var(--muted);padding:18px">${{esc(tr('noEvents'))}}</td></tr>`;
     }} else {{
       evBody.innerHTML = events.map((ev) => {{
         const st = Number(ev.status || 200);
@@ -2876,7 +3012,7 @@ table.ops-tbl tr:hover td{{background:#f8fafc}}
     const recs = Array.isArray(inv.recentReports) ? inv.recentReports : [];
     const recBody = document.getElementById('recentReportsBody');
     if (!recs.length) {{
-      recBody.innerHTML = `<tr><td colspan="6" style="text-align:center;color:#64748b;padding:18px">${{esc(tr('noReports'))}}</td></tr>`;
+      recBody.innerHTML = `<tr><td colspan="6" style="text-align:center;color:var(--muted);padding:18px">${{esc(tr('noReports'))}}</td></tr>`;
     }} else {{
       recBody.innerHTML = recs.map((r) => {{
         const score = r.overallScore != null ? `${{Number(r.overallScore).toFixed(0)}}/100` : '—';
@@ -2884,8 +3020,8 @@ table.ops-tbl tr:hover td{{background:#f8fafc}}
         return `
           <tr>
             <td>
-              <div style="font-weight:700;color:#0f172a">${{esc(r.displayAddress)}}</div>
-              <div class="mono" style="font-size:11px;color:#64748b">${{esc(r.slug)}}${{r.zip ? ' · ' + esc(r.zip) : ''}}</div>
+              <div style="font-weight:700;color:var(--ink)">${{esc(r.displayAddress)}}</div>
+              <div class="mono" style="font-size:11px;color:var(--muted)">${{esc(r.slug)}}${{r.zip ? ' · ' + esc(r.zip) : ''}}</div>
             </td>
             <td><span class="pill ${{scoreCls}}">${{esc(score)}}</span></td>
             <td class="mono" style="white-space:nowrap">${{esc(fmtUsd(r.estimatedValue))}}</td>
@@ -2976,6 +3112,19 @@ table.ops-tbl tr:hover td{{background:#f8fafc}}
     ['latencyRouteChart', 'throughputTrendChart', 'cacheGaugeChart'].forEach((id) => {{
       const el = document.getElementById(id);
       if (el) ro.observe(el);
+    }});
+  }}
+
+  if (typeof window.matchMedia === 'function') {{
+    const mq = window.matchMedia('(prefers-color-scheme: dark)');
+    const onScheme = () => renderCharts(latestData);
+    if (typeof mq.addEventListener === 'function') mq.addEventListener('change', onScheme);
+    else if (typeof mq.addListener === 'function') mq.addListener(onScheme);
+  }}
+  if (typeof MutationObserver === 'function' && document.documentElement) {{
+    new MutationObserver(() => renderCharts(latestData)).observe(document.documentElement, {{
+      attributes: true,
+      attributeFilter: ['data-theme', 'data-ops-rt-theme']
     }});
   }}
 

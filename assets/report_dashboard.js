@@ -853,19 +853,49 @@
     };
   }
 
+  function isDarkTheme() {
+    try {
+      var root = document.documentElement;
+      var dt = root && root.getAttribute ? root.getAttribute('data-theme') : '';
+      if (dt === 'dark') return true;
+      if (dt === 'light') return false;
+      if (root && root.dataset && root.dataset.effectiveTheme) {
+        return root.dataset.effectiveTheme === 'dark';
+      }
+      return Boolean(typeof g.matchMedia === 'function' && g.matchMedia('(prefers-color-scheme: dark)').matches);
+    } catch (_e) {
+      return false;
+    }
+  }
+
+  function scopeDarkCss(rules) {
+    function withPrefix(pfx) {
+      return rules.map(function (rule) {
+        var bi = rule.indexOf('{');
+        if (bi < 0) return rule;
+        var sels = rule.slice(0, bi).split(',').map(function (s) {
+          var t = s.trim();
+          return t ? (pfx + ' ' + t) : t;
+        }).join(',');
+        return sels + rule.slice(bi);
+      }).join('\n');
+    }
+    return '@media (prefers-color-scheme: dark){\n' + withPrefix(':root:not([data-theme="light"])') + '\n}\n' + withPrefix('html[data-theme="dark"]');
+  }
+
   function injectStyles() {
     if (document.getElementById(STYLE_ID)) return;
-    var css = [
+    var baseRules = [
       'body.db-cmd-active .layout{max-width:1420px;grid-template-columns:minmax(0,1fr);gap:14px}',
       'body.db-cmd-active .chap-ws-outer{max-width:1420px}',
       'body.db-cmd-active #mediaBento,body.db-cmd-active #gallery,body.db-cmd-active #side,body.db-cmd-active #chapterNextNav,body.db-cmd-active main>section.sec{display:none!important}',
-      'body.db-cmd-active #chapterWorkspaceBar .chap-btn.on:not(#toggleCommandCenterBtn){background:var(--card,#fff)!important;color:var(--ink2,#334155)!important;border-color:var(--line,#e2e8f0)!important;box-shadow:none!important}',
+      'body.db-cmd-active #chapterWorkspaceBar .chap-btn.on:not(#toggleCommandCenterBtn){background:var(--surface,#fff)!important;color:var(--ink2,#334155)!important;border-color:var(--line,#e2e8f0)!important;box-shadow:none!important}',
       'body.db-cmd-active #chapterWorkspaceBar .chap-btn.on:not(#toggleCommandCenterBtn) .chap-num{background:var(--soft,#f1f5f9)!important;color:var(--ink2,#334155)!important}',
-      '.db-cmd-toggle{display:inline-flex;align-items:center;gap:5px;padding:4.5px 10px;border-radius:9px;border:1px solid #0f766e;background:linear-gradient(135deg,#0f766e,#0d9488);color:#fff!important;font-weight:700;font-size:11.4px;cursor:pointer;white-space:nowrap;flex:0 0 auto;box-shadow:0 2px 6px rgba(15,118,110,.22);transition:transform .12s,box-shadow .15s}',
+      '.db-cmd-toggle{display:inline-flex;align-items:center;gap:5px;padding:4.5px 10px;border-radius:9px;border:1px solid #0f766e;background:linear-gradient(135deg,#0f766e,#0d9488);color:#fff;font-weight:700;font-size:11.4px;cursor:pointer;white-space:nowrap;flex:0 0 auto;box-shadow:0 2px 6px rgba(15,118,110,.22);transition:transform .12s,box-shadow .15s}',
       '.db-cmd-toggle:hover{transform:translateY(-1px);box-shadow:0 4px 10px rgba(15,118,110,.3)}',
-      '.db-cmd-toggle.is-active{background:linear-gradient(135deg,#134e4a,#0f766e);box-shadow:0 0 0 2px #99f6e4}',
+      '.db-cmd-toggle.is-active{background:linear-gradient(135deg,#134e4a,#0f766e);color:#fff!important;box-shadow:0 0 0 2px #99f6e4}',
       '.db-cmd-shell{display:block;width:100%;max-width:100%;box-sizing:border-box;font-family:inherit;color:var(--ink,#0f172a)}',
-      '.db-cmd-shell[hidden]{display:none!important}',
+      '.db-cmd-shell[hidden],.db-sim-metrics[hidden],.db-art-kpis[hidden],.db-sim-mbox[hidden]{display:none!important}',
       '.db-cmd-topbar{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:10px;padding:12px 16px;margin-bottom:14px;border-radius:14px;background:linear-gradient(135deg,#0f172a 0%,#134e4a 100%);color:#f8fafc;box-shadow:0 6px 20px rgba(15,23,42,.12)}',
       '.db-cmd-top-left{display:flex;flex-direction:column;gap:2px;min-width:0}',
       '.db-cmd-addr{font-size:16px;font-weight:800;letter-spacing:-.01em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}',
@@ -877,7 +907,7 @@
       '.db-cmd-grid{display:grid;grid-template-columns:minmax(0,1fr);gap:14px;align-items:start}',
       '@media(min-width:780px){.db-cmd-grid{grid-template-columns:minmax(290px,360px) minmax(0,1fr)}.db-zone-c{grid-column:1 / -1}}',
       '@media(min-width:1220px){.db-cmd-grid{grid-template-columns:minmax(285px,335px) minmax(350px,1.05fr) minmax(385px,1.25fr)}.db-zone-c{grid-column:auto}}',
-      '.db-panel{background:var(--card,#fff);border:1px solid var(--line,#e2e8f0);border-radius:14px;padding:14px;box-shadow:0 2px 10px rgba(15,23,42,.04);min-width:0;box-sizing:border-box}',
+      '.db-panel{background:var(--surface,#fff);border:1px solid var(--line,#e2e8f0);border-radius:14px;padding:14px;box-shadow:0 2px 10px rgba(15,23,42,.04);min-width:0;box-sizing:border-box}',
       '.db-panel-hd{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:10px;padding-bottom:8px;border-bottom:1px solid var(--line,#e2e8f0)}',
       '.db-panel-title{font-size:14px;font-weight:800;color:var(--ink,#0f172a);margin:0;display:flex;align-items:center;gap:6px}',
       '.db-badge{font-size:10.5px;font-weight:700;padding:2px 8px;border-radius:999px;background:#f0fdfa;color:#0f766e;border:1px solid #ccfbf1;white-space:nowrap}',
@@ -896,7 +926,7 @@
       '.db-sim-toggle-row{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:7px 9px;border-radius:9px;background:#f8fafc;border:1px solid #e2e8f0;margin-bottom:9px;font-size:12px}',
       '.db-sim-toggle-lbl{display:flex;align-items:center;gap:6px;font-weight:700;color:#1e293b;cursor:pointer}',
       '.db-sim-select{font-size:11.5px;padding:3px 6px;border-radius:6px;border:1px solid #cbd5e1;background:#fff;color:#0f172a}',
-      '.db-sim-metrics{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px;margin:10px 0}',
+      '.db-sim-metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(90px,1fr));gap:6px;margin:10px 0}',
       '.db-sim-mbox{padding:7px 8px;border-radius:9px;background:#f8fafc;border:1px solid #e2e8f0;min-width:0}',
       '.db-sim-mlbl{font-size:10px;font-weight:700;color:#64748b;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}',
       '.db-sim-mval{font-size:13px;font-weight:800;color:#0f172a;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}',
@@ -938,6 +968,9 @@
       '.db-art-title{font-size:14px;font-weight:800;color:#0f172a;margin:0 0 2px}',
       '.db-art-sub{font-size:11.5px;color:#64748b;margin:0 0 8px}',
       '.db-echart-box{width:100%;height:255px;min-height:220px;border-radius:10px;background:#fff;border:1px solid #f1f5f9}',
+      '.db-echart-empty{padding:18px;font-size:12.5px;color:#475569}',
+      '.db-echart-empty.is-compact{padding:14px;font-size:12px}',
+      '.db-echart-fallback{padding:10px;font-size:12px;color:#1e293b}',
       '.db-art-table-wrap{max-width:100%;overflow-x:auto;margin-top:8px;border:1px solid #e2e8f0;border-radius:9px}',
       '.db-art-table{width:100%;border-collapse:collapse;font-size:11.5px;text-align:left}',
       '.db-art-table th{background:#f8fafc;padding:6px 8px;font-weight:800;color:#334155;border-bottom:1px solid #e2e8f0;white-space:nowrap}',
@@ -947,7 +980,69 @@
       '.db-art-status{font-size:11px;color:#b45309;margin:4px 0}',
       '.db-zone-c.db-art-expanded{position:fixed;inset:14px;z-index:9990;overflow:auto;box-shadow:0 24px 60px rgba(15,23,42,.35)}',
       '.db-zone-c.db-art-expanded .db-echart-box{height:380px}'
-    ].join('\n');
+    ];
+
+    var darkRules = [
+      'body.db-cmd-active #chapterWorkspaceBar .chap-btn.on:not(#toggleCommandCenterBtn){background:var(--surface-2,#1e293b)!important;color:var(--ink2,#cbd5e1)!important;border-color:var(--line-strong,#334155)!important}',
+      'body.db-cmd-active #chapterWorkspaceBar .chap-btn.on:not(#toggleCommandCenterBtn) .chap-num{background:var(--soft,#172033)!important;color:var(--ink2,#cbd5e1)!important}',
+      '.db-cmd-toggle.is-active{box-shadow:0 0 0 2px rgba(45,212,191,.55)}',
+      '.db-cmd-shell{color:var(--ink,#f1f5f9)}',
+      '.db-cmd-topbar{border:1px solid var(--line-strong,#334155);box-shadow:0 8px 24px rgba(0,0,0,.45)}',
+      '.db-panel{background:var(--surface,#111827);border-color:var(--line-strong,#334155);box-shadow:0 6px 20px rgba(0,0,0,.38)}',
+      '.db-panel-hd{border-bottom-color:var(--line-strong,#334155)}',
+      '.db-panel-title{color:var(--ink,#f1f5f9)}',
+      '.db-badge{background:var(--brandsoft,rgba(20,184,166,.16));color:#5eead4;border-color:rgba(45,212,191,.38)}',
+      '.db-sim-hero{background:linear-gradient(135deg,rgba(20,184,166,.16),rgba(14,116,144,.14));border-color:rgba(45,212,191,.36)}',
+      '.db-sim-hero-lbl{color:#5eead4}',
+      '.db-sim-hero-val{color:#f8fafc}',
+      '.db-sim-hero-sub{color:var(--ink2,#cbd5e1)}',
+      '.db-sim-stack{background:var(--line-strong,#334155)}',
+      '.db-sim-leg{color:var(--ink2,#cbd5e1)}',
+      '.db-sim-ctrl-row{color:var(--ink2,#cbd5e1)}',
+      '.db-sim-ctrl-val{color:#5eead4}',
+      '.db-sim-range{accent-color:#14b8a6}',
+      '.db-sim-toggle-row{background:var(--surface-2,#1e293b);border-color:var(--line-strong,#334155)}',
+      '.db-sim-toggle-lbl{color:var(--ink,#f1f5f9)}',
+      '.db-sim-select{background:var(--surface,#0f172a);color:var(--ink,#f1f5f9);border-color:var(--line-strong,#334155)}',
+      '.db-sim-mbox{background:var(--surface-2,#1e293b);border-color:var(--line-strong,#334155)}',
+      '.db-sim-mlbl{color:var(--muted,#94a3b8)}',
+      '.db-sim-mval{color:var(--ink,#f1f5f9)}',
+      '.db-btn-sec{background:var(--surface-2,#1e293b);color:var(--ink,#e2e8f0);border-color:var(--line-strong,#334155)}',
+      '.db-btn-sec:hover{background:#293548;border-color:#475569;color:#f8fafc}',
+      '.db-bcard{background:var(--surface-2,#1e293b);border-color:var(--line-strong,#334155)}',
+      '.db-bcard-title{color:var(--ink2,#cbd5e1)}',
+      '.db-tone-good{background:rgba(22,163,74,.2);color:#86efac}',
+      '.db-tone-info{background:rgba(37,99,235,.22);color:#93c5fd}',
+      '.db-tone-warn{background:rgba(217,119,6,.22);color:#fde68a}',
+      '.db-bcard-main{color:var(--ink,#f8fafc)}',
+      '.db-bcard-desc{color:var(--ink2,#cbd5e1)}',
+      '.db-bcard-jump{background:var(--surface,#0f172a);color:#5eead4;border-color:var(--line-strong,#334155)}',
+      '.db-bcard-jump:hover{background:rgba(20,184,166,.18);border-color:#2dd4bf}',
+      '.db-chip-btn{background:var(--surface-2,#1e293b);color:var(--ink,#e2e8f0);border-color:var(--line-strong,#334155)}',
+      '.db-chip-btn:hover,.db-chip-btn.is-selected{border-color:#2dd4bf;background:rgba(20,184,166,.2);color:#5eead4}',
+      '.db-prompt-inp{background:var(--surface-2,#1e293b);color:var(--ink,#f8fafc);border-color:var(--line-strong,#334155)}',
+      '.db-prompt-inp::placeholder{color:var(--muted,#94a3b8)}',
+      '.db-prompt-inp:focus{outline-color:#14b8a6}',
+      '.db-tab-pill{background:var(--surface-2,#1e293b);color:var(--ink2,#cbd5e1);border-color:var(--line-strong,#334155)}',
+      '.db-tab-pill.is-active{background:#0f766e;color:#fff;border-color:#14b8a6}',
+      '.db-art-kpi{background:var(--surface-2,#1e293b);border-color:var(--line-strong,#334155)}',
+      '.db-art-kpi-l{color:var(--muted,#94a3b8)}',
+      '.db-art-kpi-v{color:var(--ink,#f8fafc)}',
+      '.db-art-kpi-d{color:#5eead4}',
+      '.db-art-title{color:var(--ink,#f8fafc)}',
+      '.db-art-sub{color:var(--muted,#94a3b8)}',
+      '.db-echart-box{background:var(--soft,#0f172a);border-color:var(--line-strong,#334155)}',
+      '.db-echart-empty,.db-echart-fallback{color:var(--ink2,#cbd5e1)}',
+      '.db-art-table-wrap{border-color:var(--line-strong,#334155)}',
+      '.db-art-table th{background:var(--surface-2,#1e293b);color:var(--ink2,#cbd5e1);border-bottom-color:var(--line-strong,#334155)}',
+      '.db-art-table td{color:var(--ink,#e2e8f0);border-top-color:var(--line,#1e293b)}',
+      '.db-art-notes{color:var(--ink2,#cbd5e1)}',
+      '.db-art-watch{background:var(--watchbg,rgba(217,119,6,.18));border-color:rgba(251,191,36,.38);color:#fde68a}',
+      '.db-art-status{color:#fbbf24}',
+      '.db-zone-c.db-art-expanded{box-shadow:0 24px 60px rgba(0,0,0,.68)}'
+    ];
+
+    var css = baseRules.join('\n') + '\n' + scopeDarkCss(darkRules);
 
     var styleEl = document.createElement('style');
     styleEl.id = STYLE_ID;
@@ -965,14 +1060,24 @@
       if (enabled) {
         url.searchParams.set('view', 'dashboard');
       } else {
-        url.searchParams.delete('view');
+        var curV = String(url.searchParams.get('view') || '').toLowerCase();
+        if (curV === 'dashboard' || curV === 'command') {
+          if (g.OpenEstateWorkspace && typeof g.OpenEstateWorkspace.getDensity === 'function' && g.OpenEstateWorkspace.getDensity() === 'full') {
+            url.searchParams.set('view', 'full');
+            url.searchParams.delete('density');
+          } else {
+            url.searchParams.delete('view');
+          }
+        }
       }
-      g.history.replaceState(null, '', url.pathname + url.search + url.hash);
+      var qs = url.searchParams.toString();
+      g.history.replaceState(null, '', url.pathname + (qs ? '?' + qs : '') + url.hash);
     } catch (_e) { /* ignore in file:// or mock env */ }
   }
 
   function ensureCommandCenterButton() {
-    var bar = document.getElementById('chapterWorkspaceBar');
+    var wsToolbar = document.getElementById('wsToolbarActions');
+    var bar = wsToolbar || document.getElementById('chapterWorkspaceBar');
     if (!bar) return null;
     var existing = document.getElementById(BTN_ID);
     if (!existing) {
@@ -981,7 +1086,7 @@
       existing.id = BTN_ID;
       existing.className = 'chap-btn db-cmd-toggle';
       existing.setAttribute('data-view', 'dashboard');
-      var container = (bar.querySelector && (bar.querySelector('.chap-pills') || bar.querySelector('.chap-ws'))) || bar;
+      var container = wsToolbar || (bar.querySelector && (bar.querySelector('.db-chap-actions') || bar.querySelector('.chap-bar-inner') || bar.querySelector('.chap-pills') || bar.querySelector('.chap-ws'))) || bar;
       if (typeof container.insertBefore === 'function' && container.firstChild) {
         container.insertBefore(existing, container.firstChild);
       } else if (typeof container.appendChild === 'function') {
@@ -1103,7 +1208,7 @@
         '</div>' +
         '<div class="db-sim-hero">' +
           '<div class="db-sim-hero-lbl">' + esc(t('netMonthly')) + '</div>' +
-          '<div class="db-sim-hero-val" id="simNetMonthly">—</div>' +
+          '<div class="db-sim-hero-val" id="simNetMonthly"></div>' +
           '<div class="db-sim-hero-sub" id="simGrossSummary"></div>' +
           '<div class="db-sim-stack" id="simStackedBar"></div>' +
           '<div class="db-sim-leg" id="simStackLegend"></div>' +
@@ -1122,10 +1227,10 @@
           '<div class="db-sim-ctrl-row"><span>' + esc(t('aduRentOffset')) + '</span><span class="db-sim-ctrl-val" id="simRentOffsetVal"></span></div>' +
           '<input class="db-sim-range" id="simRentOffsetSlider" type="range" min="0" max="' + maxRent + '" step="50" value="' + s.rentOffset + '">' +
         '</div>' +
-        '<div class="db-sim-metrics">' +
-          '<div class="db-sim-mbox"><div class="db-sim-mlbl">' + esc(t('cashToClose')) + '</div><div class="db-sim-mval" id="simCashToClose">—</div></div>' +
-          '<div class="db-sim-mbox"><div class="db-sim-mlbl">' + esc(t('fiveYrEquity')) + '</div><div class="db-sim-mval" id="simFiveYrEquity">—</div></div>' +
-          '<div class="db-sim-mbox"><div class="db-sim-mlbl">' + esc(t('capRate')) + '</div><div class="db-sim-mval" id="simCapRate">—</div></div>' +
+        '<div class="db-sim-metrics" id="simMetricsRow">' +
+          '<div class="db-sim-mbox" id="simCashToCloseBox"><div class="db-sim-mlbl">' + esc(t('cashToClose')) + '</div><div class="db-sim-mval" id="simCashToClose"></div></div>' +
+          '<div class="db-sim-mbox" id="simFiveYrEquityBox"><div class="db-sim-mlbl">' + esc(t('fiveYrEquity')) + '</div><div class="db-sim-mval" id="simFiveYrEquity"></div></div>' +
+          '<div class="db-sim-mbox" id="simCapRateBox"><div class="db-sim-mlbl">' + esc(t('capRate')) + '</div><div class="db-sim-mval" id="simCapRate"></div></div>' +
         '</div>' +
         '<div class="db-sim-actions">' +
           '<button type="button" class="db-btn-sec" id="simResetBtn">' + esc(t('resetSim')) + '</button>' +
@@ -1315,7 +1420,14 @@
   function updateSimulatorOutputs() {
     if (!state.sim) resetSimState();
     var d = getBaselineModel();
-    if (d.estVal == null || d.estVal <= 0) return;
+    var mRow = document.getElementById('simMetricsRow');
+    if (d.estVal == null || d.estVal <= 0) {
+      if (mRow) {
+        mRow.hidden = true;
+        if (mRow.style) mRow.style.display = 'none';
+      }
+      return;
+    }
     var s = state.sim;
 
     var offer = optNum(s.offer) != null ? optNum(s.offer) : d.estVal;
@@ -1345,8 +1457,8 @@
     }
 
     var netCapPct = null;
-    if (d.rentEst != null && offer > 0) {
-      var potentialAnnualRent = (d.rentEst + rentOff) * 12;
+    if ((d.rentEst != null || rentOff > 0) && offer > 0) {
+      var potentialAnnualRent = ((d.rentEst != null ? d.rentEst : 0) + rentOff) * 12;
       var annualOpEx = (propTax + homeIns + quakeIns + maint + hoa) * 12;
       netCapPct = ((potentialAnnualRent - annualOpEx) / offer) * 100;
     }
@@ -1356,17 +1468,38 @@
       if (el) el.textContent = txt;
     }
 
+    function setMetricBox(boxId, valId, formatted) {
+      var box = document.getElementById(boxId);
+      var valEl = document.getElementById(valId);
+      var ok = Boolean(formatted && formatted !== '—' && formatted !== 'N/A');
+      if (valEl) valEl.textContent = ok ? formatted : '';
+      if (box) {
+        box.hidden = !ok;
+        if (box.style) box.style.display = ok ? '' : 'none';
+      }
+      return ok;
+    }
+
     setTxt('simOfferVal', fmtUsd(offer));
     setTxt('simDownVal', downPct >= 99.5 ? ('100% (' + t('allCashTag') + ')') : (downPct + '% (' + fmtCompactUsd(offer * (downPct / 100)) + ')'));
     if (ratePct != null) setTxt('simRateVal', ratePct.toFixed(2) + '%');
     setTxt('simRentOffsetVal', '-' + fmtUsd(rentOff) + '/mo');
-    setTxt('simNetMonthly', net != null ? (fmtUsd(net) + '/mo') : '—');
+    var netEl = document.getElementById('simNetMonthly');
+    if (netEl) {
+      netEl.textContent = net != null ? (fmtUsd(net) + '/mo') : '';
+      netEl.hidden = net == null;
+    }
     setTxt('simGrossSummary', gross != null
       ? (t('grossLabel') + ': ' + fmtUsd(gross) + '/mo · ' + t('piSeg') + ' ' + fmtUsd(pi) + ' · ' + t('taxSeg') + ' ' + fmtUsd(propTax))
       : 'Mortgage rate unavailable in report');
-    setTxt('simCashToClose', fmtCompactUsd(cashToClose));
-    setTxt('simFiveYrEquity', equity5 != null ? fmtCompactUsd(equity5) : '—');
-    setTxt('simCapRate', netCapPct != null ? (netCapPct.toFixed(1) + '%') : '—');
+    var cOk = setMetricBox('simCashToCloseBox', 'simCashToClose', cashToClose != null && isFinite(cashToClose) ? fmtCompactUsd(cashToClose) : null);
+    var eOk = setMetricBox('simFiveYrEquityBox', 'simFiveYrEquity', equity5 != null && isFinite(equity5) ? fmtCompactUsd(equity5) : null);
+    var rOk = setMetricBox('simCapRateBox', 'simCapRate', netCapPct != null && isFinite(netCapPct) ? (netCapPct.toFixed(1) + '%') : null);
+    var showRow = Boolean(cOk || eOk || rOk);
+    if (mRow) {
+      mRow.hidden = !showRow;
+      if (mRow.style) mRow.style.display = showRow ? '' : 'none';
+    }
 
     var stackEl = document.getElementById('simStackedBar');
     var legEl = document.getElementById('simStackLegend');
@@ -1402,7 +1535,17 @@
     var series = Array.isArray(art.series) ? art.series : [];
     var cType = art.chartType || 'bar';
     var unit = art.unit || '';
-    var palette = ['#0f766e', '#0284c7', '#f59e0b', '#dc2626', '#7c3aed'];
+    var dark = isDarkTheme();
+    var palette = dark ? ['#14b8a6', '#38bdf8', '#fbbf24', '#f87171', '#a78bfa'] : ['#0f766e', '#0284c7', '#f59e0b', '#dc2626', '#7c3aed'];
+    var inkCol = dark ? '#e2e8f0' : '#1e293b';
+    var axisCol = dark ? '#94a3b8' : '#475569';
+    var gridCol = dark ? '#1e293b' : '#e2e8f0';
+    var tipBg = dark ? 'rgba(15,23,42,.96)' : 'rgba(255,255,255,.97)';
+    var tipBd = dark ? '#334155' : '#cbd5e1';
+    var tipFg = dark ? '#f8fafc' : '#0f172a';
+    var radarSplit = dark ? 'rgba(148,163,184,.18)' : 'rgba(15,23,42,.08)';
+    var tooltipBase = { backgroundColor: tipBg, borderColor: tipBd, textStyle: { color: tipFg } };
+    var legendStyle = { fontSize: 11, color: axisCol };
 
     if (cType === 'donut') {
       var s0 = series[0] && Array.isArray(series[0].values) ? series[0].values : [];
@@ -1411,14 +1554,15 @@
       });
       return {
         color: palette,
-        tooltip: { trigger: 'item', formatter: '{b}: {c} ({d}%)' },
-        legend: { bottom: 0, type: 'scroll', textStyle: { fontSize: 11 } },
+        textStyle: { color: inkCol },
+        tooltip: Object.assign({ trigger: 'item', formatter: '{b}: {c} ({d}%)' }, tooltipBase),
+        legend: { bottom: 0, type: 'scroll', textStyle: legendStyle, pageTextStyle: { color: axisCol }, pageIconColor: axisCol },
         series: [{
           name: (series[0] && series[0].name) || unit,
           type: 'pie',
           radius: ['42%', '68%'],
           center: ['50%', '44%'],
-          label: { show: true, fontSize: 11, formatter: '{b}\n{d}%' },
+          label: { show: true, fontSize: 11, color: inkCol, formatter: '{b}\n{d}%' },
           data: pieData
         }]
       };
@@ -1431,28 +1575,42 @@
       });
       return {
         color: palette,
-        tooltip: { trigger: 'item' },
-        legend: { bottom: 0, textStyle: { fontSize: 11 } },
-        radar: { indicator: indicator, radius: '60%', center: ['50%', '45%'] },
-        series: [{ type: 'radar', data: radarData, areaStyle: { opacity: 0.16 } }]
+        textStyle: { color: inkCol },
+        tooltip: Object.assign({ trigger: 'item' }, tooltipBase),
+        legend: { bottom: 0, textStyle: legendStyle },
+        radar: {
+          indicator: indicator,
+          radius: '60%',
+          center: ['50%', '45%'],
+          axisName: { color: axisCol },
+          axisLine: { lineStyle: { color: radarSplit } },
+          splitLine: { lineStyle: { color: radarSplit } },
+          splitArea: { areaStyle: { color: dark ? ['rgba(30,41,59,.35)', 'rgba(15,23,42,.2)'] : ['rgba(248,250,252,.65)', 'rgba(255,255,255,.35)'] } }
+        },
+        series: [{ type: 'radar', data: radarData, areaStyle: { opacity: 0.18 } }]
       };
     }
 
     if (cType === 'horizontal_bar') {
       return {
         color: palette,
-        tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
-        legend: { top: 2, type: 'scroll', textStyle: { fontSize: 11 } },
+        textStyle: { color: inkCol },
+        tooltip: Object.assign({ trigger: 'axis', axisPointer: { type: 'shadow' } }, tooltipBase),
+        legend: { top: 2, type: 'scroll', textStyle: legendStyle, pageTextStyle: { color: axisCol }, pageIconColor: axisCol },
         grid: { left: 105, right: 20, top: 32, bottom: 26 },
         xAxis: {
           type: 'value',
-          axisLabel: { fontSize: 10, formatter: function (v) { return formatChartAxisVal(v, unit); } }
+          axisLabel: { fontSize: 10, color: axisCol, formatter: function (v) { return formatChartAxisVal(v, unit); } },
+          axisLine: { lineStyle: { color: gridCol } },
+          splitLine: { lineStyle: { color: gridCol } }
         },
         yAxis: {
           type: 'category',
           data: cats,
           inverse: true,
-          axisLabel: { fontSize: 10.5, width: 96, overflow: 'truncate' }
+          axisLabel: { fontSize: 10.5, color: axisCol, width: 96, overflow: 'truncate' },
+          axisLine: { lineStyle: { color: gridCol } },
+          splitLine: { lineStyle: { color: gridCol } }
         },
         series: series.map(function (s) {
           return {
@@ -1468,17 +1626,22 @@
     var isLine = cType === 'line';
     return {
       color: palette,
-      tooltip: { trigger: 'axis' },
-      legend: { top: 2, type: 'scroll', textStyle: { fontSize: 11 } },
+      textStyle: { color: inkCol },
+      tooltip: Object.assign({ trigger: 'axis' }, tooltipBase),
+      legend: { top: 2, type: 'scroll', textStyle: legendStyle, pageTextStyle: { color: axisCol }, pageIconColor: axisCol },
       grid: { left: 56, right: 16, top: 34, bottom: 32 },
       xAxis: {
         type: 'category',
         data: cats,
-        axisLabel: { fontSize: 10.5, interval: 0, width: 72, overflow: 'truncate' }
+        axisLabel: { fontSize: 10.5, color: axisCol, interval: 0, width: 72, overflow: 'truncate' },
+        axisLine: { lineStyle: { color: gridCol } },
+        splitLine: { lineStyle: { color: gridCol } }
       },
       yAxis: {
         type: 'value',
-        axisLabel: { fontSize: 10, formatter: function (v) { return formatChartAxisVal(v, unit); } }
+        axisLabel: { fontSize: 10, color: axisCol, formatter: function (v) { return formatChartAxisVal(v, unit); } },
+        axisLine: { lineStyle: { color: gridCol } },
+        splitLine: { lineStyle: { color: gridCol } }
       },
       series: series.map(function (s) {
         return {
@@ -1490,6 +1653,15 @@
         };
       })
     };
+  }
+
+  function refreshActiveChartTheme() {
+    if (!state.active || !state.chartInstance || !state.artifacts.length) return;
+    var art = state.artifacts[state.activeArtifactIdx];
+    if (!art || !Array.isArray(art.series) || !art.series.length) return;
+    try {
+      state.chartInstance.setOption(buildEChartsOption(art), true);
+    } catch (_e) {}
   }
 
   function renderActiveArtifact() {
@@ -1520,13 +1692,21 @@
 
     var kpiEl = document.getElementById('artifactKpiStrip');
     if (kpiEl) {
-      var kpis = Array.isArray(art.kpis) ? art.kpis : [];
+      var kpis = (Array.isArray(art.kpis) ? art.kpis : []).filter(function (k) {
+        if (!k || k.value == null) return false;
+        var vStr = String(k.value).trim();
+        return vStr !== '' && vStr !== '—' && vStr !== '-' && vStr.toUpperCase() !== 'N/A';
+      });
+      kpiEl.hidden = !kpis.length;
+      if (kpiEl.style) kpiEl.style.display = kpis.length ? '' : 'none';
       kpiEl.innerHTML = kpis.map(function (k) {
+        var dStr = String(k.delta == null ? '' : k.delta).trim();
+        var showDelta = dStr && dStr !== '—' && dStr !== '-' && dStr.toUpperCase() !== 'N/A';
         return (
           '<div class="db-art-kpi">' +
             '<div class="db-art-kpi-l">' + esc(k.label) + '</div>' +
             '<div class="db-art-kpi-v">' + esc(k.value) + '</div>' +
-            '<div class="db-art-kpi-d">' + esc(k.delta) + '</div>' +
+            (showDelta ? '<div class="db-art-kpi-d">' + esc(dStr) + '</div>' : '') +
           '</div>'
         );
       }).join('');
@@ -1539,7 +1719,7 @@
           try { state.chartInstance.clear(); } catch (_e0) {}
         }
         var emptyNote = (Array.isArray(art.insights) && art.insights[0]) || 'Chart data unavailable for this property.';
-        chartBox.innerHTML = '<div style="padding:18px;font-size:12.5px;color:#475569">' + esc(emptyNote) + '</div>';
+        chartBox.innerHTML = '<div class="db-echart-empty">' + esc(emptyNote) + '</div>';
       } else if (typeof g.echarts !== 'undefined' && g.echarts && typeof g.echarts.init === 'function') {
         try {
           var inst = (g.echarts.getInstanceByDom && g.echarts.getInstanceByDom(chartBox)) || g.echarts.init(chartBox);
@@ -1549,12 +1729,12 @@
             setTimeout(function () { try { inst.resize(); } catch (_e) {} }, 20);
           }
         } catch (_err) {
-          chartBox.innerHTML = '<div style="padding:14px;font-size:12px;color:#475569">' + esc(art.title || '') + '</div>';
+          chartBox.innerHTML = '<div class="db-echart-empty is-compact">' + esc(art.title || '') + '</div>';
         }
       } else {
         // Lightweight non-ECharts fallback (for DOM environments without canvas/echarts)
         var s0 = (art.series && art.series[0]) || { values: [] };
-        chartBox.innerHTML = '<div style="padding:10px;font-size:12px">' + (art.categories || []).map(function (cat, i) {
+        chartBox.innerHTML = '<div class="db-echart-fallback">' + (art.categories || []).map(function (cat, i) {
           return '<div><strong>' + esc(cat) + '</strong>: ' + esc(formatChartAxisVal(num(s0.values[i], 0), art.unit)) + '</div>';
         }).join('') + '</div>';
       }
@@ -1967,6 +2147,17 @@
             try { state.chartInstance.resize(); } catch (_e) {}
           }
         });
+        g.addEventListener('openestate:themechange', refreshActiveChartTheme);
+        if (typeof g.matchMedia === 'function') {
+          try {
+            var mqTheme = g.matchMedia('(prefers-color-scheme: dark)');
+            if (mqTheme && typeof mqTheme.addEventListener === 'function') {
+              mqTheme.addEventListener('change', refreshActiveChartTheme);
+            } else if (mqTheme && typeof mqTheme.addListener === 'function') {
+              mqTheme.addListener(refreshActiveChartTheme);
+            }
+          } catch (_e) {}
+        }
         g.addEventListener('keydown', function (ev) {
           if (ev && ev.key === 'Escape' && state.fullscreen) {
             state.fullscreen = false;

@@ -22,6 +22,10 @@ use crate::modules::house3d::{
     build_house3d_with_budget, input_fingerprint, pack_json, scene_input_from_report, unpack_json, SceneInput,
     LIDAR_BUDGET_DETACHED, SCENE_VERSION,
 };
+use crate::modules::solar::{
+    compute_solar_from_scene_and_climate, fetch_nasa_power_climatology, fetch_pvgis_horizon,
+    solar_context_from_report, SolarPotentialOutput, SOLAR_VERSION,
+};
 use crate::shared::{sanitize_user_warning, EnvConfig, HttpClient};
 use crate::web::hooks::authorize_cached_report;
 use crate::web::server::{guardrail_error_to_response, json_response, AppState};
@@ -53,6 +57,13 @@ const RETRY_AFTER_MS: u64 = 2_500;
 /// Short-lived in-process copy: repeat views are instant and concurrent first views of the same
 /// home share one LiDAR download.
 static HOT: Lazy<Cache<String, Arc<Value>>> = Lazy::new(|| {
+    Cache::builder()
+        .max_capacity(96)
+        .time_to_live(Duration::from_secs(300))
+        .build()
+});
+
+static SOLAR_HOT: Lazy<Cache<String, Arc<Value>>> = Lazy::new(|| {
     Cache::builder()
         .max_capacity(96)
         .time_to_live(Duration::from_secs(300))
@@ -266,6 +277,241 @@ pub async fn handle_house3d_get(
                     "ok": false,
                     "code": "HOUSE3D_UNAVAILABLE",
                     "error": sanitize_user_warning(&e.to_string()),
+                }),
+            )
+        }
+    }
+}
+
+fn solar_cache_key(slug: &str, fingerprint: &str) -> String {
+    format!("solar:v{SOLAR_VERSION}:{slug}:{fingerprint}")
+}
+
+fn solar_fingerprint(report: &Value, scene_input: Option<&SceneInput>, use_lidar: bool) -> String {
+    let mut h = Sha256::new();
+    let sc_fp = scene_input
+        .map(input_fingerprint)
+        .unwrap_or_else(|| "no_scene".to_string());
+    let rate = report
+        .pointer("/buyerDiligence/ongoingCosts/monthlyUtilities/electricCarrier/ratePerKwhUsd")
+        .or_else(|| report.pointer("/diligence/ongoingCosts/monthlyUtilities/electricCarrier/ratePerKwhUsd"))
+        .and_then(Value::as_f64)
+        .unwrap_or(0.0);
+    let bill = report
+        .pointer("/buyerDiligence/ongoingCosts/monthlyUtilities/electricityUsd")
+        .or_else(|| report.pointer("/diligence/ongoingCosts/monthlyUtilities/electricityUsd"))
+        .and_then(Value::as_f64)
+        .unwrap_or(0.0);
+    let attached = report
+        .pointer("/hoaProfile/isAttached")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    h.update(format!("v{SOLAR_VERSION}|{sc_fp}|{use_lidar}|{rate:.4}|{bill:.1}|{attached}").as_bytes());
+    hex::encode(&h.finalize()[..8])
+}
+
+#[derive(Debug, Clone)]
+pub enum SolarSlugBuildOutcome {
+    Ready {
+        body: Arc<Value>,
+        cached: bool,
+        settled: bool,
+    },
+    Pending {
+        preview: SolarPotentialOutput,
+    },
+}
+
+/// Computes (or serves from cache) the Sunroof-equivalent solar potential payload for a report slug,
+/// sharing the singleflight `house3d` LiDAR scene build when `use_lidar` is true.
+pub async fn compute_solar_for_slug(
+    deps: SceneDeps,
+    slug: &str,
+    report: &Value,
+    use_lidar: bool,
+) -> anyhow::Result<SolarSlugBuildOutcome> {
+    let ctx = solar_context_from_report(report)
+        .ok_or_else(|| anyhow!("solar: report has no valid coordinates"))?;
+    let scene_input = scene_input_from_report(report);
+    let fp = solar_fingerprint(report, scene_input.as_ref(), use_lidar);
+    let s_key = solar_cache_key(slug, &fp);
+    let hot_key = hot_cache_key(&deps, &s_key);
+
+    if let Some(hit) = SOLAR_HOT.get(&hot_key).await {
+        let settled = hit.get("settled").and_then(Value::as_bool).unwrap_or(true);
+        return Ok(SolarSlugBuildOutcome::Ready {
+            body: hit,
+            cached: true,
+            settled,
+        });
+    }
+    if let Ok(Some(packed)) = deps.db.get_llm_cache(&s_key).await {
+        if let Some(body) = unpack_json(&packed) {
+            let settled = body.get("settled").and_then(Value::as_bool).unwrap_or(true);
+            let arc = Arc::new(body);
+            SOLAR_HOT.insert(hot_key, arc.clone()).await;
+            return Ok(SolarSlugBuildOutcome::Ready {
+                body: arc,
+                cached: true,
+                settled,
+            });
+        }
+    }
+
+    let scene_fut = async {
+        if use_lidar {
+            if let Some(inp) = scene_input {
+                let h3d_key = cache_key(slug, &input_fingerprint(&inp));
+                let task = start_build(deps.clone(), h3d_key, inp, Arc::new(AtomicBool::new(false)));
+                match tokio::time::timeout(REQUEST_WAIT, task).await {
+                    Ok(Ok(Ok(body))) => {
+                        let settled = body.get("settled").and_then(Value::as_bool).unwrap_or(false);
+                        let sc = body.get("scene").cloned();
+                        (sc, settled, false)
+                    }
+                    Ok(_) => (None, false, false),
+                    Err(_) => (None, false, true),
+                }
+            } else {
+                (None, true, false)
+            }
+        } else {
+            (None, true, false)
+        }
+    };
+
+    let (scene_res, climate, horizon) = tokio::join!(
+        scene_fut,
+        fetch_nasa_power_climatology(&deps.http, ctx.lat, ctx.lon),
+        fetch_pvgis_horizon(&deps.http, ctx.lat, ctx.lon),
+    );
+    let (scene_opt, scene_settled, timed_out) = scene_res;
+    let solar = compute_solar_from_scene_and_climate(scene_opt.as_ref(), &climate, &horizon, &ctx);
+
+    if timed_out {
+        return Ok(SolarSlugBuildOutcome::Pending { preview: solar });
+    }
+
+    let settled = scene_settled && climate.is_live_verified;
+    let body = Arc::new(json!({
+        "solar": solar,
+        "settled": settled,
+    }));
+    SOLAR_HOT.insert(hot_key, body.clone()).await;
+    if let Ok(packed) = pack_json(&body) {
+        let ttl = if settled { TTL_SETTLED_SECS } else { TTL_RETRY_SECS };
+        let _ = deps.db.put_llm_cache(&s_key, &packed, ttl).await;
+    }
+    Ok(SolarSlugBuildOutcome::Ready {
+        body,
+        cached: false,
+        settled,
+    })
+}
+
+/// `GET /api/solar/:slug` — Sunroof-equivalent rooftop solar flux, panel layout, and 20-yr financial model.
+pub async fn handle_solar_get(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    RawQuery(raw_query): RawQuery,
+    AxumPath(slug): AxumPath<String>,
+) -> Response {
+    if !state.extension_hub.snapshot().is_extension_enabled("solar_potential") {
+        let mut resp = json_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            json!({
+                "ok": false,
+                "code": "EXTENSION_DISABLED",
+                "disabled": true,
+                "error": "Solar potential extension is currently disabled by administrator.",
+            }),
+        );
+        resp.headers_mut()
+            .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+        return resp;
+    }
+    let clean_slug = match validate_slug_param(&slug) {
+        Ok(s) => s,
+        Err(ge) => return guardrail_error_to_response(ge),
+    };
+    let rec = match authorize_cached_report(
+        &state,
+        &clean_slug,
+        &headers,
+        raw_query.as_deref().unwrap_or(""),
+        false,
+    )
+    .await
+    {
+        Ok(auth) => auth.record,
+        Err(resp) => return resp,
+    };
+    let use_lidar = state.extension_hub.is_module_enabled("house_3d_lidar");
+    match compute_solar_for_slug(SceneDeps::from_state(&state), &rec.slug, &rec.report, use_lidar).await {
+        Ok(SolarSlugBuildOutcome::Pending { preview }) => {
+            let mut resp = json_response(
+                StatusCode::ACCEPTED,
+                json!({
+                    "ok": true,
+                    "slug": rec.slug,
+                    "pending": true,
+                    "settled": false,
+                    "retryAfterMs": RETRY_AFTER_MS,
+                    "solar": preview,
+                }),
+            );
+            resp.headers_mut()
+                .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+            resp.headers_mut()
+                .insert(header::RETRY_AFTER, HeaderValue::from_static("3"));
+            resp
+        }
+        Ok(SolarSlugBuildOutcome::Ready { body, cached, settled }) => {
+            let etag = etag_for(&rec.slug, &body).replace("\"h3d-", "\"sol-");
+            let cache_control = HeaderValue::from_static(if settled {
+                "private, max-age=300"
+            } else {
+                "private, no-cache"
+            });
+            let etag_value = HeaderValue::from_str(&etag).ok();
+            if if_none_match_hits(&headers, &etag) {
+                let mut resp = Response::new(Body::empty());
+                *resp.status_mut() = StatusCode::NOT_MODIFIED;
+                apply_security_headers(resp.headers_mut());
+                resp.headers_mut().insert(header::CACHE_CONTROL, cache_control);
+                if let Some(v) = etag_value {
+                    resp.headers_mut().insert(header::ETAG, v);
+                }
+                return resp;
+            }
+            let mut payload = body.as_ref().clone();
+            if let Some(obj) = payload.as_object_mut() {
+                obj.insert("ok".into(), json!(true));
+                obj.insert("slug".into(), json!(rec.slug));
+                obj.insert("cached".into(), json!(cached));
+            }
+            let mut resp = json_response(StatusCode::OK, payload);
+            resp.headers_mut().insert(header::CACHE_CONTROL, cache_control);
+            if let Some(v) = etag_value {
+                resp.headers_mut().insert(header::ETAG, v);
+            }
+            resp
+        }
+        Err(e) => {
+            let msg = e.to_string();
+            if msg.contains("no valid coordinates") {
+                return json_response(
+                    StatusCode::NOT_FOUND,
+                    json!({ "ok": false, "code": "NO_LOCATION", "error": "This report has no coordinates for solar analysis." }),
+                );
+            }
+            tracing::warn!(slug = %rec.slug, error = %msg, "solar: compute failed");
+            json_response(
+                StatusCode::BAD_GATEWAY,
+                json!({
+                    "ok": false,
+                    "code": "SOLAR_UNAVAILABLE",
+                    "error": sanitize_user_warning(&msg),
                 }),
             )
         }

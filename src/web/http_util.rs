@@ -145,6 +145,21 @@ pub fn parse_json_body(
     Ok(val)
 }
 
+pub fn report_not_found_html(brand_name: &str) -> String {
+    let eff_brand = if brand_name.trim().is_empty() {
+        "Open Estate"
+    } else {
+        brand_name.trim()
+    };
+    let brand = html_escape::encode_text(eff_brand);
+    let brand_wordmark = crate::shared::format_brand_wordmark_html(eff_brand);
+    let fav = crate::web::favicon::FAVICON_HEAD_TAGS.as_str();
+    let mark = crate::web::favicon::logo_mark_img(32);
+    format!(
+        r#"<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="light dark"><title>{brand} — Report Not Found</title>{fav}<style>:root,html[data-theme="light"]{{color-scheme:light;--bg:#f5f6f8;--surface:#ffffff;--ink:#111827;--muted:#4b5563;--line:#e5e7eb;--brand:#0f766e;--brand-solid:#0f766e;--brand-hover:#0d655e;--shadow:0 12px 32px -18px rgba(17,24,39,.18)}}@media (prefers-color-scheme: dark){{:root:not([data-theme="light"]){{color-scheme:dark;--bg:#0b1120;--surface:#111827;--ink:#f1f5f9;--muted:#cbd5e1;--line:#334155;--brand:#14b8a6;--brand-solid:#0f766e;--brand-hover:#0d9488;--shadow:0 16px 36px -16px rgba(0,0,0,.65)}}}}html[data-theme="dark"]{{color-scheme:dark;--bg:#0b1120;--surface:#111827;--ink:#f1f5f9;--muted:#cbd5e1;--line:#334155;--brand:#14b8a6;--brand-solid:#0f766e;--brand-hover:#0d9488;--shadow:0 16px 36px -16px rgba(0,0,0,.65)}}*{{box-sizing:border-box}}body{{margin:0;background:var(--bg);color:var(--ink);font:15px/1.55 Inter,system-ui,-apple-system,sans-serif;display:grid;place-items:center;min-height:100vh;padding:20px}}.card{{background:var(--surface);border:1px solid var(--line);border-radius:16px;padding:28px 32px;max-width:500px;width:100%;box-shadow:var(--shadow)}}.logo{{display:inline-flex;align-items:center;gap:9px;font-weight:800;font-size:19px;margin-bottom:16px;color:var(--ink);text-decoration:none}}.logo .logo-mark{{width:32px;height:32px;flex:0 0 32px;display:block}}.logo b{{color:var(--brand)}}h1{{font-size:21px;margin:0 0 8px}}.msg{{color:var(--muted);margin:0 0 18px;font-size:14.5px}}.btn{{display:inline-block;background:var(--brand-solid);color:#fff;font-weight:700;font-size:14px;padding:10px 18px;border-radius:10px;text-decoration:none}}.btn:hover{{background:var(--brand-hover)}}</style></head><body><main class="card"><a class="logo" href="/">{mark}<span>{brand_wordmark}</span></a><h1>Report not found</h1><p class="msg">The requested property report is unavailable or no longer cached.</p><p style="margin:0"><a class="btn" href="/">Back to {brand}</a></p></main></body></html>"#
+    )
+}
+
 pub async fn resolve_cached_report(
     state: &crate::web::server::AppState,
     slug: &str,
@@ -154,11 +169,9 @@ pub async fn resolve_cached_report(
         return Ok(rec);
     }
     if html_404 {
-        let brand_name = state.env.brand_name();
-        let brand = html_escape::encode_text(&brand_name);
         return Err(html_response(
             StatusCode::NOT_FOUND,
-            format!("<h1>Report not found</h1><p><a href=\"/\">Back to {brand}</a></p>"),
+            report_not_found_html(&state.env.brand_name()),
         ));
     }
     Err(json_response(

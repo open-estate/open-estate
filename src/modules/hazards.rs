@@ -2690,6 +2690,165 @@ pub fn build_highlights(data: &Value, is_ca: bool) -> Vec<Value> {
         }
     }
 
+    if let Some(alerts) = data.pointer("/weather/activeAlerts").and_then(|v| v.as_array()) {
+        for a in alerts.iter().take(2) {
+            let event = a.get("event").and_then(|v| v.as_str()).unwrap_or("").trim();
+            if event.is_empty() {
+                continue;
+            }
+            let sev = a.get("severity").and_then(|v| v.as_str()).unwrap_or("").trim();
+            let headline = a.get("headline").and_then(|v| v.as_str()).unwrap_or("").trim();
+            let lvl = if sev.eq_ignore_ascii_case("Extreme") || sev.eq_ignore_ascii_case("Severe") {
+                "bad"
+            } else {
+                "watch"
+            };
+            let msg = if !headline.is_empty() {
+                format!("Active NWS weather alert: {headline}")
+            } else if !sev.is_empty() {
+                format!("Active NWS weather alert: {event} ({sev})")
+            } else {
+                format!("Active NWS weather alert: {event}")
+            };
+            add(lvl, msg);
+        }
+    }
+
+    if let Some(rain) = data.get("rainfall").filter(|v| v.is_object()) {
+        let ann_in = rain.get("annualNormalIn").and_then(Value::as_f64);
+        let qpf_7d = rain.get("forecastQpf7dIn").and_then(Value::as_f64);
+        let qpe_72h = rain.pointer("/observedQpe/h72In").and_then(Value::as_f64);
+        let a14_100y_24h = rain
+            .pointer("/atlas14/hr24Yr100In")
+            .and_then(Value::as_f64);
+        let a14_10y_1h = rain
+            .pointer("/atlas14/hr1Yr10In")
+            .and_then(Value::as_f64);
+        let hist_1d = rain
+            .pointer("/historicalMax/max1DayIn")
+            .and_then(Value::as_f64);
+
+        if qpf_7d.unwrap_or(0.0) >= 2.0 || qpe_72h.unwrap_or(0.0) >= 2.0 {
+            let lvl = if qpf_7d.unwrap_or(0.0) >= 5.0 || qpe_72h.unwrap_or(0.0) >= 4.0 {
+                "bad"
+            } else {
+                "watch"
+            };
+            let mut parts = Vec::new();
+            if let Some(q72) = qpe_72h {
+                parts.push(format!("{q72:.2}\" observed in the past 72h"));
+            }
+            if let Some(f7) = qpf_7d {
+                parts.push(format!("{f7:.2}\" forecast over the next 7 days (NOAA WPC QPF)"));
+            }
+            add(
+                lvl,
+                format!(
+                    "Active rainfall & drainage load: {} — inspect roof gutters, downspout extensions (4–6 ft clear of foundation), and yard catch basins.",
+                    parts.join(" and ")
+                ),
+            );
+        } else if let Some(ann) = ann_in {
+            if let Some(s100) = a14_100y_24h {
+                let g_txt = a14_10y_1h
+                    .map(|g| format!(", 10-yr 1-hr gutter intensity {g:.2}\"/hr"))
+                    .unwrap_or_default();
+                let lvl = if s100 >= 8.0 { "watch" } else { "good" };
+                add(
+                    lvl,
+                    format!(
+                        "Rainfall & design storms: {ann:.1}\" annual normal; NOAA Atlas 14 100-yr 24-hr storm is {s100:.2}\"{g_txt}."
+                    ),
+                );
+            } else if let Some(h1d) = hist_1d {
+                add(
+                    "good",
+                    format!(
+                        "Rainfall climatology: {ann:.1}\" annual normal; historical peak 1-day storm recorded at nearby station is {h1d:.2}\"."
+                    ),
+                );
+            }
+        }
+    }
+
+    if let Some(sm) = data.get("soilMoisture").filter(|v| v.is_object()) {
+        let series = sm
+            .get("dominantSoilSeries")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty());
+        let dr = sm
+            .get("drainageClass")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty());
+        let hsg = sm
+            .get("hydrologicGroup")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty());
+        let lep = sm.get("maxLepPct").and_then(Value::as_f64);
+        let wt_cm = sm.get("minWaterTableCm").and_then(Value::as_f64);
+        let swing = sm
+            .pointer("/nasaWetness/seasonalSwing")
+            .and_then(Value::as_f64);
+        let infil = sm
+            .get("infiltrationSuitability")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+
+        let high_clay = lep.map(|v| v >= 6.0).unwrap_or(false);
+        let mod_clay = lep.map(|v| (3.0..6.0).contains(&v)).unwrap_or(false);
+        let very_shallow_wt = wt_cm.map(|v| v < 75.0).unwrap_or(false);
+        let shallow_wt = wt_cm.map(|v| (75.0..150.0).contains(&v)).unwrap_or(false);
+        let high_swing = swing.map(|v| v >= 0.45).unwrap_or(false);
+        let infil_limited = infil.to_ascii_lowercase().contains("severely limited")
+            || infil.to_ascii_lowercase().contains("very limited");
+
+        if series.is_some() || lep.is_some() || wt_cm.is_some() {
+            let lvl = if high_clay || very_shallow_wt {
+                "bad"
+            } else if mod_clay || shallow_wt || high_swing || infil_limited {
+                "watch"
+            } else {
+                "good"
+            };
+
+            let mut clauses = Vec::new();
+            if let Some(sr) = series {
+                let dr_hsg = match (dr, hsg) {
+                    (Some(d), Some(h)) => format!(" ({d}, HSG {h})"),
+                    (Some(d), None) => format!(" ({d})"),
+                    (None, Some(h)) => format!(" (HSG {h})"),
+                    _ => String::new(),
+                };
+                clauses.push(format!("USDA SSURGO {sr} soil{dr_hsg}"));
+            }
+            if let Some(l) = lep {
+                let rk = sm
+                    .get("shrinkSwellRisk")
+                    .and_then(Value::as_str)
+                    .unwrap_or("Low");
+                clauses.push(format!("{rk} shrink-swell clay potential (LEP {l:.1}%)"));
+            }
+            if let Some(w) = wt_cm {
+                let ft = round_n(w / 30.48, 1);
+                clauses.push(format!("seasonal high water table at {w:.0} cm ({ft} ft)"));
+            }
+            if let Some(sw) = swing.filter(|&v| v >= 0.45) {
+                clauses.push(format!(
+                    "pronounced wet/dry surface moisture swing (Δ {sw:.2})"
+                ));
+            }
+            if infil_limited {
+                clauses.push(
+                    "limited subsoil percolation for dry wells — route roof runoff to street/storm drain rather than unlined pits".to_string(),
+                );
+            }
+
+            if !clauses.is_empty() {
+                add(lvl, format!("Foundation & soil drainage: {}.", clauses.join("; ")));
+            }
+        }
+    }
+
     out
 }
 
@@ -2901,6 +3060,165 @@ pub fn summarize_fault_features(
     )
 }
 
+/// Queries `nws_weather` through `ExtensionHub::global()` (geohash5 shared cache, rate limiting,
+/// and admin enablement). Returns `None` cleanly when disabled, offline, or non-US.
+pub async fn fetch_nws_weather_via_hub(
+    http: &HttpClient,
+    env: &EnvConfig,
+    lat: f64,
+    lon: f64,
+    geo: &Value,
+) -> Option<Value> {
+    if http.is_offline_external_blocked() {
+        return None;
+    }
+    let mut extra_params = HashMap::new();
+    if let Some(c) = val_str(geo.get("country")).map(str::trim).filter(|s| !s.is_empty()) {
+        extra_params.insert("country".to_string(), c.to_string());
+    }
+    let query = crate::extensions::proto::ExtensionQueryProto {
+        lat: Some(lat),
+        lon: Some(lon),
+        state: val_str(geo.get("state")).unwrap_or("").to_string(),
+        city: val_str(geo.get("city")).unwrap_or("").to_string(),
+        zip: val_str(geo.get("zip")).unwrap_or("").to_string(),
+        county_fips: val_str(geo.get("countyFips")).unwrap_or("").to_string(),
+        county_name: val_str(geo.get("county")).map(String::from),
+        extra_params,
+        ..Default::default()
+    };
+    let hub = crate::extensions::ExtensionHub::global();
+    let envs = match hub
+        .execute_enabled_extension(crate::modules::weather::NWS_EXT_ID, &query, http, env)
+        .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(error = %e, "hazards: nws_weather extension fetch unavailable");
+            return None;
+        }
+    };
+    for env_msg in envs {
+        if env_msg.extension_id != crate::modules::weather::NWS_EXT_ID {
+            continue;
+        }
+        if let Some(crate::extensions::proto::extension_envelope_proto::Payload::RawJson(raw)) =
+            env_msg.payload
+        {
+            if let Ok(val) = serde_json::from_str::<Value>(&raw) {
+                return Some(val);
+            }
+        }
+    }
+    None
+}
+
+fn build_hazard_extension_query(lat: f64, lon: f64, geo: &Value) -> crate::extensions::proto::ExtensionQueryProto {
+    let mut extra_params = HashMap::new();
+    if let Some(c) = val_str(geo.get("country")).map(str::trim).filter(|s| !s.is_empty()) {
+        extra_params.insert("country".to_string(), c.to_string());
+    }
+    crate::extensions::proto::ExtensionQueryProto {
+        lat: Some(lat),
+        lon: Some(lon),
+        state: val_str(geo.get("state")).unwrap_or("").to_string(),
+        city: val_str(geo.get("city")).unwrap_or("").to_string(),
+        zip: val_str(geo.get("zip")).unwrap_or("").to_string(),
+        county_fips: val_str(geo.get("countyFips")).unwrap_or("").to_string(),
+        county_name: val_str(geo.get("county")).map(String::from),
+        extra_params,
+        ..Default::default()
+    }
+}
+
+/// Queries `rainfall_climatology` through `ExtensionHub::global()` (geohash5 shared cache,
+/// rate limiting, and admin enablement). Returns `None` cleanly when disabled, offline, or non-US.
+pub async fn fetch_rainfall_climatology_via_hub(
+    http: &HttpClient,
+    env: &EnvConfig,
+    lat: f64,
+    lon: f64,
+    geo: &Value,
+) -> Option<Value> {
+    if http.is_offline_external_blocked() {
+        return None;
+    }
+    let query = build_hazard_extension_query(lat, lon, geo);
+    let hub = crate::extensions::ExtensionHub::global();
+    let envs = match hub
+        .execute_enabled_extension(
+            crate::modules::rainfall_climatology::RAINFALL_EXT_ID,
+            &query,
+            http,
+            env,
+        )
+        .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(error = %e, "hazards: rainfall_climatology extension fetch unavailable");
+            return None;
+        }
+    };
+    for env_msg in envs {
+        if env_msg.extension_id != crate::modules::rainfall_climatology::RAINFALL_EXT_ID {
+            continue;
+        }
+        if let Some(crate::extensions::proto::extension_envelope_proto::Payload::RawJson(raw)) =
+            env_msg.payload
+        {
+            if let Ok(val) = serde_json::from_str::<Value>(&raw) {
+                return Some(val);
+            }
+        }
+    }
+    None
+}
+
+/// Queries `usda_soil_moisture` through `ExtensionHub::global()` (geohash7 shared cache,
+/// rate limiting, and admin enablement). Returns `None` cleanly when disabled, offline, or non-US.
+pub async fn fetch_usda_soil_moisture_via_hub(
+    http: &HttpClient,
+    env: &EnvConfig,
+    lat: f64,
+    lon: f64,
+    geo: &Value,
+) -> Option<Value> {
+    if http.is_offline_external_blocked() {
+        return None;
+    }
+    let query = build_hazard_extension_query(lat, lon, geo);
+    let hub = crate::extensions::ExtensionHub::global();
+    let envs = match hub
+        .execute_enabled_extension(
+            crate::modules::soil_moisture::SOIL_MOISTURE_EXT_ID,
+            &query,
+            http,
+            env,
+        )
+        .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(error = %e, "hazards: usda_soil_moisture extension fetch unavailable");
+            return None;
+        }
+    };
+    for env_msg in envs {
+        if env_msg.extension_id != crate::modules::soil_moisture::SOIL_MOISTURE_EXT_ID {
+            continue;
+        }
+        if let Some(crate::extensions::proto::extension_envelope_proto::Payload::RawJson(raw)) =
+            env_msg.payload
+        {
+            if let Ok(val) = serde_json::from_str::<Value>(&raw) {
+                return Some(val);
+            }
+        }
+    }
+    None
+}
+
 pub async fn run_hazards(
     http: &HttpClient,
     env: &EnvConfig,
@@ -2913,6 +3231,17 @@ pub async fn run_hazards(
 }
 
 pub async fn run_hazards_with_db(
+    http: &HttpClient,
+    env: &EnvConfig,
+    db: Option<&crate::db::DbStore>,
+    lat: f64,
+    lon: f64,
+    geo: &Value,
+) -> Result<ModuleOutput> {
+    Box::pin(run_hazards_with_db_inner(http, env, db, lat, lon, geo)).await
+}
+
+async fn run_hazards_with_db_inner(
     http: &HttpClient,
     env: &EnvConfig,
     db: Option<&crate::db::DbStore>,
@@ -3039,10 +3368,23 @@ pub async fn run_hazards_with_db(
         ))
     });
 
+    let ext_fut = Box::pin(async {
+        tokio::join!(
+            Box::pin(fetch_nws_weather_via_hub(http, env, lat, lon, geo)),
+            Box::pin(fetch_rainfall_climatology_via_hub(http, env, lat, lon, geo)),
+            Box::pin(fetch_usda_soil_moisture_via_hub(http, env, lat, lon, geo)),
+        )
+    });
+
     let (
         (r_fl_pt, r_fl_near, r_panel, r_nri, r_asce, r_qcnt, r_qtop, r_qchart, r_faults, r_whp, r_grp, r_elev),
         ca_res,
-    ) = tokio::join!(nat_fut, ca_fut);
+        (weather_opt, rainfall_opt, soil_moisture_opt),
+    ) = tokio::join!(
+        nat_fut,
+        ca_fut,
+        ext_fut,
+    );
 
     let (elev_m, elev_ft, elev_source) = match r_elev {
         Ok(el) => {
@@ -3708,6 +4050,57 @@ pub async fn run_hazards_with_db(
         "radon": radon_val,
         "other": other_val,
     });
+
+    if let Some(ref wx) = weather_opt {
+        let wx_url = wx
+            .get("forecastUrl")
+            .and_then(Value::as_str)
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or("https://api.weather.gov/");
+        if !sources.iter().any(|s| s.url == wx_url) {
+            sources.push(SourceItem::new(
+                crate::modules::weather::NWS_SOURCE_NAME,
+                wx_url,
+            ));
+        }
+        if let Some(obj) = data.as_object_mut() {
+            obj.insert("weather".into(), wx.clone());
+        }
+    }
+
+    if let Some(ref rain) = rainfall_opt {
+        let rain_url = rain
+            .get("referenceUrl")
+            .and_then(Value::as_str)
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or(crate::modules::rainfall_climatology::RAINFALL_HOMEPAGE_URL);
+        if !sources.iter().any(|s| s.url == rain_url) {
+            sources.push(SourceItem::new(
+                crate::modules::rainfall_climatology::RAINFALL_SOURCE_NAME,
+                rain_url,
+            ));
+        }
+        if let Some(obj) = data.as_object_mut() {
+            obj.insert("rainfall".into(), rain.clone());
+        }
+    }
+
+    if let Some(ref soil) = soil_moisture_opt {
+        let soil_url = soil
+            .get("referenceUrl")
+            .and_then(Value::as_str)
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or(crate::modules::soil_moisture::SOIL_MOISTURE_HOMEPAGE_URL);
+        if !sources.iter().any(|s| s.url == soil_url) {
+            sources.push(SourceItem::new(
+                crate::modules::soil_moisture::SOIL_MOISTURE_SOURCE_NAME,
+                soil_url,
+            ));
+        }
+        if let Some(obj) = data.as_object_mut() {
+            obj.insert("soilMoisture".into(), soil.clone());
+        }
+    }
 
     let (scores, score_basis) = compute_scores(&data, &nri_all, is_ca);
     let highlights = build_highlights(&data, is_ca);

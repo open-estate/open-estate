@@ -175,6 +175,18 @@
       "type": "string",
       "x-proto-enum": "openestate.extension.v1.CapabilityDomain"
     },
+    "ConnectorCategory": {
+      "enum": [
+        "arcgis_feature_rest",
+        "ogc_wms_wcs",
+        "socrata_ckan_open_data",
+        "openapi_rest_json",
+        "csv_tabular_stream",
+        "html_portal_scrape",
+        "multi_feed_native"
+      ],
+      "type": "string"
+    },
     "DeclarativeRequestProto": {
       "additionalProperties": false,
       "properties": {
@@ -426,12 +438,32 @@
           },
           "type": "array"
         },
+        "connectorCategory": {
+          "$ref": "#/$defs/ConnectorCategory",
+          "x-alias-for": "connector_category"
+        },
+        "connector_category": {
+          "$ref": "#/$defs/ConnectorCategory"
+        },
         "consumes_domains": {
           "items": {
             "$ref": "#/$defs/CapabilityDomain"
           },
           "type": "array",
           "x-alias-for": "input_from_domains"
+        },
+        "dataFormats": {
+          "items": {
+            "$ref": "#/$defs/GovDataFormat"
+          },
+          "type": "array",
+          "x-alias-for": "data_formats"
+        },
+        "data_formats": {
+          "items": {
+            "$ref": "#/$defs/GovDataFormat"
+          },
+          "type": "array"
         },
         "defaultProvenance": {
           "$ref": "#/$defs/ProvenanceTier",
@@ -590,6 +622,13 @@
             "$ref": "#/$defs/CapabilityDomain"
           },
           "type": "array"
+        },
+        "jurisdictionTier": {
+          "$ref": "#/$defs/JurisdictionTier",
+          "x-alias-for": "jurisdiction_tier"
+        },
+        "jurisdiction_tier": {
+          "$ref": "#/$defs/JurisdictionTier"
         },
         "licenseClass": {
           "$ref": "#/$defs/LicenseClass",
@@ -948,6 +987,45 @@
       },
       "type": "object",
       "x-proto-message": "openestate.extension.v1.GeoScopeProto"
+    },
+    "GovDataFormat": {
+      "enum": [
+        "json",
+        "geojson",
+        "arcgis_features",
+        "socrata_rows",
+        "csv",
+        "xml",
+        "html",
+        "wms_wcs",
+        "xlsx",
+        "pdf",
+        "yaml_catalog"
+      ],
+      "type": "string"
+    },
+    "GovResponseFormat": {
+      "enum": [
+        "auto",
+        "json",
+        "geojson",
+        "arcgis_features",
+        "socrata_rows",
+        "csv",
+        "xml",
+        "html"
+      ],
+      "type": "string"
+    },
+    "JurisdictionTier": {
+      "enum": [
+        "national",
+        "state",
+        "county",
+        "municipal",
+        "district_or_zip"
+      ],
+      "type": "string"
     },
     "LicenseClass": {
       "enum": [
@@ -1320,11 +1398,46 @@
     "ResponseMappingProto": {
       "additionalProperties": false,
       "properties": {
+        "csvDelimiter": {
+          "maxLength": 1,
+          "minLength": 1,
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-alias-for": "csv_delimiter"
+        },
+        "csv_delimiter": {
+          "maxLength": 1,
+          "minLength": 1,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "fields": {
           "additionalProperties": {
             "type": "string"
           },
           "type": "object"
+        },
+        "format": {
+          "$ref": "#/$defs/GovResponseFormat"
+        },
+        "htmlTableIndex": {
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ],
+          "x-alias-for": "html_table_index"
+        },
+        "html_table_index": {
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
         },
         "itemsPath": {
           "type": [
@@ -1346,6 +1459,14 @@
         "require_non_empty": {
           "type": "boolean"
         },
+        "responseFormat": {
+          "$ref": "#/$defs/GovResponseFormat",
+          "x-alias-for": "format"
+        },
+        "response_format": {
+          "$ref": "#/$defs/GovResponseFormat",
+          "x-alias-for": "format"
+        },
         "rootPath": {
           "type": [
             "string",
@@ -1354,6 +1475,19 @@
           "x-alias-for": "root_path"
         },
         "root_path": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "xmlRecordTag": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-alias-for": "xml_record_tag"
+        },
+        "xml_record_tag": {
           "type": [
             "string",
             "null"

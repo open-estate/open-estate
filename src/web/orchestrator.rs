@@ -19,7 +19,7 @@ use crate::modules::{
     fengshui::run_fengshui_full,
     hazards::run_hazards,
     // [feat/insurance-risk]
-    insurance::run_insurance_with_condition,
+    insurance::run_insurance_with_fire_protection,
     // [/feat/insurance-risk]
 };
 use crate::property::{
@@ -1088,14 +1088,18 @@ where
         .and_then(|v| v.as_i64());
 
     let tins = Instant::now();
-    let ins_out = run_insurance_with_condition(
+    let ins_out = Box::pin(run_insurance_with_fire_protection(
+        http,
+        env,
         &facts,
         haz_data_opt.unwrap_or(&empty_obj),
         env_data_opt.unwrap_or(&empty_obj),
         &geo,
         cond_data_opt,
+        None,
         est_market_usd,
-    );
+    ))
+    .await;
     timings.insert("insurance".into(), json!(tins.elapsed().as_millis() as u64));
 
     let val_out = if valuation_on {
@@ -1259,8 +1263,10 @@ where
     report["decisionFactors"] = df;
 
     if diligence_on {
-        let bd_out =
-            crate::modules::buyer_diligence::run_buyer_diligence_and_hoa(http, env, &report).await;
+        let bd_out = Box::pin(crate::modules::buyer_diligence::run_buyer_diligence_and_hoa(
+            http, env, &report,
+        ))
+        .await;
         report["hoaProfile"] = bd_out.hoa_profile;
         report["buyerDiligence"] = bd_out.buyer_diligence;
         if !bd_out.sources.is_empty() {
@@ -1330,12 +1336,15 @@ where
         );
     }
 
-    let rem_out = crate::modules::remodel_rebuild::build_remodel_and_rebuild(&report);
-    report["remodelAndRebuild"] = rem_out.data;
-    if !rem_out.warnings.is_empty() {
-        if let Some(mobj) = report.get_mut("modules").and_then(|v| v.as_object_mut()) {
-            mobj.insert("remodel".into(), json!({ "warnings": rem_out.warnings }));
-        }
+    let rem_out =
+        Box::pin(crate::modules::remodel_rebuild::run_remodel_and_rebuild(http, env, &report))
+            .await;
+    report["remodelAndRebuild"] = rem_out.data.clone();
+    if let Some(mobj) = report.get_mut("modules").and_then(|v| v.as_object_mut()) {
+        mobj.insert(
+            "remodel".into(),
+            json!({ "data": rem_out.data, "warnings": rem_out.warnings }),
+        );
     }
     if !rem_out.sources.is_empty() {
         if let Some(sarr) = report.get_mut("sources").and_then(|v| v.as_array_mut()) {
@@ -1354,19 +1363,105 @@ where
     report["titleInsuranceAndDeed"] = dtm_out.title_insurance_and_deed;
     report["marketplace"] = dtm_out.marketplace;
 
-    let (tlr_out, bli_out) = tokio::join!(
-        crate::modules::title_legal_radar::run_title_legal_radar(http, env, &report),
-        crate::modules::buyer_living_nuances::run_buyer_living_nuances(http, env, &report),
+    let solar_enabled = hub_snap.is_extension_enabled("solar_potential");
+    let liq_stress_enabled = valuation_on && hub_snap.is_extension_enabled("market_liquidity_stress");
+
+    let (tlr_out, bli_out, solar_preview_opt, live_pmms_opt) = tokio::join!(
+        Box::pin(crate::modules::title_legal_radar::run_title_legal_radar(
+            http, env, &report
+        )),
+        Box::pin(crate::modules::buyer_living_nuances::run_buyer_living_nuances(
+            http, env, &report
+        )),
+        Box::pin(async {
+            if !solar_enabled {
+                return None;
+            }
+            crate::modules::solar::compute_solar_for_report_with_scene(http, &report, None)
+                .await
+                .ok()
+        }),
+        Box::pin(async {
+            if !liq_stress_enabled {
+                return None;
+            }
+            crate::modules::market_liquidity_stress::fetch_live_pmms_rates(http, env)
+                .await
+                .ok()
+                .flatten()
+        }),
     );
+
+    if liq_stress_enabled {
+        if let Some(stress_val) =
+            crate::modules::market_liquidity_stress::compute_market_liquidity_stress_from_report(
+                &report,
+                live_pmms_opt.as_ref(),
+            )
+        {
+            report["liquidityAndRateStress"] = stress_val.clone();
+            if let Some(val_mod_data) = report
+                .pointer_mut("/modules/valuation/data")
+                .and_then(Value::as_object_mut)
+            {
+                val_mod_data.insert("liquidityAndRateStress".to_string(), stress_val);
+            }
+        }
+    }
+
+    if let Some(sol) = solar_preview_opt {
+        if let Ok(sol_val) = serde_json::to_value(&sol) {
+            report["solarPotential"] = sol_val.clone();
+            if let Some(mobj) = report.get_mut("modules").and_then(Value::as_object_mut) {
+                mobj.insert(
+                    "solar".into(),
+                    json!({ "data": sol_val, "warnings": [] }),
+                );
+            }
+        }
+    }
+
     report["titleLegalRadar"] = tlr_out.data;
+    if let Some(ev_val) = bli_out.data.get("evElectrification").cloned() {
+        report["evElectrification"] = ev_val;
+    }
+    if let Some(bli_layers) = bli_out.data.get("mapLayers").and_then(Value::as_array).cloned() {
+        if let Some(amen_layers) = report
+            .pointer_mut("/modules/amenities/data/mapLayers")
+            .and_then(Value::as_array_mut)
+        {
+            for lyr in bli_layers {
+                let lid = lyr.get("id").and_then(Value::as_str).unwrap_or("");
+                if !lid.is_empty()
+                    && !amen_layers
+                        .iter()
+                        .any(|x| x.get("id").and_then(Value::as_str) == Some(lid))
+                {
+                    amen_layers.push(lyr);
+                }
+            }
+        }
+    }
+    if let Some(mobj) = report.get_mut("modules").and_then(Value::as_object_mut) {
+        mobj.insert(
+            "buyerLivingIntel".into(),
+            json!({
+                "data": bli_out.data.clone(),
+                "warnings": sanitize_user_warnings(&bli_out.warnings),
+            }),
+        );
+    }
     report["buyerLivingIntel"] = bli_out.data;
-    if !tlr_out.sources.is_empty() || !bli_out.sources.is_empty() {
+    if !tlr_out.sources.is_empty() || !bli_out.sources.is_empty() || live_pmms_opt.is_some() {
         let mut combined_srcs: Vec<SourceItem> = report
             .get("sources")
             .and_then(|v| serde_json::from_value::<Vec<SourceItem>>(v.clone()).ok())
             .unwrap_or_default();
         combined_srcs.extend(tlr_out.sources);
         combined_srcs.extend(bli_out.sources);
+        if let Some(pmms) = live_pmms_opt {
+            combined_srcs.push(SourceItem::new(pmms.source_name, pmms.source_url));
+        }
         report["sources"] = json!(dedupe_sources(combined_srcs));
     }
 

@@ -1,14 +1,14 @@
 id: fcc_mobile_5g
 name: "FCC Broadband Data Collection — 5G-NR & 4G LTE Mobile Coverage"
 version: "1.0.0"
-description: "Federal Communications Commission Broadband Data Collection (BDC) mobile wireless 5G-NR (35/3 Mbps & 7/1 Mbps) and 4G LTE (5/1 Mbps) outdoor/in-vehicle coverage lookup across Verizon, AT&T, and T-Mobile."
+description: "Federal Communications Commission Broadband Data Collection (BDC) H3 Resolution-8 mobile wireless 5G-NR (35/3 Mbps & 7/1 Mbps) and 4G LTE (5/1 Mbps) outdoor stationary vs. in-vehicle mobile coverage and modeled outdoor minimum RSRP threshold across AT&T, T-Mobile, and Verizon."
 domain: broadband
 domains:
   - broadband
   - livability
-driver: declarative_yaml
+driver: native_adapter
 proto_message_type: "openestate.extension.v1.BroadbandCatalogProto"
-priority: 220
+priority: 265
 enabled_by_default: true
 tier: basic
 license_class: public_open_data
@@ -36,15 +36,12 @@ geo_scope:
   zip_codes: []
   cities: []
 auth:
-  auth_type: api_key_header
-  env_var: "FCC_BDC_API_TOKEN"
-  header_name: "hash_value"
-  optional_key: true
+  auth_type: none
 rate_limit:
-  requests_per_second: 3
-  burst: 6
-  timeout_ms: 2500
-  max_retries: 0
+  requests_per_second: 5
+  burst: 10
+  timeout_ms: 6000
+  max_retries: 1
 cache_ttl_secs: 604800
 sharing:
   scope: geohash6
@@ -52,24 +49,8 @@ sharing:
   stale_while_revalidate_secs: 604800
   background_refresh: true
 source_attribution:
-  name: "FCC National Broadband Map — Mobile Wireless Broadband Data Collection (BDC)"
+  name: "FCC National Broadband Map — Mobile Wireless Broadband Data Collection (H3 Res-8)"
   url: "https://broadbandmap.fcc.gov/"
   reference_url_template: "https://broadbandmap.fcc.gov/location-summary/mobile?latlon={{lat}}%2C{{lon}}"
-  schedule_or_version: "FCC BDC Semi-Annual Mobile Wireless Availability"
-  notes: "Evaluates 5G-NR (500) and 4G LTE (400) carrier hexagons; public map JSON endpoint may return HTTP 405 without interactive session, in which case mobile 5G coverage reports unverified with zero fabricated carriers."
-request:
-  method: "GET"
-  url: "https://broadbandmap.fcc.gov/api/public/map/listAvailableMobileProvidersByLocation"
-  query_params:
-    latitude: "{{ lat }}"
-    longitude: "{{ lon }}"
-response_mapping:
-  items_path: "$.data[*]"
-  require_non_empty: true
-  fields:
-    carrier_name: "$.brand_name"
-    fallback_carrier_name: "$.holding_company_name"
-    technology_code: "$.technology_code"
-    technology_desc: "$.technology_code_desc"
-    max_download_mbps: "$.mindown"
-    max_upload_mbps: "$.minup"
+  schedule_or_version: "FCC BDC Semi-Annual Mobile Wireless Availability (H3 Resolution 8)"
+  notes: "Evaluates keyless FCC Mobile BDC H3 Resolution-8 hexagons for AT&T, T-Mobile, and Verizon 4G LTE (5/1), 5G-NR (7/1), and 5G-NR (35/3) outdoor stationary vs. in-vehicle coverage and FCC BDC modeled outdoor minimum RSRP thresholds (dBm) — never indoor signal bars."

@@ -3026,6 +3026,12 @@
       '.db-banner-motion-btn:hover{background:#0f766e;color:#fff;border-color:#0f766e}' +
       '.db-wt-motion-btn{border:1px solid #5eead4;background:#f0fdfa;color:#0f766e;border-radius:999px;padding:6px 12px;font:800 12px var(--font,Inter,system-ui,sans-serif);cursor:pointer;min-height:36px;white-space:nowrap}' +
       '.db-wt-motion-btn:hover{background:#0f766e;color:#fff}' +
+      '@media (prefers-color-scheme: dark){' +
+        'html:not([data-theme="light"]) .db-chap-motion-btn,html:not([data-theme="light"]) .hm-tab.hm-motion,html:not([data-theme="light"]) .db-banner-motion-btn{background:var(--brandsoft,rgba(20,184,166,.16));border-color:rgba(45,212,191,.42);color:#5eead4;box-shadow:0 2px 10px -4px rgba(0,0,0,.5)}' +
+        'html:not([data-theme="light"]) .db-chap-motion-btn:hover,html:not([data-theme="light"]) .hm-tab.hm-motion:hover,html:not([data-theme="light"]) .db-banner-motion-btn:hover{background:#0f766e;color:#fff;border-color:#14b8a6}' +
+      '}' +
+      'html[data-theme="dark"] .db-chap-motion-btn,html[data-theme="dark"] .hm-tab.hm-motion,html[data-theme="dark"] .db-banner-motion-btn{background:var(--brandsoft,rgba(20,184,166,.16));border-color:rgba(45,212,191,.42);color:#5eead4;box-shadow:0 2px 10px -4px rgba(0,0,0,.5)}' +
+      'html[data-theme="dark"] .db-chap-motion-btn:hover,html[data-theme="dark"] .hm-tab.hm-motion:hover,html[data-theme="dark"] .db-banner-motion-btn:hover{background:#0f766e;color:#fff;border-color:#14b8a6}' +
       '.db-motion-bg{position:fixed;inset:0;z-index:3600;background:rgba(2,6,23,.88);-webkit-backdrop-filter:blur(8px);backdrop-filter:blur(8px);display:grid;place-items:center;padding:12px}' +
       '.db-motion-bg[hidden]{display:none!important}' +
       '.db-motion-dialog{width:min(1180px,100%);height:min(880px,calc(100dvh - 24px));max-height:calc(100dvh - 24px);background:#070e1c;border:1px solid rgba(148,163,184,.24);border-radius:18px;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 30px 80px -12px rgba(0,0,0,.75);color:#f8fafc}' +

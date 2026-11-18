@@ -6,15 +6,20 @@
 // Explicitly separates Dwelling Reconstruction Cost (Coverage A) from Land + Market Value and
 // quantifies `monthlyPaymentShockUSD` relative to naive 0.35% lender/portal calculators.
 
+use crate::modules::fire_protection::{
+    evaluate_lidar_canopy_overhang, fuse_parcel_fire_protection, FIRE_PROTECTION_EXT_ID,
+    FIRE_PROTECTION_HOMEPAGE_URL, FIRE_PROTECTION_SOURCE_NAME,
+};
 use crate::registry::rates_and_costs::{
     state_admitted_ho3_rate as state_admitted_base_rate, state_base_rebuild_per_sqft,
     CONVECTIVE_HAIL_STATES, COUNTY_REBUILD_COST_SQFT, TIER1_COASTAL_WIND_FIPS,
 };
-use crate::shared::{round_n, unwrap_data, ModuleOutput, SourceItem};
+use crate::shared::{round_n, unwrap_data, EnvConfig, HttpClient, ModuleOutput, SourceItem};
 use chrono::Datelike;
 use once_cell::sync::Lazy;
 use regex::Regex;
 use serde_json::{json, Value};
+use std::collections::HashMap;
 
 static RE_YEAR_4D: Lazy<Regex> = Lazy::new(|| Regex::new(r"\b(19[5-9]\d|20[0-3]\d)\b").unwrap());
 static RE_REROOF_TEXT: Lazy<Regex> = Lazy::new(|| {
@@ -554,6 +559,199 @@ pub fn run_insurance(
     run_insurance_with_condition(f, hazards, environment, geo, f.get("condition"), None)
 }
 
+/// Queries `fire_protection_hydrants` through `ExtensionHub::global().execute_enabled_extension(...)`
+/// (with `geohash6` shared cache, rate limiting, and admin enablement) and fuses parcel-exact
+/// distances, 3DEP LiDAR `canopyNearRoof` overhang, and `permit_roof_extractor` reroof cliff checks.
+pub async fn fetch_fire_protection_via_hub(
+    http: &HttpClient,
+    env: &EnvConfig,
+    facts: &Value,
+    hazards: &Value,
+    environment: &Value,
+    geo: &Value,
+    condition: Option<&Value>,
+    house3d: Option<&Value>,
+) -> Option<Value> {
+    fetch_fire_protection_via_hub_ref(
+        crate::extensions::ExtensionHub::global(),
+        http,
+        env,
+        facts,
+        hazards,
+        environment,
+        geo,
+        condition,
+        house3d,
+    )
+    .await
+}
+
+/// Variant of [`fetch_fire_protection_via_hub`] accepting an explicit [`crate::extensions::ExtensionHub`] handle.
+pub async fn fetch_fire_protection_via_hub_ref(
+    hub: &crate::extensions::ExtensionHub,
+    http: &HttpClient,
+    env: &EnvConfig,
+    facts: &Value,
+    hazards: &Value,
+    environment: &Value,
+    geo: &Value,
+    condition: Option<&Value>,
+    house3d: Option<&Value>,
+) -> Option<Value> {
+    let f = unwrap_data(facts);
+    let h = unwrap_data(hazards);
+    let e = unwrap_data(environment);
+    let g = unwrap_data(geo);
+
+    let lat = g
+        .pointer("/refined/lat")
+        .or_else(|| g.get("lat"))
+        .and_then(Value::as_f64)
+        .filter(|x| x.is_finite() && x.abs() <= 90.0)?;
+    let lon = g
+        .pointer("/refined/lon")
+        .or_else(|| g.get("lon"))
+        .and_then(Value::as_f64)
+        .filter(|x| x.is_finite() && x.abs() <= 180.0)?;
+
+    let mut extra_params = HashMap::new();
+    if let Some(country) = g
+        .get("country")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        extra_params.insert("country".to_string(), country.to_string());
+    }
+    let lidar_eval = evaluate_lidar_canopy_overhang(house3d, f, h, condition);
+    if let Some(canopy_b) = lidar_eval.get("canopyNearRoof").and_then(Value::as_bool) {
+        extra_params.insert("canopy_near_roof".to_string(), canopy_b.to_string());
+    }
+
+    let sdwis_pwsid = e
+        .pointer("/water/primary/pwsid")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from);
+    let sdwis_water_name = e
+        .pointer("/water/primary/name")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from);
+    let is_private_well = f.get("privateWell").and_then(Value::as_bool);
+    let yb_opt = f
+        .get("yearBuilt")
+        .or_else(|| f.pointer("/countyRecords/buildingRecord/yearBuilt"))
+        .and_then(Value::as_i64);
+    let sqft_opt = f
+        .get("sqft")
+        .or_else(|| f.get("livingAreaSqft"))
+        .and_then(Value::as_i64);
+
+    let st = g
+        .get("state")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_ascii_uppercase();
+    let county_fips = g.get("countyFips").and_then(Value::as_str).unwrap_or("");
+    let nri_hrcn = extract_nri_score(h, "HRCN").unwrap_or(0.0);
+    let is_coastal_wind =
+        TIER1_COASTAL_WIND_FIPS.contains(county_fips) || st == "FL" || nri_hrcn >= 82.0;
+
+    let query = crate::extensions::proto::ExtensionQueryProto {
+        lat: Some(lat),
+        lon: Some(lon),
+        state: st,
+        city: g.get("city").and_then(Value::as_str).unwrap_or("").to_string(),
+        zip: g.get("zip").and_then(Value::as_str).unwrap_or("").to_string(),
+        county_fips: county_fips.to_string(),
+        county_name: g.get("county").and_then(Value::as_str).map(String::from),
+        year_built: yb_opt,
+        sqft: sqft_opt,
+        sdwis_pwsid,
+        sdwis_water_name,
+        is_likely_private_well: is_private_well,
+        extra_params,
+        ..Default::default()
+    };
+
+    let envs = match hub
+        .execute_enabled_extension(FIRE_PROTECTION_EXT_ID, &query, http, env)
+        .await
+    {
+        Ok(v) => v,
+        Err(err) => {
+            tracing::warn!(error = %err, "insurance: fire_protection_hydrants lookup unavailable");
+            return None;
+        }
+    };
+
+    for env_msg in envs {
+        if env_msg.extension_id != FIRE_PROTECTION_EXT_ID {
+            continue;
+        }
+        if let Some(crate::extensions::proto::extension_envelope_proto::Payload::RawJson(raw)) =
+            env_msg.payload
+        {
+            if let Ok(cell_val) = serde_json::from_str::<Value>(&raw) {
+                let now_year = chrono::Utc::now().year();
+                return Some(fuse_parcel_fire_protection(
+                    &cell_val,
+                    Some(lat),
+                    Some(lon),
+                    f,
+                    h,
+                    e,
+                    condition,
+                    house3d,
+                    is_coastal_wind,
+                    now_year,
+                ));
+            }
+        }
+    }
+    None
+}
+
+/// Async entry point executing `fire_protection_hydrants` via `ExtensionHub::global()` and enriching
+/// insurance underwriting, brush-clearance/LiDAR canopy overhang, ISO PPC proxy, and map layers.
+pub async fn run_insurance_with_fire_protection(
+    http: &HttpClient,
+    env: &EnvConfig,
+    facts: &Value,
+    hazards: &Value,
+    environment: &Value,
+    geo: &Value,
+    condition: Option<&Value>,
+    house3d: Option<&Value>,
+    market_estimate_usd: Option<i64>,
+) -> ModuleOutput {
+    let fire_prot = fetch_fire_protection_via_hub(
+        http,
+        env,
+        facts,
+        hazards,
+        environment,
+        geo,
+        condition,
+        house3d,
+    )
+    .await;
+    run_insurance_with_signals(
+        facts,
+        hazards,
+        environment,
+        geo,
+        condition,
+        house3d,
+        fire_prot.as_ref(),
+        market_estimate_usd,
+    )
+}
+
 /// Extended entry point accepting optional pre-computed `condition` triage and `valuation` market estimate.
 pub fn run_insurance_with_condition(
     facts: &Value,
@@ -561,6 +759,31 @@ pub fn run_insurance_with_condition(
     environment: &Value,
     geo: &Value,
     condition: Option<&Value>,
+    market_estimate_usd: Option<i64>,
+) -> ModuleOutput {
+    run_insurance_with_signals(
+        facts,
+        hazards,
+        environment,
+        geo,
+        condition,
+        None,
+        None,
+        market_estimate_usd,
+    )
+}
+
+/// Full deterministic + extension-enriched insurance modeling entry point consuming optional
+/// `house3d` LiDAR canopy metrics and `fire_protection_hydrants` signals.
+#[allow(clippy::too_many_arguments)]
+pub fn run_insurance_with_signals(
+    facts: &Value,
+    hazards: &Value,
+    environment: &Value,
+    geo: &Value,
+    condition: Option<&Value>,
+    house3d: Option<&Value>,
+    fire_protection: Option<&Value>,
     market_estimate_usd: Option<i64>,
 ) -> ModuleOutput {
     let f = unwrap_data(facts);
@@ -1110,6 +1333,122 @@ pub fn run_insurance_with_condition(
         }));
     }
 
+    // --- 2C2. Fire Protection Infrastructure, ISO PPC Proxy & 3DEP LiDAR Canopy (`fire_protection_hydrants`) ---
+    let parcel_lat = g
+        .pointer("/refined/lat")
+        .or_else(|| g.get("lat"))
+        .and_then(Value::as_f64);
+    let parcel_lon = g
+        .pointer("/refined/lon")
+        .or_else(|| g.get("lon"))
+        .and_then(Value::as_f64);
+
+    let resolved_fire_prot: Option<Value> =
+        if crate::extensions::ExtensionHub::global().is_enabled(FIRE_PROTECTION_EXT_ID) {
+            fire_protection
+                .or_else(|| h.get("fireProtection"))
+                .or_else(|| f.get("fireProtection"))
+                .or_else(|| {
+                    condition
+                        .map(unwrap_data)
+                        .and_then(|c| c.get("fireProtection"))
+                })
+                .filter(|v| v.is_object())
+                .map(|raw_fp| {
+                    fuse_parcel_fire_protection(
+                        raw_fp,
+                        parcel_lat,
+                        parcel_lon,
+                        f,
+                        h,
+                        e,
+                        condition,
+                        house3d,
+                        is_coastal_wind_county,
+                        now_year,
+                    )
+                })
+        } else {
+            None
+        };
+
+    let lidar_canopy = resolved_fire_prot
+        .as_ref()
+        .and_then(|fp| fp.get("lidarCanopyOverhang"))
+        .cloned()
+        .unwrap_or_else(|| evaluate_lidar_canopy_overhang(house3d, f, h, condition));
+
+    let ppc_class_opt = resolved_fire_prot
+        .as_ref()
+        .and_then(|fp| fp.pointer("/isoPpcProxy/ppcClass"))
+        .and_then(Value::as_i64);
+    let ppc_hydrant_1000_opt = resolved_fire_prot
+        .as_ref()
+        .and_then(|fp| fp.pointer("/isoPpcProxy/hydrantWithin1000Ft"))
+        .and_then(Value::as_bool);
+    let ppc_basis_str = resolved_fire_prot
+        .as_ref()
+        .and_then(|fp| fp.pointer("/isoPpcProxy/basis"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+
+    let iso_ppc_10_unprotected = !is_condo && ppc_class_opt == Some(10);
+    let iso_ppc_9_semi_protected = !is_condo && ppc_class_opt == Some(9);
+    let iso_ppc_urban_protected = ppc_class_opt.map(|c| c <= 3).unwrap_or(false)
+        && ppc_hydrant_1000_opt == Some(true);
+    let has_lidar_canopy_overhang =
+        lidar_canopy.get("underwritingFlag").and_then(Value::as_bool) == Some(true);
+
+    if iso_ppc_10_unprotected {
+        nonrenewal_pool_triggers.push(
+            "ISO Public Protection Class 10 proxy (>5 est. road miles from nearest mapped fire station) triggers unprotected fire declination or FAIR/surplus routing"
+                .to_string(),
+        );
+        vulnerability_flags.push(json!({
+            "id": "iso_ppc_10_unprotected",
+            "severity": "high",
+            "title": "Unprotected Fire Response Distance (ISO PPC 10 Proxy)",
+            "detail": if ppc_basis_str.is_empty() {
+                "Parcel sits more than 5 estimated road miles from the nearest mapped fire station; standard admitted HO-3 carriers routinely decline PPC 10 risks or require verified private fire-water storage / FAIR Plan coverage.".to_string()
+            } else {
+                format!("{ppc_basis_str} Standard admitted HO-3 carriers routinely decline PPC 10 risks or require verified fire-water storage / FAIR Plan coverage.")
+            }
+        }));
+    } else if iso_ppc_9_semi_protected {
+        surcharged_triggers.push(
+            "ISO Public Protection Class 8B/9 proxy (fire station <=5 road mi, no mapped hydrant within 1,000 ft / rural water) carries semi-protected fire surcharge"
+                .to_string(),
+        );
+        vulnerability_flags.push(json!({
+            "id": "iso_ppc_9_hydrant_gap",
+            "severity": "moderate",
+            "title": "Hydrant >1,000 ft / Semi-Protected Water Supply (ISO PPC 8B/9 Proxy)",
+            "detail": if ppc_basis_str.is_empty() {
+                "Fire station is within 5 road miles, but no pressurized fire hydrant is confirmed within 1,000 ft; expect semi-protected fire rating unless a municipal hydrant or certified drafting cistern is verified.".to_string()
+            } else {
+                ppc_basis_str.to_string()
+            }
+        }));
+    }
+
+    if has_lidar_canopy_overhang {
+        if wui_very_high || wui_high || wui_moderate {
+            surcharged_triggers.push(
+                "USGS 3DEP LiDAR detected >=3m tree canopy within 2m of roof perimeter (Zone 0/1 aerial brush-clearance inspection flag)"
+                    .to_string(),
+            );
+        }
+        vulnerability_flags.push(json!({
+            "id": "lidar_roof_canopy_overhang",
+            "severity": if wui_very_high || wui_high || wui_moderate { "high" } else { "moderate" },
+            "title": "3DEP LiDAR Tree Canopy Within 2 m of Roof Perimeter",
+            "detail": lidar_canopy
+                .get("arboristTrimCreditNote")
+                .and_then(Value::as_str)
+                .unwrap_or("Airborne LiDAR detected >=3 m tree canopy overhanging or within 2 m of the roof edge; carriers frequently issue post-bind aerial-imagery tree-trimming requirements.")
+        }));
+    }
+
     // --- Compute Base Homeowners / FAIR Plan + DIC Wrap ---
     let uses_fair_or_wind_pool = !nonrenewal_pool_triggers.is_empty();
     let (base_expected, dic_expected, policy_type, carrier_market, dic_note): (
@@ -1118,7 +1457,7 @@ pub fn run_insurance_with_condition(
         String,
         &'static str,
         Option<String>,
-    ) = if (wui_very_high || wui_high) && !is_condo {
+    ) = if (wui_very_high || wui_high || iso_ppc_10_unprotected) && !is_condo {
         // State FAIR Plan (fire/smoke/lightning) + Difference-in-Conditions (DIC) wrap
         let fair_rate = if wui_very_high {
             if is_hillside {
@@ -1126,21 +1465,30 @@ pub fn run_insurance_with_condition(
             } else {
                 0.0068
             }
-        } else if is_hillside {
-            0.0056
+        } else if wui_high {
+            if is_hillside {
+                0.0056
+            } else {
+                0.0046
+            }
         } else {
-            0.0046
+            // Unprotected ISO PPC 10 rural fire pool / specialty surplus dwelling fire
+            0.0042
         };
         let shake_mult = if roof_ctx.material_class == "wood_shake" {
             1.30
         } else {
             1.0
         };
-        let fair_exp = (coverage_a_usd as f64 * fair_rate * shake_mult).max(if wui_very_high {
-            5_800.0
-        } else {
-            4_100.0
-        });
+        let canopy_mult = if has_lidar_canopy_overhang { 1.06 } else { 1.0 };
+        let fair_exp =
+            (coverage_a_usd as f64 * fair_rate * shake_mult * canopy_mult).max(if wui_very_high {
+                5_800.0
+            } else if wui_high {
+                4_100.0
+            } else {
+                3_600.0
+            });
         let dic_exp = (1_150.0 + coverage_a_usd as f64 * 0.00085).clamp(1_350.0, 3_200.0);
         let ptype = if st == "CA" {
             "CA FAIR Plan Dwelling Fire".to_string()
@@ -1236,6 +1584,14 @@ pub fn run_insurance_with_condition(
                 .unwrap_or(false)
         {
             rate *= 0.90;
+        }
+        if iso_ppc_9_semi_protected {
+            rate *= 1.12;
+        } else if iso_ppc_urban_protected {
+            rate *= 0.96;
+        }
+        if has_lidar_canopy_overhang && wui_moderate {
+            rate *= 1.06;
         }
         if yb_opt.map(|yb| yb < 1960).unwrap_or(false) {
             rate *= 1.12;
@@ -1638,6 +1994,20 @@ pub fn run_insurance_with_condition(
     if env_aqi_max >= 85.0 {
         score -= 3.0;
     }
+    if iso_ppc_10_unprotected {
+        score -= 38.0;
+    } else if iso_ppc_9_semi_protected {
+        score -= 10.0;
+    } else if iso_ppc_urban_protected {
+        score += 2.0;
+    }
+    if has_lidar_canopy_overhang {
+        score -= if wui_very_high || wui_high || wui_moderate {
+            6.0
+        } else {
+            3.0
+        };
+    }
 
     let insurability_score = match insurability_tier {
         "High Non-Renewal / State FAIR or Wind Pool Risk" => score.round().clamp(10.0, 42.0) as i64,
@@ -1842,6 +2212,26 @@ pub fn run_insurance_with_condition(
         }));
     }
 
+    if has_lidar_canopy_overhang {
+        checklist.push(json!({
+            "id": "lidar_arborist_canopy_trim",
+            "priority": if wui_very_high || wui_high { "critical" } else { "high" },
+            "title": "ISA Certified Arborist 6–10 ft Roof & Chimney Canopy Clearance Trim",
+            "estimatedSavingsOrImpact": "Clears carrier aerial-imagery overhang hold & reduces roof limb/ember loss risk",
+            "detail": "USGS 3DEP airborne LiDAR detected >=3 m vegetation canopy within 2 m of the roof perimeter. Prune overhanging branches at least 6–10 ft back from roof planes and chimneys, and retain dated before/after photos for underwriting."
+        }));
+    }
+
+    if iso_ppc_10_unprotected || iso_ppc_9_semi_protected {
+        checklist.push(json!({
+            "id": "rural_fire_suppression_water",
+            "priority": if iso_ppc_10_unprotected { "critical" } else { "high" },
+            "title": "Verify Local Fire District Substation & Dedicated Fire-Water Cistern / Hydrant Access",
+            "estimatedSavingsOrImpact": "Can reclassify PPC 9/10 to protected PPC 5–8B & unlock admitted HO-3 markets",
+            "detail": "Confirm whether a volunteer/paid fire substation or pressurized municipal hydrant sits closer than mapped in federal GIS, or document an NFPA 1142-compliant >=2,500-gallon fire-department drafting tank / dry hydrant."
+        }));
+    }
+
     checklist.push(json!({
         "id": "smart_water_shutoff",
         "priority": "recommended",
@@ -1893,7 +2283,7 @@ pub fn run_insurance_with_condition(
         "pre1980CrippleWallRisk": pre1980_cripple_wall,
     });
 
-    let sources = vec![
+    let mut sources = vec![
         SourceItem::new(
             "FEMA National Flood Hazard Layer (NFHL) & NFIP Risk Rating 2.0 Actuarial Framework",
             "https://www.fema.gov/flood-insurance/risk-rating",
@@ -1912,80 +2302,120 @@ pub fn run_insurance_with_condition(
         ),
     ];
 
-    ModuleOutput {
-        data: json!({
-            "status": "public_benchmark",
-            "insurabilityTier": insurability_tier,
-            "insurabilityScore": insurability_score,
+    let mut map_layers: Vec<Value> = Vec::new();
+    if let Some(ref fp) = resolved_fire_prot {
+        let fp_url = fp
+            .get("sourceUrl")
+            .and_then(Value::as_str)
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or(FIRE_PROTECTION_HOMEPAGE_URL);
+        if !sources.iter().any(|s| s.url == fp_url) {
+            sources.push(SourceItem::new(FIRE_PROTECTION_SOURCE_NAME, fp_url));
+        }
+        if let Some(ml) = fp.get("mapLayer") {
+            let has_feats = ml
+                .get("features")
+                .and_then(Value::as_array)
+                .map(|a| !a.is_empty())
+                .unwrap_or(false);
+            if has_feats {
+                map_layers.push(ml.clone());
+            }
+        }
+    }
+
+    let mut roof_uw = json!({
+        "materialClass": roof_ctx.material_class,
+        "estimatedAgeYears": roof_ctx.effective_age_years,
+        "carrierAgeCutoffYears": roof_age_cutoff,
+        "hasVerifiedReroofPermit": roof_ctx.has_reroof_permit,
+        "latestReroofPermitYear": roof_ctx.latest_reroof_year,
+        "verificationStatus": roof_ctx.verification_status,
+        "effectiveYearSource": roof_ctx.effective_year_source,
+        "estimatedAgeFromYearBuilt": roof_ctx.estimated_age_from_year_built,
+        "exceedsCarrierAgeCutoff": roof_over_cutoff,
+    });
+    if lidar_canopy.get("evaluated").and_then(Value::as_bool) == Some(true) {
+        if let Some(obj) = roof_uw.as_object_mut() {
+            obj.insert("lidarCanopyOverhang".to_string(), lidar_canopy);
+        }
+    }
+
+    let mut out_data = json!({
+        "status": "public_benchmark",
+        "insurabilityTier": insurability_tier,
+        "insurabilityScore": insurability_score,
+        "coverageAUSD": coverage_a_usd,
+        "dwellingReconstruction": {
             "coverageAUSD": coverage_a_usd,
-            "dwellingReconstruction": {
-                "coverageAUSD": coverage_a_usd,
-                "baseCostPerSqftUSD": base_cost_per_sqft.round() as i64,
-                "effectiveRebuildPerSqftUSD": effective_rebuild_per_sqft.round() as i64,
-                "livingAreaSqft": sqft.round() as i64,
-                "stories": stories_opt,
-                "yearBuilt": yb_opt,
-                "isCondoWallsIn": is_condo,
-                "isHillsideTerrain": is_hillside,
-                "multipliers": {
-                    "stories": stories_factor,
-                    "vintageBuildingCode": vintage_code_factor,
-                    "terrainSlope": terrain_slope_factor,
-                    "customFinish": custom_finish_factor,
-                },
-                "garageAllowanceUSD": garage_allowance_usd,
-                "auxiliaryOrAduAllowanceUSD": adu_or_aux_usd,
-                "ordinanceAndLaw10PctUSD": ordinance_law_10pct_usd,
-                "extendedReplacementCost125USD": extended_125_usd,
-                "referenceMarketValueUSD": ref_market_usd_opt,
-                "referenceMarketValueSource": ref_market_source_opt,
-                "impliedLandResidualUSD": implied_land_residual_opt,
-                "rebuildToMarketRatioPct": rebuild_to_market_pct_opt,
-                "reconstructionVsMarketNote": reconstruction_vs_market_note,
+            "baseCostPerSqftUSD": base_cost_per_sqft.round() as i64,
+            "effectiveRebuildPerSqftUSD": effective_rebuild_per_sqft.round() as i64,
+            "livingAreaSqft": sqft.round() as i64,
+            "stories": stories_opt,
+            "yearBuilt": yb_opt,
+            "isCondoWallsIn": is_condo,
+            "isHillsideTerrain": is_hillside,
+            "multipliers": {
+                "stories": stories_factor,
+                "vintageBuildingCode": vintage_code_factor,
+                "terrainSlope": terrain_slope_factor,
+                "customFinish": custom_finish_factor,
             },
-            "annualPremiumRangeUSD": {
-                "low": total_low,
-                "expected": total_expected,
-                "high": total_high,
-                "includesMandatoryFlood": flood_mandatory,
-                "excludesOptionalEarthquake": true,
-                "withRecommendedFloodAndQuakeExpectedUSD": all_perils_expected,
-                "baseHomeownersOrFairPlan": base_breakdown,
-                "dicWrap": dic_breakdown,
-                "floodRequiredOrRecommended": flood_breakdown,
-                "earthquakeOptional": eq_breakdown,
-            },
-            "perilBreakdown": {
-                "baseHomeownersOrFairPlan": base_breakdown,
-                "dicWrap": dic_breakdown,
-                "floodRequiredOrRecommended": flood_breakdown,
-                "earthquakeOptional": eq_breakdown,
-            },
-            "naiveLenderEstimateUSD": naive_lender_annual_opt,
-            "realisticExpectedUSD": realistic_expected_annual,
-            "naiveMonthlyUSD": naive_monthly_opt,
-            "realisticMonthlyUSD": realistic_monthly,
-            "monthlyPaymentShockUSD": monthly_payment_shock_opt,
-            "paymentShockNote": payment_shock_note,
-            "roofUnderwriting": {
-                "materialClass": roof_ctx.material_class,
-                "estimatedAgeYears": roof_ctx.effective_age_years,
-                "carrierAgeCutoffYears": roof_age_cutoff,
-                "hasVerifiedReroofPermit": roof_ctx.has_reroof_permit,
-                "latestReroofPermitYear": roof_ctx.latest_reroof_year,
-                "verificationStatus": roof_ctx.verification_status,
-                "effectiveYearSource": roof_ctx.effective_year_source,
-                "estimatedAgeFromYearBuilt": roof_ctx.estimated_age_from_year_built,
-                "exceedsCarrierAgeCutoff": roof_over_cutoff,
-            },
-            "underwritingTriggers": {
-                "poolOrNonRenewal": nonrenewal_pool_triggers,
-                "surchargeDrivers": surcharged_triggers,
-            },
-            "vulnerabilityFlags": vulnerability_flags,
-            "mitigationDiscountsAndChecklist": checklist,
-            "disclaimer": "Modeled homeowners, wildfire, flood, and seismic insurance estimate for residential due-diligence budgeting only — NOT a bindable insurance quote, coverage binder, or appraisal. Confirm insurability, 5-year LexisNexis C.L.U.E. claims history, and binding rates directly with licensed insurers.",
-        }),
+            "garageAllowanceUSD": garage_allowance_usd,
+            "auxiliaryOrAduAllowanceUSD": adu_or_aux_usd,
+            "ordinanceAndLaw10PctUSD": ordinance_law_10pct_usd,
+            "extendedReplacementCost125USD": extended_125_usd,
+            "referenceMarketValueUSD": ref_market_usd_opt,
+            "referenceMarketValueSource": ref_market_source_opt,
+            "impliedLandResidualUSD": implied_land_residual_opt,
+            "rebuildToMarketRatioPct": rebuild_to_market_pct_opt,
+            "reconstructionVsMarketNote": reconstruction_vs_market_note,
+        },
+        "annualPremiumRangeUSD": {
+            "low": total_low,
+            "expected": total_expected,
+            "high": total_high,
+            "includesMandatoryFlood": flood_mandatory,
+            "excludesOptionalEarthquake": true,
+            "withRecommendedFloodAndQuakeExpectedUSD": all_perils_expected,
+            "baseHomeownersOrFairPlan": base_breakdown,
+            "dicWrap": dic_breakdown,
+            "floodRequiredOrRecommended": flood_breakdown,
+            "earthquakeOptional": eq_breakdown,
+        },
+        "perilBreakdown": {
+            "baseHomeownersOrFairPlan": base_breakdown,
+            "dicWrap": dic_breakdown,
+            "floodRequiredOrRecommended": flood_breakdown,
+            "earthquakeOptional": eq_breakdown,
+        },
+        "naiveLenderEstimateUSD": naive_lender_annual_opt,
+        "realisticExpectedUSD": realistic_expected_annual,
+        "naiveMonthlyUSD": naive_monthly_opt,
+        "realisticMonthlyUSD": realistic_monthly,
+        "monthlyPaymentShockUSD": monthly_payment_shock_opt,
+        "paymentShockNote": payment_shock_note,
+        "roofUnderwriting": roof_uw,
+        "underwritingTriggers": {
+            "poolOrNonRenewal": nonrenewal_pool_triggers,
+            "surchargeDrivers": surcharged_triggers,
+        },
+        "vulnerabilityFlags": vulnerability_flags,
+        "mitigationDiscountsAndChecklist": checklist,
+        "disclaimer": "Modeled homeowners, wildfire, flood, and seismic insurance estimate for residential due-diligence budgeting only — NOT a bindable insurance quote, coverage binder, or appraisal. Confirm insurability, 5-year LexisNexis C.L.U.E. claims history, and binding rates directly with licensed insurers.",
+    });
+
+    if let Some(fp) = resolved_fire_prot {
+        if let Some(obj) = out_data.as_object_mut() {
+            obj.insert("fireProtection".to_string(), fp);
+            if !map_layers.is_empty() {
+                obj.insert("mapLayers".to_string(), Value::Array(map_layers));
+            }
+        }
+    }
+
+    ModuleOutput {
+        data: out_data,
         sources,
         warnings: Vec::new(),
     }
@@ -2006,5 +2436,151 @@ fn fmt_commas(n: i64) -> String {
         format!("-{rev}")
     } else {
         rev
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::{routing::get, Json, Router};
+    use tokio::net::TcpListener;
+
+    #[tokio::test]
+    async fn insurance_consumes_fire_protection_hydrants_extension_and_lidar_canopy() {
+        let app = Router::new()
+            .route(
+                "/fema_far",
+                get(|| async {
+                    Json(json!({
+                        "features": [{
+                            "attributes": {
+                                "NAME": "REMOTE VALLEY STATION 9",
+                                "CITY": "SAN JOSE",
+                                "STATE": "CA",
+                                "ZIP": "95120"
+                            },
+                            "geometry": { "x": -121.961797, "y": 37.3800 }
+                        }]
+                    }))
+                }),
+            )
+            .route(
+                "/empty_fc",
+                get(|| async { Json(json!({ "features": [] })) }),
+            )
+            .route(
+                "/empty_ovp",
+                get(|| async { Json(json!({ "elements": [] })) }),
+            );
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let srv = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let env = EnvConfig::from_map(HashMap::from([
+            (
+                "FIRE_STATIONS_FEMA_URL".to_string(),
+                format!("http://{addr}/fema_far"),
+            ),
+            (
+                "FIRE_STATIONS_USGS_URL".to_string(),
+                format!("http://{addr}/empty_fc"),
+            ),
+            (
+                "FIRE_STATIONS_OSM_URL".to_string(),
+                format!("http://{addr}/empty_fc"),
+            ),
+            (
+                "FIRE_HYDRANTS_OSM_URL".to_string(),
+                format!("http://{addr}/empty_fc"),
+            ),
+            (
+                "OVERPASS_ENDPOINTS".to_string(),
+                format!("http://{addr}/empty_ovp"),
+            ),
+        ]));
+        let http = HttpClient::offline_loopback_only(None);
+
+        let facts = json!({
+            "sqft": 2150,
+            "yearBuilt": 2018,
+            "roof": "Composition shingle"
+        });
+        let geo = json!({
+            "state": "CA",
+            "countyFips": "06085",
+            "city": "San Jose",
+            "lat": 37.282147,
+            "lon": -121.961797
+        });
+        let house3d = json!({
+            "metrics": {
+                "canopyNearRoof": true,
+                "tallestTreeM": 12.4,
+                "tallestTreeDistM": 1.2,
+                "treesMapped": 4
+            }
+        });
+
+        let out = run_insurance_with_fire_protection(
+            &http,
+            &env,
+            &facts,
+            &Value::Null,
+            &Value::Null,
+            &geo,
+            None,
+            Some(&house3d),
+            Some(1_800_000),
+        )
+        .await;
+
+        assert_eq!(
+            out.data["fireProtection"]["isoPpcProxy"]["ppcClass"].as_i64(),
+            Some(10)
+        );
+        assert_eq!(
+            out.data["insurabilityTier"].as_str(),
+            Some("High Non-Renewal / State FAIR or Wind Pool Risk")
+        );
+        let flags = out.data["vulnerabilityFlags"].as_array().unwrap();
+        assert!(flags.iter().any(|f| f["id"] == "iso_ppc_10_unprotected"));
+        assert!(flags.iter().any(|f| f["id"] == "lidar_roof_canopy_overhang"));
+        let checklist = out.data["mitigationDiscountsAndChecklist"]
+            .as_array()
+            .unwrap();
+        assert!(checklist
+            .iter()
+            .any(|c| c["id"] == "lidar_arborist_canopy_trim"));
+        assert!(checklist
+            .iter()
+            .any(|c| c["id"] == "rural_fire_suppression_water"));
+        assert_eq!(
+            out.data["mapLayers"][0]["id"].as_str(),
+            Some("fire-protection")
+        );
+
+        // Disabling `fire_protection_hydrants` on an isolated ExtensionHub cleanly skips lookup
+        let custom_hub = crate::extensions::ExtensionHub::new_default();
+        custom_hub
+            .enable(FIRE_PROTECTION_EXT_ID, false)
+            .expect("disable fire_protection_hydrants");
+        let disabled_fp = fetch_fire_protection_via_hub_ref(
+            &custom_hub,
+            &http,
+            &env,
+            &facts,
+            &Value::Null,
+            &Value::Null,
+            &geo,
+            None,
+            Some(&house3d),
+        )
+        .await;
+        assert!(disabled_fp.is_none());
+
+        srv.abort();
     }
 }

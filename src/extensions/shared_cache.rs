@@ -866,6 +866,7 @@ fn is_internal_extra_param(key: &str) -> bool {
             | "section_id"
             | "lazy_job_id"
             | "lazy_trigger_kind"
+            | "trigger_kind"
             | "mls_remarks"
             | "requested_by_user_id"
             | "shared_cache_force_refresh"

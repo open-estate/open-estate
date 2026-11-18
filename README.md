@@ -2,7 +2,7 @@
 
 [![License: Personal Research & Non-Commercial](https://img.shields.io/badge/license-Personal%20Research%20%26%20Non--Commercial-0f766e.svg)](#license)
 
-> **Personal Single-User Self-Hosting Edition**: This open-source release (**`open-estate/open-estate`**) is provided **free of charge** for one individual to self-host on personal hardware or Docker for **personal, non-commercial home research only**. Operating hosted/cloud/SaaS/API services for third parties, multi-user team collaboration, batch fleet scanning, or using the software in commercial real-estate, brokerage, lending, or investment operations is **strictly prohibited** — all commercial licensing and managed cloud hosting rights are reserved exclusively by **OmniSolo LLC** (see [`LICENSE`](LICENSE)).
+> **Personal Single-User Self-Hosting Edition**: This open-source release (**`open-estate/open-estate`**) is provided **free of charge** for one individual to self-host on personal hardware or Docker for **personal, non-commercial home research only**. Operating hosted/cloud/SaaS/API services for third parties, multi-user team collaboration, batch fleet scanning, or using the software in commercial real-estate, brokerage, lending, or investment operations is **strictly prohibited** — all commercial licensing and managed cloud hosting rights are reserved exclusively by **Open Estate Contributors** (see [`LICENSE`](LICENSE)).
 
 **Open Estate** turns any US residential street address into a self-contained, interactive due-diligence report, 3D LiDAR lot/roof model, side-by-side Deal Room comparison matrix, and natural-language AI Home Finder — compiled into a **single native Rust binary (`open-estate-server`)** and packaged for **Docker & Docker Compose** with zero Node.js or Python server runtime dependencies.
 
@@ -332,4 +332,4 @@ Licensed under the **Open Estate Personal Research & Non-Commercial License v1.0
 
 - **Permitted (Free)**: Viewing, modifying, compiling, and self-hosting on your own hardware/Docker environment **solely for personal, individual, non-commercial property research**.
 - **Prohibited**: Operating any hosted, cloud, multi-tenant, SaaS, or API service for third parties; charging fees or credits; using the software or its outputs in real-estate brokerage, lending, appraisal, property management, or commercial investment operations; or reselling/syndicating reports or datasets.
-- **Commercial & Cloud Service**: Commercial licensing and hosted enterprise inquiries are handled exclusively by **OmniSolo LLC**.
+- **Commercial & Cloud Service**: Commercial licensing and hosted enterprise inquiries are handled exclusively by **Open Estate Contributors**.

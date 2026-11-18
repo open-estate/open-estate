@@ -1,0 +1,55 @@
+id: solar_potential
+name: "Solar Roof Potential, Shading & NEM 3.0 Financial Engine"
+version: "1.0.0"
+description: "Keyless Sunroof-equivalent rooftop solar PV potential using USGS 3DEP airborne LiDAR roof facets and tree/neighbor raycast shading, NASA POWER 25-year solar climatology, EU JRC PVGIS terrain horizon, EPA eGRID ZIP carbon intensity, and parcel utility tariff + CA NEM 3.0 LFP battery 20-year financial modeling."
+domain: house_3d
+domains:
+  - house_3d
+driver: native_adapter
+proto_message_type: "openestate.extension.v1.House3dMetadataProto"
+priority: 260
+enabled_by_default: true
+tier: basic
+license_class: public_open_data
+execution_mode: lazy
+section_id: solar
+requires_manual_approval: false
+min_plan_tier: ""
+metering:
+  dimensions:
+    - invocations
+    - wall_time_ms
+    - external_api_calls
+    - bytes_downloaded
+builtin: true
+provenance: live_verified
+homepage_url: "https://power.larc.nasa.gov/"
+documentation_url: "https://joint-research-centre.ec.europa.eu/photovoltaic-geographical-information-system-pvgis_en"
+codeowners:
+  - "@openestate/core"
+geo_scope:
+  country: "US"
+  nationwide: true
+  states: []
+  counties: []
+  zip_prefixes: []
+  zip_codes: []
+  cities: []
+auth:
+  auth_type: none
+rate_limit:
+  requests_per_second: 4
+  burst: 8
+  timeout_ms: 12000
+  max_retries: 1
+cache_ttl_secs: 2592000
+sharing:
+  scope: parcel
+  ttl_secs: 2592000
+  stale_while_revalidate_secs: 604800
+  background_refresh: false
+source_attribution:
+  name: "USGS 3DEP LiDAR + NASA POWER + EU JRC PVGIS + EPA eGRID"
+  url: "https://power.larc.nasa.gov/"
+  reference_url_template: "https://power.larc.nasa.gov/data-access-viewer/?lat={{lat}}&lon={{lon}}"
+  notes: "Keyless Sunroof-equivalent solar irradiance, 3D roof/tree shading, and 20-year cash/loan/lease + NEM 3.0 battery financial model."

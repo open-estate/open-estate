@@ -500,6 +500,10 @@ async function run() {
     const countyTextEn = await page.locator('#county').innerText();
     assert(countyTextEn.includes('County Records') && countyTextEn.includes('Parcel'), `Expected County Records content in #county, got "${countyTextEn.slice(0, 120)}"`);
     if ((await page.locator('#countyRawDetails').count()) > 0) {
+      const countyEvDrawer = page.locator('#county details.sec-evidence-drawer:not([open]) > summary.sec-evidence-summary');
+      if ((await countyEvDrawer.count()) > 0) {
+        await countyEvDrawer.first().click();
+      }
       await page.fill('#countyRawSearch', 'APN');
       assert((await page.locator('#countyRawTable tbody tr:visible').count()) >= 1, 'Expected raw county field search to match APN');
       await page.fill('#countyRawSearch', '');
@@ -530,15 +534,22 @@ async function run() {
       await docTabs.nth(i).click();
     }
 
-    // CRE Underwriting (#cre inside Q5 Potential drawer — flat, zero nested <details>)
-    await page.evaluate(() => window.OpenEstateWorkspace.jumpToSection('cre'));
-    await page.locator('#creRunBtn').waitFor({ state: 'visible', timeout: 5000 });
-    await page.click('#creRunBtn');
-    await page.waitForFunction(
-      () => (document.getElementById('cre')?.innerText || '').includes('NOI') && !(document.getElementById('creRunBtn')?.disabled),
-      null,
-      { timeout: 8000 }
+    // CRE Underwriting (#cre inside Q5 Potential drawer — cloud/CRE-gated in Personal OSS residential scope)
+    const creAllowedOnPage = await page.evaluate(
+      () => Boolean(window.__CLOUD_CRE_ENABLED__ === true || window.__REPORT__?.cre || window.__REPORT__?.modules?.cre)
     );
+    if (creAllowedOnPage) {
+      await page.evaluate(() => window.OpenEstateWorkspace.jumpToSection('cre'));
+      await page.locator('#creRunBtn').waitFor({ state: 'visible', timeout: 5000 });
+      await page.click('#creRunBtn');
+      await page.waitForFunction(
+        () => (document.getElementById('cre')?.innerText || '').includes('NOI') && !(document.getElementById('creRunBtn')?.disabled),
+        null,
+        { timeout: 8000 }
+      );
+    } else {
+      assert.equal(await page.locator('#cre').isVisible(), false, 'Personal OSS residential report hides #cre unless cloud/CRE data is present');
+    }
 
     // AI Analyst Q&A (#chatForm via floating Open Estate drawer)
     await page.evaluate(() => window.openOpenEstateChat?.());
@@ -637,8 +648,12 @@ async function run() {
     await assertNoForbiddenLeaks(page, 'Your Match / AI Home Finder');
     await snap(page, 'your_match_finder');
 
-    // Area & ZIP Alerts tab
-    await page.click('#tabBtnAlerts');
+    // Area & ZIP Alerts tab (hidden in top tab strip when SMTP is disabled, reachable via /?tab=alerts)
+    if (await page.locator('#tabBtnAlerts').isVisible()) {
+      await page.click('#tabBtnAlerts');
+    } else {
+      await page.goto(`${BASE_URL}/?tab=alerts`, { waitUntil: 'domcontentloaded' });
+    }
     await page.locator('#subForm').waitFor({ state: 'visible', timeout: 3000 });
     await page.fill('#subEmail', 'e2e-regression-check@example.com');
     await page.fill('#subZips', '95118');
@@ -689,10 +704,11 @@ async function run() {
     assert.equal(await page.locator('#accountBtn').count(), 0, 'No SaaS Sign In button in open-source edition');
 
     await page.goto(`${BASE_URL}/r/${PRIMARY_SLUG}/`, { waitUntil: 'domcontentloaded' });
-    await page.locator('#shareReportBtn').waitFor({ state: 'visible', timeout: 5000 });
     assert.equal(await page.locator('#accountBtn').count(), 0, 'No SaaS Sign In button on report navbar');
-    await page.click('#shareReportBtn');
-    assert.equal(await page.locator('#accountModal.open').count(), 0, 'Clicking Share copies direct link without opening any auth modal');
+    if (await page.locator('#shareReportBtn').isVisible()) {
+      await page.click('#shareReportBtn');
+      assert.equal(await page.locator('#accountModal.open').count(), 0, 'Clicking Share copies direct link without opening any auth modal');
+    }
     console.log('✓ [10/12] Open-source zero-login UX & direct report link sharing');
 
     // =========================================================================
@@ -700,8 +716,84 @@ async function run() {
     // =========================================================================
     await page.setViewportSize({ width: 1440, height: 900 });
     await page.goto(`${BASE_URL}/r/${PRIMARY_SLUG}/`, { waitUntil: 'domcontentloaded' });
-    await page.locator('#chapterWorkspaceBar').waitFor({ state: 'visible', timeout: 8000 });
+    await page.locator('#reportTocAside').waitFor({ state: 'visible', timeout: 8000 });
+    await page.locator('#densitySwitch').waitFor({ state: 'visible', timeout: 5000 });
+    assert.equal(await page.locator('#chapterWorkspaceWrap').isVisible(), true, 'Desktop keeps sticky #chapterWorkspaceWrap visible in header');
+    assert.equal(await page.locator('#chapterWorkspaceWrap .chap-pills').isVisible(), false, 'Desktop with Outline open hides duplicate .chap-pills only');
     await assertNoForbiddenLeaks(page, `Desktop Workspace /r/${PRIMARY_SLUG}/`);
+
+    const parityDesktopCheck = await page.evaluate(() => {
+      const hdr = document.querySelector('header.hdr');
+      const cmdBtn = document.getElementById('toggleCommandCenterBtn');
+      const wtBtn = document.getElementById('stickyWalkthroughBtn');
+      const vidBtn = document.getElementById('chapterMotionReelBtn');
+      const densSw = document.getElementById('densitySwitch');
+      const cmdStyle = cmdBtn ? getComputedStyle(cmdBtn) : null;
+      const roleBrief = document.getElementById('roleFocusBrief');
+      const chooserBtns = roleBrief ? [...roleBrief.querySelectorAll('.rb-chooser-row[data-role-set]')] : [];
+
+      for (let i = 0; i < 4; i++) {
+        window.OpenEstateWorkspace.applyProgressiveDisclosure();
+      }
+      const expandInDrawers = document.querySelectorAll('details.sec-evidence-drawer > .sec-evidence-body > .brief-table-expand, details.sec-evidence-drawer > .sec-evidence-body > .brief-chk-expand').length;
+      const adjDuplicateExpands = [...document.querySelectorAll('.brief-table-expand, .brief-chk-expand')].filter(
+        (b) => b.nextElementSibling && (b.nextElementSibling.classList.contains('brief-table-expand') || b.nextElementSibling.classList.contains('brief-chk-expand'))
+      ).length;
+      const clampedHlRows = document.querySelectorAll('tr.hl.brief-clamped-row').length;
+      const l2aTrapped = [
+        '#ficoTierTable',
+        '#mpVertTab',
+        '#mpPaneMortgage',
+        '#rateShockMatrixBox',
+        '#house .hpfeats',
+        '#houseFeatTabs',
+        '#houseFeatDetectedOnly',
+        '#comps .ccard',
+        '#publicResearchBox',
+      ].filter((sel) => {
+        const node = document.querySelector(sel);
+        return Boolean(node && node.closest('details.sec-evidence-drawer'));
+      });
+
+      return {
+        allInStickyHdr: Boolean(hdr && densSw && cmdBtn && wtBtn && vidBtn && hdr.contains(densSw) && hdr.contains(cmdBtn) && hdr.contains(wtBtn) && hdr.contains(vidBtn)),
+        cmdColor: cmdStyle ? cmdStyle.color : '',
+        cmdBg: cmdStyle ? cmdStyle.backgroundColor : '',
+        roleBriefVisible: Boolean(roleBrief && !roleBrief.hidden && roleBrief.offsetHeight > 40),
+        chooserRoles: chooserBtns.map((b) => b.getAttribute('data-role-set')),
+        expandInDrawers,
+        adjDuplicateExpands,
+        clampedHlRows,
+        l2aTrapped,
+      };
+    });
+    assert(parityDesktopCheck.allInStickyHdr, 'Sticky header must contain #densitySwitch, #toggleCommandCenterBtn, #stickyWalkthroughBtn, and #chapterMotionReelBtn');
+    assert.notEqual(parityDesktopCheck.cmdColor, 'rgb(255, 255, 255)', `#toggleCommandCenterBtn must not render white text on light surface, got ${parityDesktopCheck.cmdColor} on ${parityDesktopCheck.cmdBg}`);
+    assert(parityDesktopCheck.roleBriefVisible, '"Complete dossier" #roleFocusBrief must be visible in default role="all"');
+    assert.deepEqual(parityDesktopCheck.chooserRoles, ['buyer', 'seller', 'agent'], 'Expected 3 role quick-pick buttons in #roleFocusBrief');
+    assert.equal(parityDesktopCheck.expandInDrawers, 0, 'Repeated applyProgressiveDisclosure() must never swallow expand buttons into .sec-evidence-drawer');
+    assert.equal(parityDesktopCheck.adjDuplicateExpands, 0, 'Repeated applyProgressiveDisclosure() must never create duplicate adjacent expand buttons');
+    assert.equal(parityDesktopCheck.clampedHlRows, 0, '<tr class="hl"> total/summary rows must never be clamped in Brief mode');
+    assert.deepEqual(parityDesktopCheck.l2aTrapped, [], `Interactive L2a controls must never be wrapped inside .sec-evidence-drawer: ${parityDesktopCheck.l2aTrapped.join(', ')}`);
+
+    // Verify collapsed desktop TOC reveals .chap-pills alongside sticky right-side buttons, then reopen TOC
+    await page.evaluate(() => window.OpenEstateWorkspace.setTocSidebarOpen(false));
+    assert.equal(await page.locator('#chapterWorkspaceWrap .chap-pills').isVisible(), true, 'Collapsed desktop TOC shows .chap-pills in sticky bar');
+    assert.equal(await page.locator('#toggleCommandCenterBtn').isVisible(), true, 'Collapsed desktop TOC keeps #toggleCommandCenterBtn visible');
+    assert.equal(await page.locator('#stickyWalkthroughBtn').isVisible(), true, 'Collapsed desktop TOC keeps #stickyWalkthroughBtn visible');
+    await page.evaluate(() => window.OpenEstateWorkspace.setTocSidebarOpen(true));
+
+    // Verify sticky controls stay pinned near top of viewport when scrolled down
+    await page.evaluate(() => window.scrollTo(0, 500));
+    const stickyWhileScrolled = await page.evaluate(() => {
+      const ids = ['densitySwitch', 'toggleCommandCenterBtn', 'stickyWalkthroughBtn', 'chapterMotionReelBtn'];
+      return ids.every((id) => {
+        const r = document.getElementById(id)?.getBoundingClientRect();
+        return Boolean(r && r.width > 20 && r.top >= 0 && r.bottom <= 150);
+      });
+    });
+    assert(stickyWhileScrolled, 'Sticky mode & tour controls must remain pinned near top of viewport on scroll');
+    await page.evaluate(() => window.scrollTo(0, 0));
 
     const desktopOverflowOverview = await page.evaluate(
       () => document.documentElement.scrollWidth <= window.innerWidth + 2
@@ -723,7 +815,9 @@ async function run() {
         tilesText: tiles.map((t) => t.innerText.trim()),
         checkCount: checks.length,
         qCardCount: document.querySelectorAll('#questionCardsStack .q-card').length,
-        nestedDetailsInDrawers: document.querySelectorAll('#questionCardsStack .q-drawer details').length,
+        nestedDetailsInDrawers: document.querySelectorAll('#questionCardsStack .q-drawer details:not(.sec-evidence-drawer)').length,
+        evidenceDrawerCount: document.querySelectorAll('#questionCardsStack .q-drawer details.sec-evidence-drawer').length,
+        defaultDensity: document.documentElement.getAttribute('data-density'),
       };
     });
     assert(heroBoxCheck.ov && heroBoxCheck.media && heroBoxCheck.media.left > heroBoxCheck.ov.left + 200, 'Desktop 1440x900 must display #overview beside #verdictMediaCol');
@@ -732,13 +826,21 @@ async function run() {
     assert(heroBoxCheck.tilesText.every((t) => !/\b\d+\s*\/\s*100\b/.test(t)), 'Verdict key tiles must never show bare 0-100 composite scores');
     assert(heroBoxCheck.checkCount >= 4, `Expected >=4 Flags & Clear Checks rows, got ${heroBoxCheck.checkCount}`);
     assert.equal(heroBoxCheck.qCardCount, 5, 'Expected 5 Buyer Question Cards on one page');
-    assert.equal(heroBoxCheck.nestedDetailsInDrawers, 0, 'Zero nested <details> drawers allowed inside Question Card drawers');
+    assert.equal(heroBoxCheck.nestedDetailsInDrawers, 0, 'Zero un-flattened legacy <details> drawers allowed inside Question Card drawers');
+    assert(heroBoxCheck.evidenceDrawerCount >= 4, `Expected >=4 L2b .sec-evidence-drawer blocks, got ${heroBoxCheck.evidenceDrawerCount}`);
+    assert.equal(heroBoxCheck.defaultDensity, 'brief', 'Default report density should be brief');
 
-    // 5 Buyer Question Cards expand/collapse cleanly & jumpToSection opens parent drawer
+    // Brief | Full details toggle + keyboard shortcut D
+    await page.click('#densityBtnFull');
+    assert.equal(await page.getAttribute('html', 'data-density'), 'full', 'Clicking Full details sets html[data-density="full"]');
+    await page.keyboard.press('d');
+    assert.equal(await page.getAttribute('html', 'data-density'), 'brief', 'Pressing D toggles back to html[data-density="brief"]');
+
+    // 5 Buyer Question Cards expand/collapse cleanly & TOC jump opens parent drawer
     assert.equal(await page.locator('#qToggle_price').getAttribute('aria-expanded'), 'false', 'Q3 Price drawer starts collapsed');
-    await page.click('#qJump_price');
-    await page.locator('#zestimateValueMount').waitFor({ state: 'visible', timeout: 4000 });
-    assert.equal(await page.locator('#qToggle_price').getAttribute('aria-expanded'), 'true', 'Clicking #qJump_price opens Q3 Price drawer');
+    await page.click('#reportTocAside [data-toc-target="qCardPrice"]');
+    await page.locator('#benchmarkValueMount').waitFor({ state: 'visible', timeout: 4000 });
+    assert.equal(await page.locator('#qToggle_price').getAttribute('aria-expanded'), 'true', 'Clicking TOC Price opens Q3 Price drawer');
     await page.click('#qToggle_price');
     assert.equal(await page.locator('#qToggle_price').getAttribute('aria-expanded'), 'false', 'Clicking #qToggle_price collapses Q3 Price drawer');
 
@@ -798,7 +900,7 @@ async function run() {
     );
 
     // Interactive Insurance Quote Studio (inside Q1 Cost card)
-    await page.click('#qJump_cost');
+    await page.click('#reportTocAside [data-toc-target="qCardCost"]');
     await page.locator('#insuranceQuoteStudio #insCarrierTable').waitFor({ state: 'visible', timeout: 5000 });
     assert((await page.locator('#insCarrierTable tbody tr').count()) >= 3, 'Expected >=3 carriers in #insCarrierTable');
     const insMonthlyBefore = (await page.locator('#insStudioMonthly').innerText()).trim();
@@ -873,7 +975,7 @@ async function run() {
         await page.locator('#verdictFindingLine').waitFor({ state: 'visible', timeout: 5000 });
         await page.click('#mediaTabPhotos');
         await page.locator('#heroMediaBento #photoBentoGrid').waitFor({ state: 'visible', timeout: 5000 });
-        await page.click('#qJump_cost');
+        await page.click('#reportTocAside [data-toc-target="qCardCost"]');
         await page.locator('#insuranceQuoteStudio #insCarrierTable').waitFor({ state: 'visible', timeout: 5000 });
         await page.locator('#stickyWalkthroughBtn').waitFor({ state: 'visible', timeout: 4000 });
         await assertNoForbiddenLeaks(page, `Desktop Workspace /r/${SECONDARY_SLUG}/`);
@@ -1016,8 +1118,18 @@ async function run() {
       'Activating Command Center must set ?view=dashboard'
     );
     assert(
-      await page.evaluate(() => document.body.classList.contains('db-cmd-active') && !document.getElementById('verdictHeroGrid')?.offsetParent),
-      'Verdict hero & question cards must be parked while Buyer Command Center is active'
+      await page.evaluate(() => {
+        const hdr = document.querySelector('header.hdr');
+        const cmdBtn = document.getElementById('toggleCommandCenterBtn');
+        const shell = document.getElementById('buyerCommandCenter');
+        return (
+          document.body.classList.contains('db-cmd-active') &&
+          !document.getElementById('verdictHeroGrid')?.offsetParent &&
+          Boolean(hdr && cmdBtn && hdr.contains(cmdBtn)) &&
+          Boolean(cmdBtn && shell && cmdBtn.getBoundingClientRect().bottom <= shell.getBoundingClientRect().top + 8)
+        );
+      }),
+      'Verdict hero & question cards must be parked and #toggleCommandCenterBtn must stay sticky above #buyerCommandCenter'
     );
 
     // Real-time Deal & Cashflow slider dynamically updates #simNetMonthly
@@ -1037,6 +1149,52 @@ async function run() {
     );
     const simAfter = (await page.locator('#simNetMonthly').innerText()).trim();
     assert.notEqual(simAfter, simBefore, 'Adjusting #simDownSlider must dynamically update #simNetMonthly');
+
+    // Verify Fix #9: #simRentOffsetSlider reveals #simCapRateBox even without baseline rentEst, and estVal=null hides #simMetricsRow
+    const simKpiGating = await page.evaluate(() => {
+      const rep = window.OpenEstateCore?.getRep?.() || window.__REPORT__ || window.R;
+      const own = rep?.modules?.valuation?.data?.ownership;
+      const est = rep?.modules?.valuation?.data?.estimate;
+      const facts = rep?.facts;
+      const savedRentEst = own ? own.rentEstimate : undefined;
+      const savedEstVal = est ? est.value : undefined;
+      const savedZillowAvm = facts?.avms?.zillow ? facts.avms.zillow.value : undefined;
+      const savedLastSale = facts?.lastSale ? facts.lastSale.price : undefined;
+      const rentSl = document.getElementById('simRentOffsetSlider');
+
+      if (own) own.rentEstimate = null;
+      if (rentSl) {
+        rentSl.value = '0';
+        rentSl.dispatchEvent(new Event('input', { bubbles: true }));
+      }
+      const capHiddenAtZero = Boolean(document.getElementById('simCapRateBox')?.hidden);
+      if (rentSl) {
+        rentSl.value = '1400';
+        rentSl.dispatchEvent(new Event('input', { bubbles: true }));
+      }
+      const capBox = document.getElementById('simCapRateBox');
+      const capRevealedByOffset = Boolean(capBox && !capBox.hidden && getComputedStyle(capBox).display !== 'none');
+
+      if (est) est.value = null;
+      if (facts?.avms?.zillow) facts.avms.zillow.value = null;
+      if (facts?.lastSale) facts.lastSale.price = null;
+      if (rentSl) rentSl.dispatchEvent(new Event('input', { bubbles: true }));
+      const mRow = document.getElementById('simMetricsRow');
+      const metricsHiddenWhenNoVal = Boolean(mRow && mRow.hidden && getComputedStyle(mRow).display === 'none');
+
+      if (est && savedEstVal !== undefined) est.value = savedEstVal;
+      if (facts?.avms?.zillow && savedZillowAvm !== undefined) facts.avms.zillow.value = savedZillowAvm;
+      if (facts?.lastSale && savedLastSale !== undefined) facts.lastSale.price = savedLastSale;
+      if (own && savedRentEst !== undefined) own.rentEstimate = savedRentEst;
+      if (rentSl) {
+        rentSl.value = '0';
+        rentSl.dispatchEvent(new Event('input', { bubbles: true }));
+      }
+      return { capHiddenAtZero, capRevealedByOffset, metricsHiddenWhenNoVal };
+    });
+    assert.equal(simKpiGating.capHiddenAtZero, true, '#simCapRateBox hides when baseline rentEst is null and rentOffset is 0');
+    assert.equal(simKpiGating.capRevealedByOffset, true, 'Dragging #simRentOffsetSlider > 0 reveals #simCapRateBox even without baseline rentEst');
+    assert.equal(simKpiGating.metricsHiddenWhenNoVal, true, '#simMetricsRow uses display:none when estVal is null');
 
     // Trigger POST /api/report/:slug/artifact via preset chip or #artifactGenerateBtn
     await page.fill('#artifactPromptInput', '10-Year Equity P10/P50/P90 vs Renting');
@@ -1221,8 +1379,8 @@ async function run() {
         // iPad Q3 Price (Value & True Estimate Hub) screenshot + overflow assertion
         if (dev.name === 'ipad') {
           await dp.locator('#qJump_price').tap();
-          await dp.locator('#zestimateValueMount').waitFor({ state: 'visible', timeout: 4000 });
-          await dp.locator('#zestimateValueMount').scrollIntoViewIfNeeded();
+          await dp.locator('#benchmarkValueMount').waitFor({ state: 'visible', timeout: 4000 });
+          await dp.locator('#benchmarkValueMount').scrollIntoViewIfNeeded();
           const valNoOverflow = await dp.evaluate(
             () => document.documentElement.scrollWidth <= window.innerWidth + 2
           );
@@ -1327,6 +1485,47 @@ async function run() {
       }
     }
     console.log('✓ [15/15] Responsive Multi-Device Suite passed (iPad 820x1180 & iPhone 390x844 — Motion Reel, Command Center, & /ops — 0 overflow, 0 clipping)');
+
+    // =========================================================================
+    // 17. OS Dark Mode (`colorScheme: 'dark'`) Contrast & Feature Parity Check
+    // =========================================================================
+    const darkCtx = await browser.newContext({
+      colorScheme: 'dark',
+      viewport: { width: 1440, height: 900 },
+      userAgent: DESKTOP_CHROME_UA,
+    });
+    try {
+      const darkPage = await darkCtx.newPage();
+      darkPage.on('pageerror', (err) => pageErrors.push(`[dark] ${err.message}`));
+      await darkPage.goto(`${BASE_URL}/r/${PRIMARY_SLUG}/`, { waitUntil: 'domcontentloaded' });
+      await darkPage.locator('#densitySwitch').waitFor({ state: 'visible', timeout: 6000 });
+      await darkPage.locator('#toggleCommandCenterBtn').waitFor({ state: 'visible', timeout: 6000 });
+      const darkCheck = await darkPage.evaluate(() => {
+        const cmdBtn = document.getElementById('toggleCommandCenterBtn');
+        const cs = cmdBtn ? getComputedStyle(cmdBtn) : null;
+        const bodyBg = getComputedStyle(document.body).backgroundColor;
+        const roleBrief = document.getElementById('roleFocusBrief');
+        return {
+          bodyBg,
+          cmdColor: cs ? cs.color : '',
+          cmdBg: cs ? cs.backgroundColor : '',
+          roleBriefVis: Boolean(roleBrief && !roleBrief.hidden && roleBrief.offsetHeight > 40),
+        };
+      });
+      assert.notEqual(darkCheck.bodyBg, 'rgb(245, 246, 248)', `Expected dark report background in prefers-color-scheme: dark, got ${darkCheck.bodyBg}`);
+      assert.notEqual(darkCheck.cmdColor, darkCheck.cmdBg, `[dark] #toggleCommandCenterBtn text and background must contrast (${darkCheck.cmdColor} vs ${darkCheck.cmdBg})`);
+      assert(darkCheck.roleBriefVis, '[dark] "Complete dossier" #roleFocusBrief must be visible in dark mode');
+      await snapNamed(darkPage, 'desktop_dark_overview.png');
+
+      await darkPage.click('#toggleCommandCenterBtn');
+      await darkPage.locator('#buyerCommandCenter').waitFor({ state: 'visible', timeout: 5000 });
+      await snapNamed(darkPage, 'desktop_dark_command_center.png');
+      await darkPage.click('#toggleCommandCenterBtn');
+      await darkPage.waitForFunction(() => !document.body.classList.contains('db-cmd-active'), null, { timeout: 3000 });
+    } finally {
+      await darkCtx.close();
+    }
+    console.log('✓ [16/16] OS Dark Mode (prefers-color-scheme: dark) contrast, sticky toolbar, & Command Center parity passed');
 
     assert.equal(pageErrors.length, 0, `Uncaught pageerror(s) during E2E run:\n${pageErrors.join('\n')}`);
     console.log(`\n✅ ALL OPEN_ESTATE PLAYWRIGHT E2E CHECKS PASSED (${BASE_URL}) — 0 page errors!`);

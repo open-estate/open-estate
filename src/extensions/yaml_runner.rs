@@ -11,8 +11,8 @@
 //!   envelopes with mandatory `SourceAttributionProto` citations.
 
 use crate::extensions::manifest::{
-    BroadbandRuleYaml, ElectricRuleYaml, GasRuleYaml, ParsedExtensionPackage, ResponseMappingYaml,
-    WaterSewerTrashRuleYaml,
+    BroadbandRuleYaml, ElectricRuleYaml, GasRuleYaml, GovResponseFormat, NormalizedGeoQuery,
+    ParsedExtensionPackage, ResponseMappingYaml, WaterSewerTrashRuleYaml,
 };
 use crate::extensions::proto::{
     extension_envelope_proto::Payload, BroadbandCatalogProto, BroadbandOptionProto,
@@ -37,6 +37,7 @@ use openapiv3::{
 };
 use serde_json::{json, Map, Value};
 use serde_json_path::JsonPath;
+use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
 use std::num::NonZeroU32;
 use std::time::{Duration, Instant};
@@ -502,7 +503,8 @@ pub fn execute_catalog_rules(
     manifest: &ExtensionManifestProto,
     query: &ExtensionQueryProto,
 ) -> Vec<ExtensionEnvelopeProto> {
-    if pkg.doc.geo_scope.match_specificity(query).is_none() {
+    let q_norm = NormalizedGeoQuery::from_proto(query);
+    if pkg.compiled_geo_scope.match_specificity(&q_norm).is_none() {
         return Vec::new();
     }
 
@@ -1115,7 +1117,20 @@ fn resolve_http_spec(
     }
 
     if !headers.keys().any(|k| k.eq_ignore_ascii_case("accept")) {
-        headers.insert("Accept".to_string(), "application/json".to_string());
+        let accept_val = match pkg
+            .doc
+            .response_mapping
+            .as_ref()
+            .map(|rm| rm.format)
+            .unwrap_or(GovResponseFormat::Auto)
+        {
+            GovResponseFormat::Geojson => "application/geo+json, application/json;q=0.9",
+            GovResponseFormat::Csv => "text/csv, text/plain;q=0.9, */*;q=0.8",
+            GovResponseFormat::Xml => "application/xml, text/xml;q=0.9, */*;q=0.8",
+            GovResponseFormat::Html => "text/html, application/xhtml+xml;q=0.9, */*;q=0.8",
+            _ => "application/json",
+        };
+        headers.insert("Accept".to_string(), accept_val.to_string());
     }
     if body.is_some() && !headers.keys().any(|k| k.eq_ignore_ascii_case("content-type")) {
         headers.insert("Content-Type".to_string(), "application/json".to_string());
@@ -1302,7 +1317,9 @@ fn extract_oas_param_default(param_data: &ParameterData) -> Option<String> {
 }
 
 /// Executes a live OpenAPI 3.x or declarative HTTP extension, applying SSRF validation,
-/// `governor` rate limiting, `moka` caching, and RFC 9535 JSONPath extraction into typed Protobuf envelopes.
+/// `governor` rate limiting, `moka` caching, unified `HttpClient::scrape` egress, multi-format
+/// government portal normalization (`json`, `geojson`, `arcgis_features`, `socrata_rows`, `csv`,
+/// `xml`, `html`), and RFC 9535 JSONPath extraction into typed Protobuf envelopes.
 pub async fn execute_live_http(
     pkg: &ParsedExtensionPackage,
     manifest: &ExtensionManifestProto,
@@ -1312,7 +1329,7 @@ pub async fn execute_live_http(
     cache: &Cache<String, CachedEnvelopeEntry>,
     limiter: &DefaultDirectRateLimiter,
 ) -> Result<Vec<ExtensionEnvelopeProto>> {
-    let Some(spec_score) = pkg.doc.geo_scope.match_specificity(query) else {
+    let Some(spec_score) = pkg.compiled_geo_scope.match_query(query) else {
         return Ok(Vec::new());
     };
 
@@ -1358,100 +1375,57 @@ pub async fn execute_live_http(
 
     let rl = manifest.rate_limit.clone().unwrap_or_default();
     let timeout_dur = Duration::from_millis(rl.timeout_ms.clamp(400, 20_000) as u64);
-    let max_attempts = rl.max_retries.min(3) + 1;
+    let retries = rl.max_retries.min(3) as usize;
 
     let started = Instant::now();
-    let mut last_err: Option<anyhow::Error> = None;
-    let mut response_json: Option<Value> = None;
+    let method = reqwest::Method::from_bytes(resolved.method.as_bytes())
+        .unwrap_or(reqwest::Method::GET);
+    let mut scrape_req = http
+        .scrape(&resolved.url)
+        .method(method)
+        .timeout(timeout_dur)
+        .retries(retries)
+        .max_bytes(16 * 1024 * 1024);
 
-    for attempt in 0..max_attempts {
-        if attempt > 0 {
-            tokio::time::sleep(Duration::from_millis(180 * attempt as u64)).await;
-        }
-        let mut req_builder = match resolved.method.as_str() {
-            "POST" => http.raw().post(&resolved.url),
-            "PUT" => http.raw().put(&resolved.url),
-            _ => http.raw().get(&resolved.url),
-        }
-        .timeout(timeout_dur);
-
-        for (hk, hv) in &resolved.headers {
-            req_builder = req_builder.header(hk, hv);
-        }
-        if let Some(ref b) = resolved.body {
-            if !resolved
-                .headers
-                .iter()
-                .any(|(k, _)| k.eq_ignore_ascii_case("content-type"))
-            {
-                req_builder = req_builder.header("Content-Type", "application/json");
-            }
-            req_builder = req_builder.body(b.clone());
-        }
-
-        match req_builder.send().await {
-            Ok(resp) => {
-                let status = resp.status();
-                if status.is_success() {
-                    match resp.bytes().await {
-                        Ok(body_bytes) => {
-                            http.record_external_http_response(
-                                &resolved.url,
-                                body_bytes.len() as u64,
-                            );
-                            match serde_json::from_slice::<Value>(&body_bytes) {
-                                Ok(j) => {
-                                    response_json = Some(j);
-                                    break;
-                                }
-                                Err(e) => {
-                                    last_err = Some(anyhow!(
-                                        "Invalid JSON from '{}': {e}",
-                                        pkg.extension_id
-                                    ));
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            http.record_external_http_response(&resolved.url, 0);
-                            last_err = Some(anyhow!(
-                                "Failed reading response body from '{}': {e}",
-                                pkg.extension_id
-                            ));
-                        }
-                    }
-                } else if status.is_server_error() || status.as_u16() == 429 {
-                    http.record_external_http_response(&resolved.url, 0);
-                    last_err = Some(anyhow!(
-                        "Upstream HTTP {} from '{}'",
-                        status.as_u16(),
-                        pkg.extension_id
-                    ));
-                    continue;
-                } else {
-                    http.record_external_http_response(&resolved.url, 0);
-                    return Err(anyhow!(
-                        "Upstream HTTP {} from '{}'",
-                        status.as_u16(),
-                        pkg.extension_id
-                    ));
-                }
-            }
-            Err(e) => {
-                http.record_external_http_response(&resolved.url, 0);
-                last_err = Some(anyhow!("HTTP transport error in '{}': {e}", pkg.extension_id));
-            }
-        }
+    for (hk, hv) in &resolved.headers {
+        scrape_req = scrape_req.header(hk, hv);
+    }
+    if let Some(ref b) = resolved.body {
+        let explicit_ct = resolved
+            .headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("content-type"))
+            .map(|(_, v)| v.clone());
+        let ct = explicit_ct.unwrap_or_else(|| "application/json".to_string());
+        scrape_req = scrape_req.body_bytes(b.clone().into_bytes(), Some(ct));
     }
 
-    let json_body = match response_json {
-        Some(j) => j,
-        None => {
-            return Err(
-                last_err.unwrap_or_else(|| anyhow!("Empty response from '{}'", pkg.extension_id))
-            )
+    let buffered = match scrape_req.send_buffered().await {
+        Ok(resp) => resp,
+        Err(e) => {
+            http.record_external_http_response(&resolved.url, 0);
+            return Err(anyhow!(
+                "HTTP transport error in '{}': {e}",
+                pkg.extension_id
+            ));
         }
     };
+
+    let body_bytes = buffered.bytes();
+    http.record_external_http_response(&resolved.url, body_bytes.len() as u64);
+    let content_type = buffered
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+
+    let json_body = parse_gov_response_payload(
+        &pkg.extension_id,
+        body_bytes,
+        content_type.as_deref(),
+        &resolved.url,
+        pkg.doc.response_mapping.as_ref(),
+    )?;
 
     let latency_ms = started.elapsed().as_millis() as u32;
     let envelopes = map_json_to_envelopes(
@@ -1476,6 +1450,983 @@ pub async fn execute_live_http(
     }
 
     Ok(envelopes)
+}
+
+fn snake_header_key(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut prev_underscore = false;
+    for ch in raw.trim().chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch.to_ascii_lowercase());
+            prev_underscore = false;
+        } else if !out.is_empty() && !prev_underscore {
+            out.push('_');
+            prev_underscore = true;
+        }
+    }
+    while out.ends_with('_') {
+        out.pop();
+    }
+    out
+}
+
+fn insert_header_cell(row_obj: &mut Map<String, Value>, header: &str, cell_val: Value) {
+    let h_trim = header.trim();
+    if h_trim.is_empty() {
+        return;
+    }
+    let snake = snake_header_key(h_trim);
+    row_obj.insert(h_trim.to_string(), cell_val.clone());
+    if !snake.is_empty() && snake != h_trim && !row_obj.contains_key(&snake) {
+        row_obj.insert(snake, cell_val);
+    }
+}
+
+fn extract_geojson_geometry_lon_lat(geom: &Value) -> Option<(f64, f64)> {
+    let gtype = geom.get("type").and_then(Value::as_str).unwrap_or("");
+    let coords = geom.get("coordinates")?;
+    match gtype {
+        "Point" => {
+            let lon = coords.get(0).and_then(Value::as_f64)?;
+            let lat = coords.get(1).and_then(Value::as_f64)?;
+            (lon.is_finite()
+                && lat.is_finite()
+                && (-180.0..=180.0).contains(&lon)
+                && (-90.0..=90.0).contains(&lat))
+            .then_some((lon, lat))
+        }
+        "MultiPoint" | "LineString" => {
+            let pt = coords.get(0)?;
+            let lon = pt.get(0).and_then(Value::as_f64)?;
+            let lat = pt.get(1).and_then(Value::as_f64)?;
+            (lon.is_finite()
+                && lat.is_finite()
+                && (-180.0..=180.0).contains(&lon)
+                && (-90.0..=90.0).contains(&lat))
+            .then_some((lon, lat))
+        }
+        "Polygon" | "MultiPolygon" => {
+            let ring = if gtype == "Polygon" {
+                coords.get(0).and_then(Value::as_array)?
+            } else {
+                coords
+                    .get(0)
+                    .and_then(|p| p.get(0))
+                    .and_then(Value::as_array)?
+            };
+            let mut sum_lon = 0.0_f64;
+            let mut sum_lat = 0.0_f64;
+            let mut cnt = 0_usize;
+            for pt in ring {
+                if let (Some(lo), Some(la)) = (
+                    pt.get(0).and_then(Value::as_f64),
+                    pt.get(1).and_then(Value::as_f64),
+                ) {
+                    if lo.is_finite()
+                        && la.is_finite()
+                        && (-180.0..=180.0).contains(&lo)
+                        && (-90.0..=90.0).contains(&la)
+                    {
+                        sum_lon += lo;
+                        sum_lat += la;
+                        cnt += 1;
+                    }
+                }
+            }
+            (cnt > 0).then(|| (sum_lon / cnt as f64, sum_lat / cnt as f64))
+        }
+        _ => None,
+    }
+}
+
+fn flatten_geojson_feature(feat: &Value) -> Option<Value> {
+    let obj = feat.as_object()?;
+    let mut rec = obj
+        .get("properties")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    if let Some(id_v) = obj.get("id").filter(|v| !v.is_null()) {
+        rec.entry("_id".to_string()).or_insert_with(|| id_v.clone());
+    }
+    if let Some(geom) = obj.get("geometry").filter(|v| !v.is_null()) {
+        if let Some(gt) = geom.get("type").and_then(Value::as_str) {
+            rec.entry("_geometry_type".to_string())
+                .or_insert_with(|| Value::String(gt.to_string()));
+        }
+        if let Some((lon, lat)) = extract_geojson_geometry_lon_lat(geom) {
+            if let (Some(lo_n), Some(la_n)) = (
+                serde_json::Number::from_f64(lon),
+                serde_json::Number::from_f64(lat),
+            ) {
+                rec.entry("lon".to_string())
+                    .or_insert(Value::Number(lo_n.clone()));
+                rec.entry("lat".to_string())
+                    .or_insert(Value::Number(la_n.clone()));
+                rec.insert("_lon".to_string(), Value::Number(lo_n));
+                rec.insert("_lat".to_string(), Value::Number(la_n));
+            }
+        }
+    }
+    // Clone snake_case aliases for UPPERCASE GIS property keys (e.g. `FLD_ZONE` -> `fld_zone`)
+    let keys: Vec<(String, Value)> = rec.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+    for (k, v) in keys {
+        let snake = snake_header_key(&k);
+        if !snake.is_empty() && snake != k && !rec.contains_key(&snake) {
+            rec.insert(snake, v);
+        }
+    }
+    Some(Value::Object(rec))
+}
+
+fn normalize_geojson_value(mut val: Value) -> Result<Value> {
+    if let Some(obj) = val.as_object_mut() {
+        if obj.contains_key("records") {
+            return Ok(val);
+        }
+        let gtype = obj.get("type").and_then(Value::as_str).unwrap_or("");
+        if gtype == "FeatureCollection" {
+            let recs: Vec<Value> = obj
+                .get("features")
+                .and_then(Value::as_array)
+                .map(|arr| arr.iter().filter_map(flatten_geojson_feature).collect())
+                .unwrap_or_default();
+            let count = recs.len();
+            obj.insert("records".to_string(), Value::Array(recs));
+            obj.entry("count".to_string()).or_insert_with(|| json!(count));
+        } else if gtype == "Feature" {
+            let recs = flatten_geojson_feature(&Value::Object(obj.clone()))
+                .into_iter()
+                .collect::<Vec<_>>();
+            let count = recs.len();
+            obj.insert("records".to_string(), Value::Array(recs));
+            obj.entry("count".to_string()).or_insert_with(|| json!(count));
+        }
+    }
+    Ok(val)
+}
+
+fn flatten_arcgis_feature(feat: &Value) -> Option<Value> {
+    let obj = feat.as_object()?;
+    let mut rec = obj
+        .get("attributes")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    if let Some(geom) = obj.get("geometry").and_then(Value::as_object) {
+        if let (Some(x), Some(y)) = (
+            geom.get("x").and_then(Value::as_f64),
+            geom.get("y").and_then(Value::as_f64),
+        ) {
+            if let (Some(xn), Some(yn)) = (
+                serde_json::Number::from_f64(x),
+                serde_json::Number::from_f64(y),
+            ) {
+                rec.insert("_x".to_string(), Value::Number(xn.clone()));
+                rec.insert("_y".to_string(), Value::Number(yn.clone()));
+                if (-180.0..=180.0).contains(&x) && (-90.0..=90.0).contains(&y) {
+                    rec.entry("lon".to_string()).or_insert(Value::Number(xn));
+                    rec.entry("lat".to_string()).or_insert(Value::Number(yn));
+                }
+            }
+        } else if let Some(ring) = geom
+            .get("rings")
+            .and_then(|r| r.get(0))
+            .and_then(Value::as_array)
+        {
+            let mut sx = 0.0_f64;
+            let mut sy = 0.0_f64;
+            let mut cnt = 0_usize;
+            for pt in ring {
+                if let (Some(x), Some(y)) = (
+                    pt.get(0).and_then(Value::as_f64),
+                    pt.get(1).and_then(Value::as_f64),
+                ) {
+                    if x.is_finite() && y.is_finite() {
+                        sx += x;
+                        sy += y;
+                        cnt += 1;
+                    }
+                }
+            }
+            if cnt > 0 {
+                let cx = sx / cnt as f64;
+                let cy = sy / cnt as f64;
+                if (-180.0..=180.0).contains(&cx) && (-90.0..=90.0).contains(&cy) {
+                    if let (Some(xn), Some(yn)) = (
+                        serde_json::Number::from_f64(cx),
+                        serde_json::Number::from_f64(cy),
+                    ) {
+                        rec.entry("lon".to_string()).or_insert(Value::Number(xn));
+                        rec.entry("lat".to_string()).or_insert(Value::Number(yn));
+                    }
+                }
+            }
+        }
+    }
+    let keys: Vec<(String, Value)> = rec.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+    for (k, v) in keys {
+        let snake = snake_header_key(&k);
+        if !snake.is_empty() && snake != k && !rec.contains_key(&snake) {
+            rec.insert(snake, v);
+        }
+    }
+    Some(Value::Object(rec))
+}
+
+fn normalize_arcgis_value(ext_id: &str, mut val: Value) -> Result<Value> {
+    if let Some(obj) = val.as_object_mut() {
+        if let Some(err_obj) = obj.get("error").and_then(Value::as_object) {
+            if !obj.contains_key("features") && !obj.contains_key("results") {
+                let code = err_obj.get("code").and_then(Value::as_i64).unwrap_or(500);
+                let msg = err_obj
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .unwrap_or("ArcGIS service error");
+                return Err(anyhow!("ArcGIS error {code} from '{ext_id}': {msg}"));
+            }
+        }
+        if !obj.contains_key("records") {
+            let source_arr = obj
+                .get("features")
+                .and_then(Value::as_array)
+                .or_else(|| obj.get("results").and_then(Value::as_array));
+            if let Some(arr) = source_arr {
+                let recs: Vec<Value> = arr.iter().filter_map(flatten_arcgis_feature).collect();
+                let count = recs.len();
+                obj.insert("records".to_string(), Value::Array(recs));
+                obj.entry("count".to_string()).or_insert_with(|| json!(count));
+            }
+        }
+    }
+    Ok(val)
+}
+
+fn normalize_socrata_ckan_value(val: Value) -> Result<Value> {
+    match val {
+        Value::Array(rows) => {
+            let count = rows.len();
+            Ok(json!({
+                "records": rows,
+                "count": count,
+            }))
+        }
+        Value::Object(mut obj) => {
+            if obj.contains_key("records") {
+                return Ok(Value::Object(obj));
+            }
+            // Socrata SODA tabular `{ "meta": { "view": { "columns": [...] } }, "data": [ [...] ] }`
+            let cols_opt = obj
+                .get("meta")
+                .and_then(|m| m.get("view"))
+                .and_then(|v| v.get("columns"))
+                .and_then(Value::as_array);
+            if let (Some(cols), Some(data_rows)) = (cols_opt, obj.get("data").and_then(Value::as_array))
+            {
+                if data_rows.first().map(Value::is_array).unwrap_or(true) {
+                    let col_names: Vec<String> = cols
+                        .iter()
+                        .map(|c| {
+                            c.get("fieldName")
+                                .or_else(|| c.get("name"))
+                                .and_then(Value::as_str)
+                                .unwrap_or("")
+                                .trim()
+                                .to_string()
+                        })
+                        .collect();
+                    let mut recs = Vec::with_capacity(data_rows.len());
+                    for r in data_rows {
+                        if let Some(cells) = r.as_array() {
+                            let mut map = Map::new();
+                            for (idx, cell) in cells.iter().enumerate() {
+                                if let Some(cname) = col_names.get(idx).filter(|s| !s.is_empty()) {
+                                    if !cname.starts_with(':') {
+                                        insert_header_cell(&mut map, cname, cell.clone());
+                                    } else {
+                                        map.insert(cname.clone(), cell.clone());
+                                    }
+                                }
+                            }
+                            recs.push(Value::Object(map));
+                        }
+                    }
+                    let count = recs.len();
+                    obj.insert("records".to_string(), Value::Array(recs));
+                    obj.entry("count".to_string()).or_insert_with(|| json!(count));
+                    return Ok(Value::Object(obj));
+                }
+            }
+            // CKAN Datastore `{ "result": { "records": [...] } }`
+            if let Some(ckan_recs) = obj
+                .get("result")
+                .and_then(|r| r.get("records"))
+                .and_then(Value::as_array)
+                .cloned()
+            {
+                let count = ckan_recs.len();
+                obj.insert("records".to_string(), Value::Array(ckan_recs));
+                obj.entry("count".to_string()).or_insert_with(|| json!(count));
+                return Ok(Value::Object(obj));
+            }
+            // SODA v3 `{ "data": [ {...}, ... ] }`
+            if let Some(data_objs) = obj.get("data").and_then(Value::as_array).cloned() {
+                let count = data_objs.len();
+                obj.insert("records".to_string(), Value::Array(data_objs));
+                obj.entry("count".to_string()).or_insert_with(|| json!(count));
+            }
+            Ok(Value::Object(obj))
+        }
+        other => Ok(other),
+    }
+}
+
+fn detect_csv_delimiter(header_line: &str, explicit: Option<&str>) -> u8 {
+    if let Some(d) = explicit.and_then(|s| s.as_bytes().first().copied()) {
+        return d;
+    }
+    let tabs = header_line.bytes().filter(|&b| b == b'\t').count();
+    let pipes = header_line.bytes().filter(|&b| b == b'|').count();
+    let semis = header_line.bytes().filter(|&b| b == b';').count();
+    let commas = header_line.bytes().filter(|&b| b == b',').count();
+    if tabs > commas && tabs >= pipes && tabs >= semis {
+        b'\t'
+    } else if pipes > commas && pipes >= semis {
+        b'|'
+    } else if semis > commas {
+        b';'
+    } else {
+        b','
+    }
+}
+
+fn parse_csv_portal_to_json(
+    ext_id: &str,
+    bytes: &[u8],
+    explicit_delim: Option<&str>,
+) -> Result<Value> {
+    let raw_txt = std::str::from_utf8(bytes)
+        .map(Cow::Borrowed)
+        .unwrap_or_else(|_| String::from_utf8_lossy(bytes));
+    let clean_txt = raw_txt.trim_start_matches('\u{feff}').trim();
+    if clean_txt.is_empty() {
+        return Ok(json!({ "records": [], "headers": [], "count": 0 }));
+    }
+    let head_low: String = clean_txt.chars().take(32).collect::<String>().to_ascii_lowercase();
+    if head_low.starts_with("<!doctype html") || head_low.starts_with("<html") {
+        return Err(anyhow!(
+            "CSV portal '{}' returned an unexpected HTML page instead of tabular CSV",
+            ext_id
+        ));
+    }
+
+    let first_line = clean_txt.lines().next().unwrap_or("");
+    let delim = detect_csv_delimiter(first_line, explicit_delim);
+    let mut rdr = csv::ReaderBuilder::new()
+        .delimiter(delim)
+        .flexible(true)
+        .trim(csv::Trim::All)
+        .from_reader(clean_txt.as_bytes());
+
+    let headers: Vec<String> = rdr
+        .headers()
+        .with_context(|| format!("Failed reading CSV headers from '{ext_id}'"))?
+        .iter()
+        .map(|h| h.trim().to_string())
+        .collect();
+
+    let mut records = Vec::new();
+    for rec_res in rdr.records().take(2_000) {
+        let rec = rec_res.with_context(|| format!("Invalid CSV row from '{ext_id}'"))?;
+        let mut row_map = Map::new();
+        let mut any_non_empty = false;
+        for (idx, val) in rec.iter().enumerate() {
+            let Some(h) = headers.get(idx).filter(|s| !s.is_empty()) else {
+                continue;
+            };
+            let t = val.trim();
+            let cell = if t.is_empty() {
+                Value::Null
+            } else {
+                any_non_empty = true;
+                Value::String(t.to_string())
+            };
+            insert_header_cell(&mut row_map, h, cell);
+        }
+        if any_non_empty {
+            records.push(Value::Object(row_map));
+        }
+    }
+
+    let count = records.len();
+    Ok(json!({
+        "records": records,
+        "headers": headers,
+        "count": count,
+    }))
+}
+
+static XML_ATTR_RE: Lazy<regex::Regex> = Lazy::new(|| {
+    regex::Regex::new(r#"([A-Za-z_][A-Za-z0-9_.:-]*)\s*=\s*(?:"([^"]*)"|'([^']*)')"#).unwrap()
+});
+static SCRIPT_STYLE_RE: Lazy<regex::Regex> = Lazy::new(|| {
+    regex::Regex::new(r"(?is)<(?:script|style|noscript)\b[^>]*>.*?</(?:script|style|noscript)>")
+        .unwrap()
+});
+static HTML_COMMENT_RE: Lazy<regex::Regex> =
+    Lazy::new(|| regex::Regex::new(r"(?s)<!--.*?-->").unwrap());
+static HTML_TAG_RE: Lazy<regex::Regex> =
+    Lazy::new(|| regex::Regex::new(r"(?s)<[^>]+>").unwrap());
+static HTML_TABLE_RE: Lazy<regex::Regex> =
+    Lazy::new(|| regex::Regex::new(r"(?is)<table\b[^>]*>(.*?)</table>").unwrap());
+static HTML_TR_RE: Lazy<regex::Regex> =
+    Lazy::new(|| regex::Regex::new(r"(?is)<tr\b[^>]*>(.*?)</tr>").unwrap());
+static HTML_CELL_RE: Lazy<regex::Regex> =
+    Lazy::new(|| regex::Regex::new(r"(?is)<(th|td)\b[^>]*>(.*?)</(?:th|td)>").unwrap());
+static HTML_HREF_RE: Lazy<regex::Regex> =
+    Lazy::new(|| regex::Regex::new(r#"(?is)<a\b[^>]*\bhref\s*=\s*(?:"([^"]+)"|'([^']+)')"#).unwrap());
+static HTML_DL_PAIR_RE: Lazy<regex::Regex> = Lazy::new(|| {
+    regex::Regex::new(r"(?is)<dt\b[^>]*>(.*?)</dt>\s*<dd\b[^>]*>(.*?)</dd>").unwrap()
+});
+static HTML_META_RE: Lazy<regex::Regex> = Lazy::new(|| {
+    regex::Regex::new(
+        r#"(?is)<meta\b[^>]*\b(?:name|property)\s*=\s*(?:"([^"]+)"|'([^']+)')[^>]*\bcontent\s*=\s*(?:"([^"]*)"|'([^']*)')"#,
+    )
+    .unwrap()
+});
+static HTML_DATA_ATTR_RE: Lazy<regex::Regex> = Lazy::new(|| {
+    regex::Regex::new(r#"\bdata-([a-zA-Z0-9_-]+)\s*=\s*(?:"([^"]*)"|'([^']*)')"#).unwrap()
+});
+
+fn local_xml_name(raw: &str) -> &str {
+    raw.rsplit(':').next().unwrap_or(raw)
+}
+
+fn clean_html_text(fragment: &str) -> String {
+    let stripped = HTML_TAG_RE.replace_all(fragment, " ");
+    let decoded = html_escape::decode_html_entities(&stripped);
+    decoded.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn parse_xml_portal_to_json(
+    ext_id: &str,
+    bytes: &[u8],
+    explicit_record_tag: Option<&str>,
+) -> Result<Value> {
+    let raw_txt = std::str::from_utf8(bytes)
+        .map(Cow::Borrowed)
+        .unwrap_or_else(|_| String::from_utf8_lossy(bytes));
+    let clean = HTML_COMMENT_RE.replace_all(raw_txt.trim_start_matches('\u{feff}'), "");
+    let trimmed = clean.trim();
+    if trimmed.is_empty() {
+        return Ok(json!({ "records": [], "count": 0 }));
+    }
+    let low_head: String = trimmed.chars().take(240).collect::<String>().to_ascii_lowercase();
+    if low_head.contains("serviceexceptionreport") || low_head.contains("<exceptionreport") {
+        let msg = clean_html_text(trimmed);
+        return Err(anyhow!("OGC/XML exception from '{ext_id}': {msg}"));
+    }
+
+    #[derive(Default)]
+    struct XmlFrame {
+        tag: String,
+        attrs: Map<String, Value>,
+        children: BTreeMap<String, Vec<Value>>,
+        text: String,
+    }
+
+    impl XmlFrame {
+        fn into_value(mut self) -> Value {
+            let text_trimmed = self.text.trim().to_string();
+            if self.attrs.is_empty() && self.children.is_empty() {
+                return if text_trimmed.is_empty() {
+                    Value::Null
+                } else {
+                    Value::String(text_trimmed)
+                };
+            }
+            let mut obj = Map::new();
+            for (ak, av) in self.attrs {
+                obj.insert(format!("@{ak}"), av.clone());
+                insert_header_cell(&mut obj, &ak, av);
+            }
+            for (ck, mut cvals) in std::mem::take(&mut self.children) {
+                if cvals.len() == 1 {
+                    let single = cvals.pop().unwrap_or(Value::Null);
+                    // Flatten `<Property name="FOO" value="BAR"/>` or `<Field name="FOO">BAR</Field>`
+                    if matches!(ck.to_ascii_lowercase().as_str(), "property" | "field" | "attr") {
+                        if let Some(sobj) = single.as_object() {
+                            if let (Some(k), Some(v)) = (
+                                sobj.get("name").and_then(Value::as_str),
+                                sobj.get("value").or_else(|| sobj.get("#text")),
+                            ) {
+                                insert_header_cell(&mut obj, k, v.clone());
+                            }
+                        }
+                    }
+                    insert_header_cell(&mut obj, &ck, single);
+                } else {
+                    for item in &cvals {
+                        if matches!(ck.to_ascii_lowercase().as_str(), "property" | "field" | "attr")
+                        {
+                            if let Some(sobj) = item.as_object() {
+                                if let (Some(k), Some(v)) = (
+                                    sobj.get("name").and_then(Value::as_str),
+                                    sobj.get("value").or_else(|| sobj.get("#text")),
+                                ) {
+                                    insert_header_cell(&mut obj, k, v.clone());
+                                }
+                            }
+                        }
+                    }
+                    obj.insert(ck.clone(), Value::Array(cvals));
+                }
+            }
+            if !text_trimmed.is_empty() {
+                obj.insert("#text".to_string(), Value::String(text_trimmed));
+            }
+            Value::Object(obj)
+        }
+    }
+
+    let wanted_tag = explicit_record_tag
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| local_xml_name(s).to_ascii_lowercase());
+    let default_record_tags = [
+        "featuremember",
+        "member",
+        "record",
+        "row",
+        "item",
+        "fields",
+        "permit",
+        "parcel",
+        "assessment",
+        "violation",
+        "station",
+        "observation",
+    ];
+
+    let mut stack: Vec<XmlFrame> = vec![XmlFrame {
+        tag: "__root__".to_string(),
+        ..Default::default()
+    }];
+    let mut records: Vec<Value> = Vec::new();
+    let mut rest = trimmed;
+
+    while let Some(lt) = rest.find('<') {
+        let before = &rest[..lt];
+        if !before.trim().is_empty() {
+            if let Some(top) = stack.last_mut() {
+                let dec = html_escape::decode_html_entities(before);
+                if !top.text.is_empty() {
+                    top.text.push(' ');
+                }
+                top.text.push_str(dec.trim());
+            }
+        }
+        let after_lt = &rest[lt + 1..];
+        if let Some(cdata_body) = after_lt.strip_prefix("![CDATA[") {
+            if let Some(end_cdata) = cdata_body.find("]]>") {
+                if let Some(top) = stack.last_mut() {
+                    top.text.push_str(&cdata_body[..end_cdata]);
+                }
+                rest = &cdata_body[end_cdata + 3..];
+                continue;
+            } else {
+                break;
+            }
+        }
+        let Some(gt) = after_lt.find('>') else {
+            break;
+        };
+        let inside = after_lt[..gt].trim();
+        rest = &after_lt[gt + 1..];
+
+        if inside.is_empty() || inside.starts_with('?') || inside.starts_with('!') {
+            continue;
+        }
+        if let Some(close_raw) = inside.strip_prefix('/') {
+            let close_local = local_xml_name(close_raw.trim());
+            if stack.len() > 1 {
+                let frame = stack.pop().unwrap();
+                let tag_low = frame.tag.to_ascii_lowercase();
+                let is_tag_rec = |t: &str| -> bool {
+                    let tl = t.to_ascii_lowercase();
+                    match wanted_tag.as_deref() {
+                        Some(wt) => tl == wt,
+                        None => default_record_tags.contains(&tl.as_str()),
+                    }
+                };
+                let ancestor_is_rec = stack.iter().skip(1).any(|anc| is_tag_rec(&anc.tag));
+                let unwrapped_member = if matches!(tag_low.as_str(), "featuremember" | "member")
+                    && frame.attrs.is_empty()
+                    && frame.text.trim().is_empty()
+                    && frame.children.len() == 1
+                {
+                    frame
+                        .children
+                        .values()
+                        .next()
+                        .and_then(|v| (v.len() == 1 && v[0].is_object()).then(|| v[0].clone()))
+                } else {
+                    None
+                };
+                let val = frame.into_value();
+                if is_tag_rec(&tag_low) && !ancestor_is_rec {
+                    let flat = unwrapped_member.unwrap_or_else(|| val.clone());
+                    if flat.is_object() {
+                        records.push(flat);
+                    }
+                }
+                if let Some(parent) = stack.last_mut() {
+                    parent
+                        .children
+                        .entry(close_local.to_string())
+                        .or_default()
+                        .push(val);
+                }
+            }
+            continue;
+        }
+
+        let self_closing = inside.ends_with('/');
+        let tag_body = if self_closing {
+            inside[..inside.len() - 1].trim()
+        } else {
+            inside
+        };
+        let mut parts = tag_body.splitn(2, char::is_whitespace);
+        let raw_name = parts.next().unwrap_or("");
+        let attr_str = parts.next().unwrap_or("");
+        let tag_local = local_xml_name(raw_name).to_string();
+        if tag_local.is_empty() {
+            continue;
+        }
+
+        let mut attrs = Map::new();
+        for cap in XML_ATTR_RE.captures_iter(attr_str) {
+            let ak = local_xml_name(&cap[1]);
+            if ak.eq_ignore_ascii_case("xmlns") || cap[1].starts_with("xmlns:") {
+                continue;
+            }
+            let av_raw = cap
+                .get(2)
+                .or_else(|| cap.get(3))
+                .map(|m| m.as_str())
+                .unwrap_or("");
+            let av = html_escape::decode_html_entities(av_raw).trim().to_string();
+            attrs.insert(ak.to_string(), Value::String(av));
+        }
+
+        let frame = XmlFrame {
+            tag: tag_local.clone(),
+            attrs,
+            children: BTreeMap::new(),
+            text: String::new(),
+        };
+
+        if self_closing {
+            let tag_low = tag_local.to_ascii_lowercase();
+            let val = frame.into_value();
+            let is_rec = match wanted_tag.as_deref() {
+                Some(wt) => tag_low == wt,
+                None => default_record_tags.contains(&tag_low.as_str()),
+            };
+            if is_rec && val.is_object() {
+                records.push(val.clone());
+            }
+            if let Some(parent) = stack.last_mut() {
+                parent.children.entry(tag_local).or_default().push(val);
+            }
+        } else {
+            stack.push(frame);
+        }
+    }
+
+    while stack.len() > 1 {
+        let frame = stack.pop().unwrap();
+        let cname = frame.tag.clone();
+        let val = frame.into_value();
+        if let Some(parent) = stack.last_mut() {
+            parent.children.entry(cname).or_default().push(val);
+        }
+    }
+
+    let root_val = stack.pop().map(XmlFrame::into_value).unwrap_or_else(|| json!({}));
+    let mut out_obj = match root_val {
+        Value::Object(m) => m,
+        other => {
+            let mut m = Map::new();
+            m.insert("value".to_string(), other);
+            m
+        }
+    };
+
+    // Fallback: if no canonical record tag matched and root contains a single root element with an
+    // array or object, promote it into `records` for zero-boilerplate mapping.
+    if records.is_empty() {
+        if let Some(first_root) = out_obj.values().next().cloned() {
+            if let Some(ro) = first_root.as_object() {
+                if let Some(arr) = ro.values().find_map(Value::as_array) {
+                    for item in arr {
+                        if item.is_object() {
+                            records.push(item.clone());
+                        }
+                    }
+                } else {
+                    records.push(Value::Object(ro.clone()));
+                }
+            }
+        }
+    }
+
+    let count = records.len();
+    out_obj.insert("records".to_string(), Value::Array(records));
+    out_obj.insert("count".to_string(), json!(count));
+    Ok(Value::Object(out_obj))
+}
+
+fn parse_html_portal_to_json(
+    _ext_id: &str,
+    bytes: &[u8],
+    table_idx: Option<usize>,
+) -> Result<Value> {
+    let raw_txt = std::str::from_utf8(bytes)
+        .map(Cow::Borrowed)
+        .unwrap_or_else(|_| String::from_utf8_lossy(bytes));
+    let no_comments = HTML_COMMENT_RE.replace_all(&raw_txt, " ");
+    let clean_html = SCRIPT_STYLE_RE.replace_all(&no_comments, " ");
+
+    let mut attributes = Map::new();
+
+    for cap in HTML_META_RE.captures_iter(&clean_html) {
+        let name = cap
+            .get(1)
+            .or_else(|| cap.get(2))
+            .map(|m| m.as_str().trim())
+            .unwrap_or("");
+        let content = cap
+            .get(3)
+            .or_else(|| cap.get(4))
+            .map(|m| html_escape::decode_html_entities(m.as_str()).trim().to_string())
+            .unwrap_or_default();
+        if !name.is_empty() && !content.is_empty() {
+            insert_header_cell(&mut attributes, name, Value::String(content));
+        }
+    }
+
+    for cap in HTML_DATA_ATTR_RE.captures_iter(&clean_html) {
+        let key = cap[1].trim();
+        let val = cap
+            .get(2)
+            .or_else(|| cap.get(3))
+            .map(|m| html_escape::decode_html_entities(m.as_str()).trim().to_string())
+            .unwrap_or_default();
+        if !key.is_empty() && !val.is_empty() && !attributes.contains_key(key) {
+            insert_header_cell(&mut attributes, key, Value::String(val));
+        }
+    }
+
+    for cap in HTML_DL_PAIR_RE.captures_iter(&clean_html) {
+        let k = clean_html_text(&cap[1]).trim_end_matches(':').trim().to_string();
+        let v = clean_html_text(&cap[2]);
+        if !k.is_empty() && !v.is_empty() {
+            insert_header_cell(&mut attributes, &k, Value::String(v));
+        }
+    }
+
+    let mut parsed_tables: Vec<Vec<Value>> = Vec::new();
+    for tcap in HTML_TABLE_RE.captures_iter(&clean_html) {
+        let tbody = &tcap[1];
+        let mut raw_rows: Vec<(bool, Vec<String>, Option<String>)> = Vec::new();
+        for rcap in HTML_TR_RE.captures_iter(tbody) {
+            let rhtml = &rcap[1];
+            let first_href = HTML_HREF_RE
+                .captures(rhtml)
+                .and_then(|c| c.get(1).or_else(|| c.get(2)))
+                .map(|m| html_escape::decode_html_entities(m.as_str()).trim().to_string())
+                .filter(|s| !s.is_empty());
+            let mut cells = Vec::new();
+            let mut all_th = true;
+            for ccap in HTML_CELL_RE.captures_iter(rhtml) {
+                if !ccap[1].eq_ignore_ascii_case("th") {
+                    all_th = false;
+                }
+                cells.push(clean_html_text(&ccap[2]));
+            }
+            if !cells.is_empty() {
+                raw_rows.push((all_th, cells, first_href));
+            }
+        }
+        if raw_rows.is_empty() {
+            continue;
+        }
+
+        // Detect 2-column key-value summary table vs multi-column tabular records
+        let first_is_header = raw_rows[0].0 && raw_rows[0].1.len() >= 2 && raw_rows.len() >= 2;
+        let is_kv_table = !first_is_header
+            && raw_rows.iter().all(|(_, c, _)| c.len() == 2)
+            && raw_rows.iter().any(|(_, c, _)| c[0].ends_with(':') || !c[0].is_empty());
+
+        if is_kv_table {
+            for (_, cells, _) in &raw_rows {
+                let k = cells[0].trim_end_matches(':').trim();
+                let v = cells[1].trim();
+                if !k.is_empty() && !v.is_empty() {
+                    insert_header_cell(&mut attributes, k, Value::String(v.to_string()));
+                }
+            }
+            continue;
+        }
+
+        if raw_rows.len() >= 2 && raw_rows[0].1.len() >= 2 {
+            let headers = raw_rows[0].1.clone();
+            let mut table_records = Vec::new();
+            for (_, cells, href) in raw_rows.into_iter().skip(1) {
+                let mut row_map = Map::new();
+                let mut non_empty = false;
+                for (idx, cell) in cells.into_iter().enumerate() {
+                    if let Some(h) = headers.get(idx).filter(|s| !s.is_empty()) {
+                        if !cell.is_empty() {
+                            non_empty = true;
+                            insert_header_cell(&mut row_map, h, Value::String(cell));
+                        }
+                    }
+                }
+                if let Some(h) = href {
+                    row_map.insert("_href".to_string(), Value::String(h));
+                }
+                if non_empty {
+                    table_records.push(Value::Object(row_map));
+                }
+            }
+            if !table_records.is_empty() {
+                parsed_tables.push(table_records);
+            }
+        }
+    }
+
+    let records = if let Some(idx) = table_idx {
+        parsed_tables.get(idx).cloned().unwrap_or_default()
+    } else if let Some(first_tbl) = parsed_tables.first() {
+        first_tbl.clone()
+    } else if !attributes.is_empty() {
+        vec![Value::Object(attributes.clone())]
+    } else {
+        Vec::new()
+    };
+
+    let count = records.len();
+    let tables_val: Vec<Value> = parsed_tables.into_iter().map(Value::Array).collect();
+    Ok(json!({
+        "records": records,
+        "attributes": Value::Object(attributes),
+        "tables": tables_val,
+        "count": count,
+    }))
+}
+
+/// Parses and normalizes heterogeneous regional government portal responses (`json`, `geojson`,
+/// `arcgis_features`, `socrata_rows`, `csv`, `xml`, `html`) into a unified `serde_json::Value`
+/// ready for RFC 9535 JSONPath extraction.
+pub fn parse_gov_response_payload(
+    ext_id: &str,
+    body_bytes: &[u8],
+    content_type: Option<&str>,
+    resolved_url: &str,
+    mapping: Option<&ResponseMappingYaml>,
+) -> Result<Value> {
+    let fmt = mapping.map(|m| m.format).unwrap_or(GovResponseFormat::Auto);
+    let ct_low = content_type.unwrap_or("").to_ascii_lowercase();
+    let url_path_low = Url::parse(resolved_url)
+        .ok()
+        .map(|u| u.path().to_ascii_lowercase())
+        .unwrap_or_else(|| resolved_url.to_ascii_lowercase());
+
+    match fmt {
+        GovResponseFormat::Csv => {
+            parse_csv_portal_to_json(ext_id, body_bytes, mapping.and_then(|m| m.csv_delimiter.as_deref()))
+        }
+        GovResponseFormat::Xml => {
+            parse_xml_portal_to_json(ext_id, body_bytes, mapping.and_then(|m| m.xml_record_tag.as_deref()))
+        }
+        GovResponseFormat::Html => {
+            parse_html_portal_to_json(ext_id, body_bytes, mapping.and_then(|m| m.html_table_index))
+        }
+        GovResponseFormat::Geojson => {
+            let v: Value = serde_json::from_slice(body_bytes)
+                .map_err(|e| anyhow!("Invalid GeoJSON from '{ext_id}': {e}"))?;
+            normalize_geojson_value(v)
+        }
+        GovResponseFormat::ArcgisFeatures => {
+            let v: Value = serde_json::from_slice(body_bytes)
+                .map_err(|e| anyhow!("Invalid ArcGIS JSON from '{ext_id}': {e}"))?;
+            normalize_arcgis_value(ext_id, v)
+        }
+        GovResponseFormat::SocrataRows => {
+            let v: Value = serde_json::from_slice(body_bytes)
+                .map_err(|e| anyhow!("Invalid Socrata/CKAN JSON from '{ext_id}': {e}"))?;
+            normalize_socrata_ckan_value(v)
+        }
+        GovResponseFormat::Json => serde_json::from_slice::<Value>(body_bytes)
+            .map_err(|e| anyhow!("Invalid JSON from '{ext_id}': {e}")),
+        GovResponseFormat::Auto => {
+            let first_non_ws = body_bytes
+                .iter()
+                .copied()
+                .find(|b| !b.is_ascii_whitespace() && *b != 0xEF && *b != 0xBB && *b != 0xBF);
+            let looks_json = matches!(first_non_ws, Some(b'{' | b'['));
+
+            if !looks_json
+                && (ct_low.contains("text/csv")
+                    || ct_low.contains("application/csv")
+                    || ct_low.contains("tab-separated-values")
+                    || url_path_low.ends_with(".csv")
+                    || url_path_low.ends_with(".tsv"))
+            {
+                return parse_csv_portal_to_json(
+                    ext_id,
+                    body_bytes,
+                    mapping.and_then(|m| m.csv_delimiter.as_deref()),
+                );
+            }
+
+            if !looks_json && ct_low.contains("xml") {
+                return parse_xml_portal_to_json(
+                    ext_id,
+                    body_bytes,
+                    mapping.and_then(|m| m.xml_record_tag.as_deref()),
+                );
+            }
+
+            let val = serde_json::from_slice::<Value>(body_bytes)
+                .map_err(|e| anyhow!("Invalid JSON from '{ext_id}': {e}"))?;
+            // Non-destructively enrich GeoJSON or ArcGIS responses with `.records` when absent.
+            if let Some(obj) = val.as_object() {
+                if !obj.contains_key("records") {
+                    if matches!(
+                        obj.get("type").and_then(Value::as_str),
+                        Some("FeatureCollection" | "Feature")
+                    ) {
+                        return normalize_geojson_value(val);
+                    }
+                    if obj
+                        .get("features")
+                        .and_then(Value::as_array)
+                        .and_then(|a| a.first())
+                        .and_then(Value::as_object)
+                        .map(|f| f.contains_key("attributes"))
+                        .unwrap_or(false)
+                    {
+                        return normalize_arcgis_value(ext_id, val);
+                    }
+                }
+            }
+            Ok(val)
+        }
+    }
 }
 
 /// Default `governor` keyed rate limiter for `ExtensionHub`.
@@ -1533,8 +2484,19 @@ fn json_to_bool(v: &Value) -> Option<bool> {
 }
 
 fn eval_field_value<'a>(target: &'a Value, mapping: &ResponseMappingYaml, key: &str) -> Option<&'a Value> {
-    let expr = mapping.fields.get(key)?;
-    let jp = JsonPath::parse(expr.trim()).ok()?;
+    let expr = mapping.fields.get(key)?.trim();
+    if let Some(simple_prop) = expr.strip_prefix("$.") {
+        if !simple_prop.is_empty()
+            && simple_prop
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+        {
+            if let Value::Object(map) = target {
+                return map.get(simple_prop).filter(|v| !v.is_null());
+            }
+        }
+    }
+    let jp = JsonPath::parse(expr).ok()?;
     let nodes = jp.query(target);
     nodes.first().filter(|v| !v.is_null())
 }
@@ -1585,13 +2547,27 @@ pub fn map_json_to_envelopes(
         }]);
     };
 
-    // Multi-item array extraction (e.g., FCC BDC `items_path: "$.data[*]"`)
-    if let Some(ip) = mapping
+    let is_normalized_gov_fmt = !matches!(
+        mapping.format,
+        GovResponseFormat::Auto | GovResponseFormat::Json
+    );
+    let default_records_items_path = (is_normalized_gov_fmt
+        && matches!(
+            pkg.primary_domain,
+            CapabilityDomain::DomainBroadband | CapabilityDomain::DomainPermits
+        )
+        && raw_json.get("records").and_then(Value::as_array).is_some())
+    .then_some("$.records[*]");
+
+    let effective_items_path = mapping
         .items_path
         .as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty())
-    {
+        .or(default_records_items_path);
+
+    // Multi-item array extraction (e.g., FCC BDC `items_path: "$.data[*]"` or normalized `$.records[*]`)
+    if let Some(ip) = effective_items_path {
         let jp = JsonPath::parse(ip)?;
         let items: Vec<&Value> = jp.query(raw_json).into_iter().collect();
         if items.is_empty() && mapping.require_non_empty {
@@ -1614,6 +2590,42 @@ pub fn map_json_to_envelopes(
         match jp.query(raw_json).first() {
             Some(node) if !node.is_null() => node,
             _ => {
+                // If normalized Socrata/CSV wrapped rows into `{"records": [...]}` and manifest wrote `$[0]`
+                if rp == "$[0]" {
+                    if let Some(first_rec) = raw_json
+                        .get("records")
+                        .and_then(Value::as_array)
+                        .and_then(|a| a.first())
+                        .filter(|v| !v.is_null())
+                    {
+                        first_rec
+                    } else if mapping.require_non_empty {
+                        return Ok(Vec::new());
+                    } else {
+                        raw_json
+                    }
+                } else if mapping.require_non_empty {
+                    return Ok(Vec::new());
+                } else {
+                    raw_json
+                }
+            }
+        }
+    } else if is_normalized_gov_fmt
+        && !matches!(
+            pkg.primary_domain,
+            CapabilityDomain::DomainBroadband | CapabilityDomain::DomainPermits
+        )
+        && raw_json.get("records").and_then(Value::as_array).is_some()
+    {
+        match raw_json
+            .get("records")
+            .and_then(Value::as_array)
+            .and_then(|a| a.first())
+            .filter(|v| !v.is_null())
+        {
+            Some(first_rec) => first_rec,
+            None => {
                 if mapping.require_non_empty {
                     return Ok(Vec::new());
                 }
@@ -1946,12 +2958,7 @@ pub fn map_json_to_envelopes(
             })
         }
         CapabilityDomain::DomainPermits => {
-            if let Some(ip) = mapping
-                .items_path
-                .as_deref()
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-            {
+            if let Some(ip) = effective_items_path {
                 let jp = JsonPath::parse(ip)?;
                 let rows: Vec<&Value> = jp.query(raw_json).into_iter().collect();
                 if rows.is_empty() && mapping.require_non_empty {
@@ -2029,7 +3036,7 @@ pub fn execute_upstream_yaml_mapper(
     manifest: &ExtensionManifestProto,
     query: &ExtensionQueryProto,
 ) -> Result<Vec<ExtensionEnvelopeProto>> {
-    let Some(spec_score) = pkg.doc.geo_scope.match_specificity(query) else {
+    let Some(spec_score) = pkg.compiled_geo_scope.match_query(query) else {
         return Ok(Vec::new());
     };
     let mut flattened_permits: Vec<Value> = Vec::new();

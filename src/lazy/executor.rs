@@ -185,6 +185,7 @@ impl LazyExecutor {
         extra_params.insert("section_id".to_string(), job.section_id.clone());
         extra_params.insert("lazy_job_id".to_string(), job.id.clone());
         extra_params.insert("lazy_trigger_kind".to_string(), job.trigger_kind.clone());
+        extra_params.insert("trigger_kind".to_string(), job.trigger_kind.clone());
         if let Some(ref uid) = job.requested_by_user_id {
             extra_params.insert("requested_by_user_id".to_string(), uid.clone());
         }

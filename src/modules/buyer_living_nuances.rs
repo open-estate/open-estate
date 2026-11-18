@@ -4139,15 +4139,114 @@ pub async fn run_buyer_living_nuances(
     let county_fips = ctx.county_fips.clone();
     let city = ctx.city.clone();
 
-    let radar_fut = async {
+    let mut extra_params = HashMap::new();
+    if let Some(c) = val_str(ctx.geo.get("country")) {
+        extra_params.insert("country".to_string(), c.to_string());
+    }
+    let all_permits = collect_all_permits(&ctx);
+    if !all_permits.is_empty() {
+        if let Ok(pj) = serde_json::to_string(&all_permits) {
+            extra_params.insert("permits_json".to_string(), pj);
+        }
+    }
+    if let Some(ec_rate) = val_f64(
+        ctx.buyer_diligence
+            .pointer("/ongoingCosts/monthlyUtilities/electricCarrier/ratePerKwhUsd")
+            .or_else(|| ctx.buyer_diligence.pointer("/utilityRates/electricRatePerKwhUsd")),
+    ) {
+        extra_params.insert("electric_rate_kwh".to_string(), format!("{ec_rate}"));
+    }
+    if let Some(op_rate) = val_f64(
+        ctx.buyer_diligence
+            .pointer("/ongoingCosts/monthlyUtilities/electricCarrier/offPeakKwhUsd"),
+    ) {
+        extra_params.insert("off_peak_kwh".to_string(), format!("{op_rate}"));
+    }
+    if let Some(gas_rate) = val_f64(
+        ctx.buyer_diligence
+            .pointer("/ongoingCosts/monthlyUtilities/gasCarrier/ratePerThermUsd")
+            .or_else(|| ctx.buyer_diligence.pointer("/utilityRates/gasRatePerThermUsd")),
+    ) {
+        extra_params.insert("gas_rate_therm".to_string(), format!("{gas_rate}"));
+    }
+
+    let ext_query = crate::extensions::proto::ExtensionQueryProto {
+        address: val_str(ctx.report.pointer("/meta/displayAddress"))
+            .or_else(|| val_str(ctx.facts.get("address")))
+            .unwrap_or("")
+            .to_string(),
+        city: ctx.city.clone(),
+        state: ctx.state.clone(),
+        zip: ctx.zip.clone(),
+        county_fips: ctx.county_fips.clone(),
+        county_name: (!ctx.county.is_empty()).then(|| ctx.county.clone()),
+        lat: Some(lat),
+        lon: Some(lon),
+        sqft: ctx.sqft.map(|s| s.round() as i64),
+        year_built: ctx.year_built.map(|y| y as i64),
+        extra_params,
+        ..Default::default()
+    };
+
+    let extract_raw_env = |res: anyhow::Result<Vec<crate::extensions::proto::ExtensionEnvelopeProto>>,
+                           want_id: &str|
+     -> (Option<Value>, Vec<SourceItem>) {
+        let mut val_opt = None;
+        let mut srcs = Vec::new();
+        if let Ok(envs) = res {
+            for env_msg in envs {
+                if env_msg.extension_id != want_id {
+                    continue;
+                }
+                if let Some(ref a) = env_msg.attribution {
+                    if !a.source_url.trim().is_empty() {
+                        srcs.push(SourceItem::new(a.source_name.clone(), a.source_url.clone()));
+                    }
+                }
+                if let Some(crate::extensions::proto::extension_envelope_proto::Payload::RawJson(
+                    raw,
+                )) = env_msg.payload
+                {
+                    if let Ok(parsed) = serde_json::from_str::<Value>(&raw) {
+                        val_opt = Some(parsed);
+                        break;
+                    }
+                }
+            }
+        }
+        (val_opt, srcs)
+    };
+
+    let radar_fut = Box::pin(async {
         if !radar_enabled {
             return LiveRadarFetchResult::default();
         }
         resolve_planning_radar_live(http, env, &state, &county_fips, &city, lat, lon).await
-    };
+    });
+    let mobile_legacy_fut = Box::pin(fetch_fcc_mobile_bdc(http, env, lat, lon));
+    let mobile_h3_fut = Box::pin(hub.execute_enabled_extension("fcc_mobile_5g", &ext_query, http, env));
+    let ev_fut = Box::pin(hub.execute_enabled_extension(
+        "ev_fast_chargers_electrification",
+        &ext_query,
+        http,
+        env,
+    ));
+    let tod_fut = Box::pin(hub.execute_enabled_extension("planning_rezoning_radar", &ext_query, http, env));
+    let towers_fut = Box::pin(hub.execute_enabled_extension("fcc_asr_cell_towers", &ext_query, http, env));
 
-    let mobile_fut = fetch_fcc_mobile_bdc(http, env, lat, lon);
-    let (radar_res, mobile_res) = tokio::join!(radar_fut, mobile_fut);
+    let (radar_res, mobile_res, mobile_h3_res, ev_res, tod_res, towers_res) = tokio::join!(
+        radar_fut,
+        mobile_legacy_fut,
+        mobile_h3_fut,
+        ev_fut,
+        tod_fut,
+        towers_fut,
+    );
+
+    let (mobile_h3_opt, mob_srcs) = extract_raw_env(mobile_h3_res, "fcc_mobile_5g");
+    let (ev_opt, ev_srcs) = extract_raw_env(ev_res, "ev_fast_chargers_electrification");
+    let (tod_opt, tod_srcs) = extract_raw_env(tod_res, "planning_rezoning_radar");
+    let (towers_opt, tower_srcs) = extract_raw_env(towers_res, "fcc_asr_cell_towers");
 
     let mut sources = radar_res.sources.clone();
     if mobile_res
@@ -4160,8 +4259,198 @@ pub async fn run_buyer_living_nuances(
             "https://broadbandmap.fcc.gov/",
         ));
     }
+    for s in mob_srcs
+        .into_iter()
+        .chain(ev_srcs)
+        .chain(tod_srcs)
+        .chain(tower_srcs)
+    {
+        if !sources.iter().any(|e| e.url == s.url) {
+            sources.push(s);
+        }
+    }
 
-    let data = assemble_buyer_living_intel(report, Some(&radar_res), mobile_res.as_ref());
+    let mut data = assemble_buyer_living_intel(report, Some(&radar_res), mobile_res.as_ref());
+    let mut map_layers: Vec<Value> = Vec::new();
+    let mut push_layer = |lyr: &Value| {
+        if let Some(lid) = lyr.get("id").and_then(Value::as_str) {
+            if !map_layers
+                .iter()
+                .any(|x| x.get("id").and_then(Value::as_str) == Some(lid))
+            {
+                map_layers.push(lyr.clone());
+            }
+        }
+    };
+
+    if let Some(mob_h3) = mobile_h3_opt {
+        if let Some(lyr) = mob_h3.get("mapLayer").filter(|v| v.is_object()) {
+            push_layer(lyr);
+        }
+        if mob_h3.get("available").and_then(Value::as_bool) == Some(true) {
+            let h3_carriers: Vec<Value> = mob_h3
+                .get("carriers")
+                .and_then(Value::as_array)
+                .map(|arr| {
+                    arr.iter()
+                        .map(|c| {
+                            let mut obj = c.as_object().cloned().unwrap_or_default();
+                            let out_5g35 = c
+                                .get("outdoorStationary5gNr35x3")
+                                .and_then(Value::as_bool)
+                                .unwrap_or(false);
+                            let out_5g7 = c
+                                .get("outdoorStationary5gNr7x1")
+                                .and_then(Value::as_bool)
+                                .unwrap_or(false);
+                            let out_4g = c
+                                .get("outdoorStationary4gLte5x1")
+                                .and_then(Value::as_bool)
+                                .unwrap_or(false);
+                            obj.insert(
+                                "outdoor5gNr35x3".to_string(),
+                                json!(if out_5g35 {
+                                    "verified_fcc_bdc_35_3_mbps"
+                                } else if out_5g7 {
+                                    "verified_fcc_bdc_7_1_mbps"
+                                } else {
+                                    "not_reported_at_35_3_tier"
+                                }),
+                            );
+                            obj.insert(
+                                "outdoor4gLte5x1".to_string(),
+                                json!(if out_4g || out_5g7 || out_5g35 {
+                                    "verified_fcc_bdc_5_1_mbps"
+                                } else {
+                                    "verify_on_fcc_map"
+                                }),
+                            );
+                            obj.insert("signalStrengthDbm".to_string(), Value::Null);
+                            obj.insert("provenance".to_string(), json!("fcc_bdc_live"));
+                            Value::Object(obj)
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            if let Some(m5_obj) = data
+                .get_mut("mobile5gCoverage")
+                .and_then(Value::as_object_mut)
+            {
+                m5_obj.insert("available".to_string(), json!(true));
+                m5_obj.insert("status".to_string(), json!("live_verified"));
+                m5_obj.insert("provenance".to_string(), json!("fcc_bdc_live"));
+                m5_obj.insert("unavailableReason".to_string(), Value::Null);
+                m5_obj.insert("signalStrengthDbm".to_string(), Value::Null);
+                m5_obj.insert(
+                    "h3Id".to_string(),
+                    mob_h3.get("h3Id").cloned().unwrap_or(Value::Null),
+                );
+                m5_obj.insert(
+                    "h3Resolution".to_string(),
+                    mob_h3.get("h3Resolution").cloned().unwrap_or(json!(8)),
+                );
+                m5_obj.insert(
+                    "bestAvailableTier".to_string(),
+                    mob_h3
+                        .get("bestAvailableTier")
+                        .cloned()
+                        .unwrap_or(Value::Null),
+                );
+                m5_obj.insert(
+                    "carriers5g35x3Count".to_string(),
+                    mob_h3
+                        .get("carriers5g35x3Count")
+                        .cloned()
+                        .unwrap_or(json!(0)),
+                );
+                m5_obj.insert(
+                    "carriersInVehicle5g35x3Count".to_string(),
+                    mob_h3
+                        .get("carriersInVehicle5g35x3Count")
+                        .cloned()
+                        .unwrap_or(json!(0)),
+                );
+                m5_obj.insert(
+                    "rsrpThresholdMethodology".to_string(),
+                    mob_h3
+                        .get("rsrpThresholdMethodology")
+                        .cloned()
+                        .unwrap_or(Value::Null),
+                );
+                m5_obj.insert("carriers".to_string(), Value::Array(h3_carriers));
+            }
+            data["mode"] = json!("live_enriched");
+        }
+    }
+
+    if let Some(ev_val) = ev_opt {
+        if let Some(lyrs) = ev_val.get("mapLayers").and_then(Value::as_array) {
+            for l in lyrs {
+                push_layer(l);
+            }
+        }
+        if let Some(d_obj) = data.as_object_mut() {
+            d_obj.insert("evElectrification".to_string(), ev_val);
+            d_obj.insert("mode".to_string(), json!("live_enriched"));
+        }
+    }
+
+    if let Some(tod_val) = tod_opt {
+        if let Some(lyrs) = tod_val.get("mapLayers").and_then(Value::as_array) {
+            for l in lyrs {
+                push_layer(l);
+            }
+        } else if let Some(lyr) = tod_val.get("mapLayer").filter(|v| v.is_object()) {
+            push_layer(lyr);
+        }
+        if let Some(d_obj) = data.as_object_mut() {
+            d_obj.insert("todRezoningRadar".to_string(), tod_val);
+            d_obj.insert("mode".to_string(), json!("live_enriched"));
+        }
+    }
+
+    if let Some(tow_val) = towers_opt {
+        if let Some(lyrs) = tow_val.get("mapLayers").and_then(Value::as_array) {
+            for l in lyrs {
+                push_layer(l);
+            }
+        } else if let Some(lyr) = tow_val.get("mapLayer").filter(|v| v.is_object()) {
+            push_layer(lyr);
+        }
+        if let Some(nearest) = tow_val.get("nearestTower").filter(|v| v.is_object()) {
+            if data
+                .pointer("/mobile5gCoverage/nearestMappedTower")
+                .is_none_or(Value::is_null)
+            {
+                if let Some(m5_obj) = data
+                    .get_mut("mobile5gCoverage")
+                    .and_then(Value::as_object_mut)
+                {
+                    m5_obj.insert(
+                        "nearestMappedTower".to_string(),
+                        json!({
+                            "name": nearest.get("ownerOrOperator").and_then(Value::as_str).unwrap_or("FCC Registered Antenna Structure"),
+                            "distanceM": nearest.get("distanceM").cloned().unwrap_or(Value::Null),
+                            "distanceMiles": nearest.get("distanceMi").cloned().unwrap_or(Value::Null),
+                            "direction": nearest.get("direction").cloned().unwrap_or(Value::Null),
+                            "heightFt": nearest.get("heightFt").cloned().unwrap_or(Value::Null),
+                        }),
+                    );
+                }
+            }
+        }
+        if let Some(d_obj) = data.as_object_mut() {
+            d_obj.insert("cellTowers".to_string(), tow_val);
+            d_obj.insert("mode".to_string(), json!("live_enriched"));
+        }
+    }
+
+    if !map_layers.is_empty() {
+        if let Some(d_obj) = data.as_object_mut() {
+            d_obj.insert("mapLayers".to_string(), Value::Array(map_layers));
+        }
+    }
+
     ModuleOutput {
         data,
         sources,

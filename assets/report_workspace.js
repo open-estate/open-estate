@@ -142,6 +142,35 @@
     return null;
   }
 
+  /* ------------------------------------------------------------------ 0B. Saved Brief | Full Details Density Switch */
+  var DENSITY_KEY = 'openestate:density:v1';
+  function normalizeDensity(raw) {
+    var s = String(raw == null ? '' : raw).trim().toLowerCase();
+    if (s === 'full' || s === 'details') return 'full';
+    if (s === 'brief' || s === 'summary') return 'brief';
+    return null;
+  }
+  var _densityState = (function () {
+    var u = safeUrlObj();
+    if (u && u.searchParams) {
+      var fromDensity = normalizeDensity(u.searchParams.get('density'));
+      if (fromDensity) return { mode: fromDensity, fromUrl: true };
+      var fromView = normalizeDensity(u.searchParams.get('view'));
+      if (fromView) return { mode: fromView, fromUrl: true };
+    }
+    try {
+      var saved = typeof localStorage !== 'undefined' ? normalizeDensity(localStorage.getItem(DENSITY_KEY)) : null;
+      if (saved) return { mode: saved, fromUrl: false };
+    } catch (e) {}
+    return { mode: 'brief', fromUrl: false };
+  })();
+  if (typeof document !== 'undefined' && document.documentElement && typeof document.documentElement.setAttribute === 'function') {
+    document.documentElement.setAttribute('data-density', _densityState.mode);
+  }
+  function getDensity() {
+    return _densityState.mode === 'full' ? 'full' : 'brief';
+  }
+
   /* ------------------------------------------------------------------ 1. Verdict-First & 5 Buyer-Question Cards Architecture */
   var QUESTION_CARDS = [
     {
@@ -168,7 +197,7 @@
       en: 'What could go wrong?',
       zh: '有哪些潜在风险与隐患？',
       es: '¿Qué podría salir mal?',
-      sections: ['hazards', 'risk', 'environment', 'condition', 'inspectionReview', 'inspection', 'disclosuresAndInspections', 'packetReview', 'titleReview', 'hoaReview', 'deedTitle', 'titleLegalRadarPanel', 'history', 'county']
+      sections: ['hazards', 'risk', 'weather', 'environment', 'condition', 'inspectionReview', 'inspection', 'disclosuresAndInspections', 'packetReview', 'titleReview', 'hoaReview', 'deedTitle', 'titleLegalRadarPanel', 'history', 'county']
     },
     {
       id: 'price',
@@ -208,8 +237,8 @@
       zh: '这处房产还能怎么利用或改建？',
       es: '¿Qué puedo hacer con la propiedad?',
       sections: (window.__CLOUD_CRE_ENABLED__ === true || !!(window.R && ((window.R.modules && window.R.modules.cre) || window.R.cre)))
-        ? ['house3d', 'house', 'remodel', 'fengshui', 'cre', 'creReview', 'ai', 'more']
-        : ['house3d', 'house', 'remodel', 'fengshui', 'ai', 'more']
+        ? ['house3d', 'solar', 'house', 'remodel', 'fengshui', 'cre', 'creReview', 'ai', 'more']
+        : ['house3d', 'solar', 'house', 'remodel', 'fengshui', 'ai', 'more']
     }
   ];
 
@@ -677,6 +706,7 @@
     var rep = getRep() || {};
     syncRoleBriefAriaLabelledBy();
 
+    mount.hidden = false;
     if (role === 'all') {
       var rows = [
         {
@@ -2320,9 +2350,408 @@
   }
 
   function flattenNestedDetailsInDrawers() {
-    qAll('.q-drawer details').forEach(function (d) {
+    qAll('.q-drawer details:not(.sec-evidence-drawer)').forEach(function (d) {
       try { d.open = true; } catch (e) {}
     });
+  }
+
+  /* ------------------------------------------------------------------ 1A. Two-Level Progressive Disclosure (Brief vs Full Details) */
+  var HEAVY_EVIDENCE_SECTIONS = ['payment', 'house', 'county', 'diligence', 'more', 'comps', 'risk', 'environment'];
+
+  function isProtectedL2aNode(el) {
+    if (!el || el.nodeType !== 1) return true;
+    var tag = String(el.tagName || '').toUpperCase();
+    if (tag === 'SCRIPT' || tag === 'STYLE') return true;
+    if (el.getAttribute && el.getAttribute('data-l2a-keep') === '1') return true;
+    if (el.matches && el.matches('.eyebrow, .stitle, .ai, .map, .chart, .calc, .brief-table-expand, .brief-chk-expand, .hpfeats, .cards, #payLoanSeg, #rentResearch, #insurance, #rateShockMatrixBox, #mpPaneMortgage, #mpPaneInsurance, #mpPaneTitle, #publicResearchBox, #hpPhotoResultsBox, #utilitiesRatesPanel, #homeInternetCatalog, #oeRainSoilPanel, #oeNoiseExtPanel, details.sec-evidence-drawer')) {
+      return true;
+    }
+    if (el.querySelector && el.querySelector('.map, [id$="Map"], .chart, canvas, .calc, .brief-table-expand, .brief-chk-expand, .ccard, #ficoTierTable, #mpVertTab, #mpMortgageBenchBody, #rateShockMatrixBox, #openTourPhotosBtn, #houseFeatTabs, #houseFeatDetectedOnly, #yourMatchCard, #insuranceQuoteStudio, #rentResearchCostMount, #utilitiesRatesPanel, #homeInternetCatalog, #dilTab, #compModeSeg, #oeRainSoilPanel, #oeNoiseExtPanel, #weatherMap')) {
+      return true;
+    }
+    return false;
+  }
+
+  function formatEvidenceSummaryHtml(drawer, tableCount, itemCount) {
+    var isOpen = Boolean(drawer && drawer.open);
+    var lead = isOpen
+      ? L3('Hide full details', '收起完整明细', 'Ocultar detalles completos')
+      : L3('Show full details', '展开完整明细', 'Ver detalles completos');
+    var parts = [];
+    if (tableCount > 0) {
+      parts.push(L3(
+        tableCount + ' ' + (tableCount === 1 ? 'table' : 'tables'),
+        tableCount + ' 张表',
+        tableCount + ' ' + (tableCount === 1 ? 'tabla' : 'tablas')
+      ));
+    }
+    if (itemCount > 0) {
+      parts.push(L3(
+        itemCount + ' ' + (itemCount === 1 ? 'item' : 'items'),
+        itemCount + ' 项记录',
+        itemCount + ' ' + (itemCount === 1 ? 'elemento' : 'elementos')
+      ));
+    }
+    var metaTxt = parts.length ? (' · ' + parts.join(' · ')) : '';
+    return '<span class="sec-ev-left"><span class="sec-ev-chev" aria-hidden="true">▸</span><span>' + esc(lead) + '</span>' +
+      (metaTxt ? '<span class="sec-ev-counts">' + esc(metaTxt) + '</span>' : '') +
+      '</span>';
+  }
+
+  function unwrapEvidenceDrawersIn(root) {
+    if (!root) return;
+    qAll('details.sec-evidence-drawer', root).forEach(function (drawer) {
+      var parent = drawer.parentNode;
+      if (!parent) return;
+      var body = drawer.querySelector && drawer.querySelector('.sec-evidence-body');
+      var src = body || drawer;
+      var kids = Array.prototype.slice.call(src.childNodes || []);
+      kids.forEach(function (ch) {
+        if (ch.nodeType === 1 && ch.tagName && String(ch.tagName).toUpperCase() === 'SUMMARY') return;
+        parent.insertBefore(ch, drawer);
+      });
+      parent.removeChild(drawer);
+    });
+  }
+
+  function wrapNodesInEvidenceDrawer(parentEl, nodesToWrap) {
+    if (!parentEl || !nodesToWrap || !nodesToWrap.length) return null;
+    var eligible = nodesToWrap.filter(function (el) {
+      if (!el || el.nodeType !== 1 || el.parentNode !== parentEl) return false;
+      if (isProtectedL2aNode(el)) return false;
+      return Boolean(String(el.textContent || '').trim() || (el.querySelector && el.querySelector('table, img, svg')));
+    });
+    if (!eligible.length) return null;
+
+    var anchor = eligible[0];
+    var drawer = document.createElement('details');
+    drawer.className = 'sec-evidence-drawer';
+    drawer.open = getDensity() === 'full';
+
+    var summary = document.createElement('summary');
+    summary.className = 'sec-evidence-summary';
+    var body = document.createElement('div');
+    body.className = 'sec-evidence-body';
+
+    parentEl.insertBefore(drawer, anchor);
+    drawer.appendChild(summary);
+    drawer.appendChild(body);
+    eligible.forEach(function (el) { body.appendChild(el); });
+
+    var tableCount = qAll('table', body).length;
+    var itemCount = qAll('tbody > tr, ul.l > li, .srcs > li, .feat-item, .ccard', body).length;
+    drawer.setAttribute('data-ev-tables', String(tableCount));
+    drawer.setAttribute('data-ev-items', String(itemCount));
+
+    function syncLabel() {
+      summary.innerHTML = formatEvidenceSummaryHtml(drawer, tableCount, itemCount);
+    }
+    syncLabel();
+    drawer.addEventListener('toggle', function () {
+      syncLabel();
+      if (drawer.open) {
+        setTimeout(resizeChartsAndMaps, 40);
+      }
+    });
+    return drawer;
+  }
+
+  function cleanupBriefClamps() {
+    qAll('.brief-table-expand, .brief-chk-expand').forEach(function (btn) {
+      if (btn && btn.parentNode) btn.parentNode.removeChild(btn);
+    });
+    qAll('tr.brief-clamped-row').forEach(function (tr) {
+      if (tr.classList) tr.classList.remove('brief-clamped-row');
+    });
+    qAll('.chki.brief-clamped-chk').forEach(function (it) {
+      if (it.classList) it.classList.remove('brief-clamped-chk');
+    });
+  }
+
+  function applySectionEvidenceDrawers() {
+    HEAVY_EVIDENCE_SECTIONS.forEach(function (secId) {
+      var sec = byId(secId);
+      if (!sec) return;
+      unwrapEvidenceDrawersIn(sec);
+
+      if (secId === 'payment') {
+        var payLoanRef = qAll('.pay-loan-programs-ref', sec).filter(function (el) { return el.parentNode === sec; });
+        if (payLoanRef.length) {
+          wrapNodesInEvidenceDrawer(sec, payLoanRef);
+        }
+        return;
+      }
+
+      if (secId === 'house') {
+        var regEv = byId('houseRegisterEvidence');
+        if (regEv && regEv.parentNode) {
+          wrapNodesInEvidenceDrawer(regEv.parentNode, [regEv]);
+        }
+        return;
+      }
+
+      if (secId === 'comps') {
+        var soldPane = byId('compPaneSold');
+        if (!soldPane) return;
+        var compTail = Array.prototype.slice.call(soldPane.children || []).filter(function (ch) {
+          return Boolean(ch.classList && ch.classList.contains('more-flat'));
+        });
+        if (compTail.length) {
+          wrapNodesInEvidenceDrawer(soldPane, compTail);
+        }
+        return;
+      }
+
+      if (secId === 'county') {
+        var rawEl = byId('countyRawDetails');
+        if (rawEl && rawEl.parentNode === sec) {
+          wrapNodesInEvidenceDrawer(sec, [rawEl]);
+        }
+        return;
+      }
+
+      if (secId === 'diligence') {
+        var hoaEl = byId('hoa');
+        if (hoaEl) {
+          var hoaKids = Array.prototype.slice.call(hoaEl.children || []);
+          var hoaTail = hoaKids.filter(function (ch) {
+            if (!ch.classList) return false;
+            return ch.classList.contains('grid') || ch.id === 'hoaFundingAndBoardBox' || ch.id === 'hoaMasterInsuranceBox';
+          });
+          wrapNodesInEvidenceDrawer(hoaEl, hoaTail);
+        }
+        return;
+      }
+
+      if (secId === 'more') {
+        var moreKids = Array.prototype.slice.call(sec.children || []);
+        var chkIdx = -1;
+        for (var im = 0; im < moreKids.length; im++) {
+          if (moreKids[im].classList && moreKids[im].classList.contains('chk')) {
+            chkIdx = im;
+            break;
+          }
+        }
+        if (chkIdx >= 0 && chkIdx + 1 < moreKids.length) {
+          wrapNodesInEvidenceDrawer(sec, moreKids.slice(chkIdx + 1));
+        }
+        return;
+      }
+
+      var children = Array.prototype.slice.call(sec.children || []);
+      var cutIdx = -1;
+      for (var i = 0; i < children.length; i++) {
+        var ch = children[i];
+        if (isProtectedL2aNode(ch)) continue;
+        if (ch.classList && ch.classList.contains('more-flat')) {
+          cutIdx = i;
+          break;
+        }
+      }
+      if (cutIdx >= 0 && cutIdx < children.length) {
+        wrapNodesInEvidenceDrawer(sec, children.slice(cutIdx));
+      }
+    });
+  }
+
+  function formatTableExpandLabel(expanded, totalRows) {
+    if (expanded) {
+      return L3('Show top 5 rows ▴', '收起至前 5 行 ▴', 'Mostrar 5 filas ▴');
+    }
+    return L3('Show all ' + totalRows + ' rows ▾', '展开全部 ' + totalRows + ' 行 ▾', 'Mostrar las ' + totalRows + ' filas ▾');
+  }
+
+  var NO_CLAMP_TABLE_IDS = {
+    payTable: true,
+    ficoTierTable: true,
+    rebCostTable: true,
+    rmProjTable: true,
+    inspTable: true,
+    insCarrierTable: true,
+    countyRawTable: true
+  };
+
+  function shouldSkipTableClamp(tbl) {
+    if (!tbl || tbl.getAttribute('data-no-clamp') === '1') return true;
+    if (tbl.id && NO_CLAMP_TABLE_IDS[tbl.id]) return true;
+    if (tbl.querySelector && tbl.querySelector('#mpMortgageBenchBody, tr[data-fico-row], tr[data-cre-concept-row]')) return true;
+    if (typeof tbl.closest === 'function' && tbl.closest('#miLedgerBox, #cre, #insuranceQuoteStudio, [data-no-clamp="1"]')) return true;
+    return false;
+  }
+
+  function applyBriefTableClamps() {
+    qAll('main section.sec table').forEach(function (tbl) {
+      if (shouldSkipTableClamp(tbl)) return;
+      var tbody = tbl.tBodies && tbl.tBodies[0];
+      var rows = tbody && tbody.rows ? Array.prototype.slice.call(tbody.rows) : [];
+      var anchor = (tbl.parentNode && tbl.parentNode.classList && tbl.parentNode.classList.contains('scroll')) ? tbl.parentNode : tbl;
+      var existingBtn = anchor.nextElementSibling && anchor.nextElementSibling.classList && anchor.nextElementSibling.classList.contains('brief-table-expand')
+        ? anchor.nextElementSibling
+        : null;
+
+      var nonHlRows = rows.filter(function (r) {
+        return !(r.classList && r.classList.contains('hl'));
+      });
+      if (nonHlRows.length <= 5) {
+        rows.forEach(function (r) { if (r.classList) r.classList.remove('brief-clamped-row'); });
+        if (existingBtn && existingBtn.parentNode) existingBtn.parentNode.removeChild(existingBtn);
+        return;
+      }
+
+      var seenData = 0;
+      rows.forEach(function (r) {
+        if (!r.classList) return;
+        if (r.classList.contains('hl')) {
+          r.classList.remove('brief-clamped-row');
+          return;
+        }
+        var shouldClamp = seenData >= 5;
+        seenData++;
+        r.classList.toggle('brief-clamped-row', shouldClamp);
+      });
+
+      var btn = existingBtn;
+      if (!btn && anchor.parentNode) {
+        btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'brief-table-expand';
+        anchor.parentNode.insertBefore(btn, anchor.nextSibling);
+        btn.addEventListener('click', function () {
+          var nextExp = !(tbl.classList && tbl.classList.contains('brief-table-expanded'));
+          if (tbl.classList) tbl.classList.toggle('brief-table-expanded', nextExp);
+          btn.setAttribute('aria-expanded', nextExp ? 'true' : 'false');
+          var curRows = (tbl.tBodies && tbl.tBodies[0] && tbl.tBodies[0].rows) ? tbl.tBodies[0].rows.length : rows.length;
+          btn.textContent = formatTableExpandLabel(nextExp, curRows);
+        });
+      }
+      if (btn) {
+        var isExp = Boolean(tbl.classList && tbl.classList.contains('brief-table-expanded'));
+        btn.setAttribute('aria-expanded', isExp ? 'true' : 'false');
+        btn.textContent = formatTableExpandLabel(isExp, rows.length);
+      }
+    });
+
+    qAll('#more .chk').forEach(function (chkWrap) {
+      var items = qAll('.chki', chkWrap).filter(function (el) { return el.parentNode === chkWrap; });
+      var existing = chkWrap.nextElementSibling && chkWrap.nextElementSibling.classList && chkWrap.nextElementSibling.classList.contains('brief-chk-expand')
+        ? chkWrap.nextElementSibling
+        : null;
+      if (items.length <= 6) {
+        items.forEach(function (it) { if (it.classList) it.classList.remove('brief-clamped-chk'); });
+        if (existing && existing.parentNode) existing.parentNode.removeChild(existing);
+        return;
+      }
+      items.forEach(function (it, idx) {
+        if (it.classList) it.classList.toggle('brief-clamped-chk', idx >= 6);
+      });
+      var cBtn = existing;
+      if (!cBtn && chkWrap.parentNode) {
+        cBtn = document.createElement('button');
+        cBtn.type = 'button';
+        cBtn.className = 'brief-chk-expand';
+        chkWrap.parentNode.insertBefore(cBtn, chkWrap.nextSibling);
+        cBtn.addEventListener('click', function () {
+          var exp = !(chkWrap.classList && chkWrap.classList.contains('brief-chk-expanded'));
+          if (chkWrap.classList) chkWrap.classList.toggle('brief-chk-expanded', exp);
+          cBtn.setAttribute('aria-expanded', exp ? 'true' : 'false');
+          cBtn.textContent = exp
+            ? L3('Show top 6 items ▴', '收起至前 6 项 ▴', 'Mostrar 6 elementos ▴')
+            : L3('Show all ' + items.length + ' checklist items ▾', '展开全部 ' + items.length + ' 项待办 ▾', 'Mostrar los ' + items.length + ' elementos ▾');
+        });
+      }
+      if (cBtn) {
+        var isChkExp = Boolean(chkWrap.classList && chkWrap.classList.contains('brief-chk-expanded'));
+        cBtn.setAttribute('aria-expanded', isChkExp ? 'true' : 'false');
+        cBtn.textContent = isChkExp
+          ? L3('Show top 6 items ▴', '收起至前 6 项 ▴', 'Mostrar 6 elementos ▴')
+          : L3('Show all ' + items.length + ' checklist items ▾', '展开全部 ' + items.length + ' 项待办 ▾', 'Mostrar los ' + items.length + ' elementos ▾');
+      }
+    });
+  }
+
+  function syncEvidenceDrawersToDensity() {
+    var isFull = getDensity() === 'full';
+    qAll('details.sec-evidence-drawer').forEach(function (drawer) {
+      drawer.open = isFull;
+      var sum = drawer.querySelector && drawer.querySelector('summary.sec-evidence-summary');
+      if (sum) {
+        var tc = parseInt(drawer.getAttribute('data-ev-tables') || '0', 10) || 0;
+        var ic = parseInt(drawer.getAttribute('data-ev-items') || '0', 10) || 0;
+        sum.innerHTML = formatEvidenceSummaryHtml(drawer, tc, ic);
+      }
+    });
+  }
+
+  function applyProgressiveDisclosure() {
+    cleanupBriefClamps();
+    applySectionEvidenceDrawers();
+    applyBriefTableClamps();
+    flattenNestedDetailsInDrawers();
+    syncEvidenceDrawersToDensity();
+  }
+
+  function renderWorkspaceToolbar() {
+    var left = byId('wsDensityLeft');
+    if (!left) return;
+    var d = getDensity();
+    var isBrief = d === 'brief';
+    var hint = isBrief
+      ? L3('Concise executive brief · Press D for full tables & records', '精简模式 · 按 D 键展开全部明细与长表', 'Modo resumen · Presione D para ver todas las tablas')
+      : L3('Full details · All tables & evidence drawers expanded', '完整详情 · 已展开全部表格与底层档案', 'Detalles completos · Todas las tablas expandidas');
+    left.innerHTML =
+      '<div class="density-sw" id="densitySwitch" role="group" aria-label="' + esc(L3('Report density', '报告信息密度', 'Densidad del informe')) + '">' +
+        '<button type="button" id="densityBtnBrief" data-density-set="brief" class="' + (isBrief ? 'on' : '') + '" aria-pressed="' + (isBrief ? 'true' : 'false') + '" title="' + esc(L3('Concise summary & top 5 table rows (Shortcut: D)', '精简摘要与表格前 5 行（快捷键 D）', 'Resumen conciso y 5 filas (Atajo: D)')) + '">' +
+          esc(L3('Brief', '精简', 'Resumen')) +
+        '</button>' +
+        '<button type="button" id="densityBtnFull" data-density-set="full" class="' + (!isBrief ? 'on' : '') + '" aria-pressed="' + (!isBrief ? 'true' : 'false') + '" title="' + esc(L3('Expand all tables & evidence drawers (Shortcut: D)', '展开全部长表与证据抽屉（快捷键 D）', 'Expandir todas las tablas (Atajo: D)')) + '">' +
+          esc(L3('Full details', '完整详情', 'Detalles')) +
+        '</button>' +
+      '</div>' +
+      '<kbd class="ws-kbd" title="' + esc(L3('Press D to toggle Brief / Full details', '按 D 键切换精简 / 完整详情', 'Presione D para alternar Resumen / Detalles')) + '">D</kbd>' +
+      '<span class="ws-density-hint" id="densityHintText">' + esc(hint) + '</span>';
+
+    qAll('[data-density-set]', left).forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        setDensity(btn.getAttribute('data-density-set'), { fromUser: true });
+      });
+    });
+  }
+
+  function setDensity(nextMode, opts) {
+    var options = opts || {};
+    var next = normalizeDensity(nextMode) || 'brief';
+    _densityState.mode = next;
+    if (document.documentElement && typeof document.documentElement.setAttribute === 'function') {
+      document.documentElement.setAttribute('data-density', next);
+    }
+    if (!options.skipPersist) {
+      try {
+        if (typeof localStorage !== 'undefined') {
+          localStorage.setItem(DENSITY_KEY, next);
+        }
+      } catch (e) {}
+    }
+    if (!options.skipUrl && typeof history !== 'undefined' && typeof history.replaceState === 'function') {
+      try {
+        var u = safeUrlObj();
+        if (u && u.searchParams) {
+          var curView = String(u.searchParams.get('view') || '').toLowerCase();
+          if (curView === 'dashboard' || curView === 'command') {
+            if (next === 'full') u.searchParams.set('density', 'full');
+            else u.searchParams.delete('density');
+          } else {
+            u.searchParams.delete('density');
+            if (next === 'full') u.searchParams.set('view', 'full');
+            else if (curView === 'full' || curView === 'brief' || curView === 'summary' || curView === 'details') u.searchParams.delete('view');
+          }
+          var qs = u.searchParams.toString();
+          history.replaceState(history.state || null, '', u.pathname + (qs ? '?' + qs : '') + (u.hash || ''));
+        }
+      } catch (e2) {}
+    }
+    syncEvidenceDrawersToDensity();
+    renderWorkspaceToolbar();
+    setTimeout(resizeChartsAndMaps, 50);
   }
 
   var _resizingVisuals = false;
@@ -2412,6 +2841,9 @@
 
     syncStickyJumpHighlight();
     syncFengShuiLanguageVisibility();
+    if (isOpen) {
+      setTocBranchCollapsed(qId, false);
+    }
 
     if (isOpen && !wasOpen) {
       flattenNestedDetailsInDrawers();
@@ -2494,7 +2926,7 @@
   function syncStickyJumpHighlight() {
     qAll('#chapterWorkspaceBar [data-qjump]').forEach(function (b) {
       var qid = b.getAttribute('data-qjump');
-      var on = Boolean(openCards[qid]) && (activeQuestion === qid || !activeQuestion);
+      var on = activeQuestion ? activeQuestion === qid : Boolean(openCards[qid]);
       if (b.classList) b.classList.toggle('on', on);
       b.setAttribute('aria-pressed', on ? 'true' : 'false');
     });
@@ -2505,7 +2937,7 @@
     if (!wrap) return;
     var ordered = getOrderedQuestionCards();
     var btnsHtml = ordered.map(function (q, idx) {
-      var isOn = Boolean(openCards[q.id]) && activeQuestion === q.id;
+      var isOn = activeQuestion ? activeQuestion === q.id : Boolean(openCards[q.id]);
       var lbls = getRoleCardLabels(q.id);
       return '<button type="button" class="chap-btn' + (isOn ? ' on' : '') + '" id="qJump_' + q.id + '" data-qjump="' + q.id + '" data-chapter="' + q.id + '" aria-pressed="' + (isOn ? 'true' : 'false') + '">' +
         '<span class="chap-num">' + (idx + 1) + '</span>' +
@@ -2513,15 +2945,31 @@
       '</button>';
     }).join('');
 
+    var existingCmd = byId('toggleCommandCenterBtn');
+    if (existingCmd && existingCmd.parentNode) {
+      existingCmd.parentNode.removeChild(existingCmd);
+    }
+
     wrap.innerHTML =
       '<div class="chap-bar-inner">' +
         '<div class="chap-pills" role="navigation" aria-label="' + esc(L3('Report Questions', '报告核心问题', 'Preguntas del informe')) + '">' +
           btnsHtml +
         '</div>' +
+        '<div class="ws-density-left" id="wsDensityLeft"></div>' +
+        '<div class="ws-toolbar-actions" id="wsToolbarActions"></div>' +
         '<button type="button" class="chap-tour-cta" id="stickyWalkthroughBtn">' +
           '<span>▶</span> ' + span3('Walkthrough', '房源导览', 'Guía') +
         '</button>' +
       '</div>';
+
+    if (existingCmd) {
+      var actionsSlot = byId('wsToolbarActions');
+      if (actionsSlot && typeof actionsSlot.appendChild === 'function') {
+        actionsSlot.appendChild(existingCmd);
+      }
+    }
+
+    renderWorkspaceToolbar();
 
     qAll('[data-qjump]', wrap).forEach(function (btn) {
       btn.addEventListener('click', function () {
@@ -2547,9 +2995,24 @@
       return true;
     })(),
     mobileOpen: false,
-    collapsedBranches: {},
+    collapsedBranches: { cost: true, risk: true, price: true, living: true, potential: true },
     activeTarget: 'overview'
   };
+
+  function syncInitialActiveTocBranch() {
+    var ordered = getOrderedQuestionCards();
+    var leadId = (ordered[0] && ordered[0].id) || 'cost';
+    var u = safeUrlObj();
+    var initCh = u && u.searchParams ? u.searchParams.get('chapter') : null;
+    if (initCh && (Q_BY_ID[initCh] || LEGACY_CHAP_TO_Q[initCh])) {
+      leadId = Q_BY_ID[initCh] ? initCh : LEGACY_CHAP_TO_Q[initCh];
+    } else if (u && u.hash && u.hash.length > 1) {
+      var fromH = resolveQuestionForTargetId(decodeURIComponent(u.hash.slice(1)));
+      if (fromH) leadId = fromH;
+    }
+    _tocState.collapsedBranches = { cost: true, risk: true, price: true, living: true, potential: true };
+    delete _tocState.collapsedBranches[leadId];
+  }
 
   var TOC_TREE_NODES = [
     {
@@ -2585,6 +3048,7 @@
       es: 'Riesgos y peligros',
       children: [
         { target: 'risk', en: 'Natural Hazards', zh: '自然灾害筛查', es: 'Riesgos naturales' },
+        { target: 'weather', en: 'Live Weather & Radar Map', zh: '实时气象与雷达图', es: 'Clima y radar en vivo', optionalDom: true },
         { target: 'environment', en: 'Environment, Water & Noise', zh: '环境污染、水质与噪音', es: 'Entorno, agua y ruido' },
         { target: 'condition', en: 'System Condition & CapEx', zh: '房屋老化与大修预算', es: 'Estado y CapEx' },
         { target: 'inspection', en: 'Inspection & Title AI', zh: '验房与产权文档 AI', es: 'Inspección y título IA' },
@@ -2632,6 +3096,7 @@
       es: 'Potencial y remodelación',
       children: [
         { target: 'house3d', en: '3D LiDAR & Sun Study', zh: '3D 激光雷达与日照', es: 'Modelo 3D y sol' },
+        { target: 'solar', en: 'Solar Potential & Roof Heatmap', zh: '屋顶光伏潜力与光照热力图', es: 'Potencial solar y mapa térmico', optionalDom: true },
         { target: 'house', en: 'House Profile & Style', zh: '建筑画像与特征标签', es: 'Perfil y estilo' },
         { target: 'remodel', en: 'Remodel, Rebuild & Lawn', zh: '翻新、推倒重建与草坪', es: 'Remodelar y reconstruir' },
         { target: 'fengshui', en: '堪舆风水', zh: '堪舆风水罗盘排盘', es: '堪舆风水', zhOnly: true },
@@ -2734,6 +3199,7 @@
     if (scrim) scrim.hidden = !(_tocState.mobileOpen && isNarrowViewport());
     syncRoleBriefAriaLabelledBy();
     syncTocScrollFade();
+    syncStickyHeaderVars();
   }
 
   function setTocSidebarOpen(shouldOpen) {
@@ -2960,6 +3426,11 @@
     }
     if (best !== _tocState.activeTarget) {
       syncTocActiveHighlight(best);
+      var scrolledQ = best === 'overview' ? null : resolveQuestionForTargetId(best);
+      if (scrolledQ !== activeQuestion) {
+        activeQuestion = scrolledQ;
+        syncStickyJumpHighlight();
+      }
     }
   }
 
@@ -3107,6 +3578,10 @@
 
     var targetEl = byId(clean) || byId(norm) || (qId && Q_BY_ID[qId] ? byId(Q_BY_ID[qId].cardId) : null);
     if (targetEl) {
+      var evDrawer = typeof targetEl.closest === 'function' ? targetEl.closest('details.sec-evidence-drawer') : null;
+      if (evDrawer && !evDrawer.open) {
+        evDrawer.open = true;
+      }
       _tocScrollSuppressUntil = Date.now() + (smooth ? 1300 : 250);
       syncTocActiveHighlight(clean);
       scrollToElementWithStickyOffset(targetEl, Boolean(smooth));
@@ -3383,9 +3858,12 @@
     var rawProv = pm.provenanceNote || pm.historicalBanner || '';
     var cleanProv = _RE_PORTAL_NAMES.test(rawProv) ? '' : rawProv;
     _RE_PORTAL_NAMES.lastIndex = 0;
+    var showRefLinks = isDisplayLinksOn();
     var provNote = cleanProv || (hasSale
       ? L3('Includes verified historical sale/listing imagery alongside current aerial & street archives.', '包含已核实的上次成交挂牌照片及最新正射航拍/街景档案。', 'Incluye fotos históricas verificadas de venta junto con archivos aéreos y de calle.')
-      : L3('Off-market property: displaying verified ortho-aerial, parcel setback, and street-corridor archives (zero synthetic interior photos). Open street & aerial links above for curbside and oblique views.', '当前非在售房源：展示经核实的正射航拍、宗地退界与街景档案（绝不伪造室内图）；点击上方街景与航拍入口可查看户外视角。', 'Propiedad fuera de mercado: mostrando archivos aéreos y catastrales verificados (sin interiores sintéticos). Use los enlaces de calle y vista aérea arriba.'));
+      : (showRefLinks
+        ? L3('Off-market property: displaying verified ortho-aerial, parcel setback, and street-corridor archives (zero synthetic interior photos). Open street & aerial links above for curbside and oblique views.', '当前非在售房源：展示经核实的正射航拍、宗地退界与街景档案（绝不伪造室内图）；点击上方街景与航拍入口可查看户外视角。', 'Propiedad fuera de mercado: mostrando archivos aéreos y catastrales verificados (sin interiores sintéticos). Use los enlaces de calle y vista aérea arriba.')
+        : L3('Off-market property: displaying verified ortho-aerial, parcel setback, and street-corridor archives (zero synthetic interior photos).', '当前非在售房源：展示经核实的正射航拍、宗地退界与街景档案（绝不伪造室内图）。', 'Propiedad fuera de mercado: mostrando archivos aéreos y catastrales verificados (sin interiores sintéticos).')));
 
     return {
       hasSalePhotos: hasSale,
@@ -3396,6 +3874,20 @@
       items: items,
       externalGalleryLinks: extLinks
     };
+  }
+
+  function isDisplayLinksOn() {
+    if (Core && typeof Core.isDisplayLinksEnabled === 'function') {
+      return Core.isDisplayLinksEnabled();
+    }
+    if (typeof window !== 'undefined' && window.OpenEstateCore && typeof window.OpenEstateCore.isDisplayLinksEnabled === 'function') {
+      return window.OpenEstateCore.isDisplayLinksEnabled();
+    }
+    try {
+      var m = (document.cookie || '').match(/(?:^|;\s*)display_link=([^;]*)/);
+      if (m) return decodeURIComponent(m[1].trim()) === '1';
+    } catch (e) {}
+    return Boolean(typeof document !== 'undefined' && document.documentElement && document.documentElement.getAttribute('data-display-links') === '1');
   }
 
   var _plbState = { open: false, idx: 0, items: [] };
@@ -3430,7 +3922,7 @@
       '</div>';
     }
 
-    var portalsHtml = media.externalGalleryLinks.map(function (lk) {
+    var portalsHtml = !isDisplayLinksOn() ? '' : media.externalGalleryLinks.map(function (lk) {
       var lbl = String(lk.label || 'Portal');
       var hasArrow = lbl.indexOf('↗') >= 0;
       return '<a class="media-ext-pill" href="' + esc(lk.url) + '" target="_blank" rel="noopener">' +
@@ -3575,7 +4067,7 @@
         '</div>' +
         '<div class="plb-foot">' +
           '<div class="plb-cap">' + esc(cur.caption) + ' · <span style="color:#94a3b8">' + esc(cur.sourceName) + '</span>' +
-            (cur.sourceUrl ? ' · <a href="' + esc(cur.sourceUrl) + '" target="_blank" rel="noopener" style="color:#5eead4">Source ↗</a>' : '') +
+            (cur.sourceUrl && isDisplayLinksOn() ? ' · <a href="' + esc(cur.sourceUrl) + '" target="_blank" rel="noopener" style="color:#5eead4">Source ↗</a>' : '') +
           '</div>' +
           '<div class="plb-thumbs">' +
             _plbState.items.map(function (it, i) {
@@ -4214,9 +4706,10 @@
     var iq = normalizeInsuranceQuotes(rep);
 
     function rowBar(lbl, val, max, col, suffix) {
-      var pct = isN(val) && max > 0 ? Math.max(4, Math.min(100, Math.round((val / max) * 100))) : 0;
+      if (!isN(val)) return '';
+      var pct = max > 0 ? Math.max(4, Math.min(100, Math.round((val / max) * 100))) : 0;
       return '<div class="wt-vbar">' +
-        '<div class="wt-vtop"><span>' + esc(lbl) + '</span><b>' + (isN(val) ? (suffix === 'usd' ? fUsd(val) : suffix === 'usdk' ? fUsdK(val) : (Math.round(val) + (suffix || ''))) : '—') + '</b></div>' +
+        '<div class="wt-vtop"><span>' + esc(lbl) + '</span><b>' + (suffix === 'usd' ? fUsd(val) : suffix === 'usdk' ? fUsdK(val) : (Math.round(val) + (suffix || ''))) + '</b></div>' +
         '<div class="meter"><i style="width:' + pct + '%;background:' + col + '"></i></div>' +
       '</div>';
     }
@@ -4374,10 +4867,14 @@
             '<div class="wt-tag">' + esc(sl.tag) + '</div>' +
             '<h2 class="wt-title" id="wtSlideTitle">' + esc(sl.title) + '</h2>' +
             (sl.subtitle ? '<div class="wt-sub">' + esc(sl.subtitle) + '</div>' : '') +
-            '<div class="wt-hero-stat ' + esc(sl.heroTone) + '">' +
-              '<div class="wt-hs-val">' + esc(sl.heroValue) + '</div>' +
-              '<div class="wt-hs-lbl">' + esc(sl.heroLabel) + '</div>' +
-            '</div>' +
+            ((function () {
+              var hv = String(sl.heroValue == null ? '' : sl.heroValue).trim();
+              if (!hv || hv === '—' || hv === '-' || hv.toUpperCase() === 'N/A') return '';
+              return '<div class="wt-hero-stat ' + esc(sl.heroTone) + '">' +
+                '<div class="wt-hs-val">' + esc(hv) + '</div>' +
+                '<div class="wt-hs-lbl">' + esc(sl.heroLabel) + '</div>' +
+              '</div>';
+            })()) +
             '<ul class="wt-points">' +
               sl.criticalPoints.map(function (pt) {
                 return '<li><span class="wt-pt-ico">✓</span><span>' + esc(pt) + '</span></li>';
@@ -4693,7 +5190,7 @@
         '<td class="n"><b>' + fUsd(mVal) + L3('/mo', '/月', '/mes') + '</b></td>' +
         '<td class="n">' + fUsd(aVal) + L3('/yr', '/年', '/año') + '</td>' +
         '<td class="small" style="min-width:200px">' + esc(noteTxt) + '</td>' +
-        '<td class="n">' + (c.quoteUrl ? '<a class="copybtn" style="text-decoration:none;white-space:nowrap" href="' + esc(c.quoteUrl) + '" target="_blank" rel="noopener">' + esc(L3('Quote ↗', '核价 ↗', 'Cotizar ↗')) + '</a>' : '—') + '</td>' +
+        (isDisplayLinksOn() ? '<td class="n oe-ref-col">' + (c.quoteUrl ? '<a class="copybtn" style="text-decoration:none;white-space:nowrap" href="' + esc(c.quoteUrl) + '" target="_blank" rel="noopener">' + esc(L3('Quote ↗', '核价 ↗', 'Cotizar ↗')) + '</a>' : '—') + '</td>' : '') +
       '</tr>';
     }).join('');
 
@@ -4792,8 +5289,8 @@
 
         (carriersHtml
           ? '<div class="sub" style="margin-top:14px">' + span3('Representative Carrier Comparison (' + fUsd(activeOpt.deductible) + ' Deductible)', '代表性持牌保险公司与机构横向对比（按 ' + fUsd(activeOpt.deductible) + ' 免赔额折算）', 'Comparación de Aseguradoras (Deducible ' + fUsd(activeOpt.deductible) + ')') + '</div>' +
-            '<div class="scroll"><table class="t" id="insCarrierTable">' +
-              '<thead><tr><th>' + span3('Carrier & Tier', '保险机构与级别', 'Aseguradora y Nivel') + '</th><th>' + span3('Market Status', '牌照状态', 'Estado') + '</th><th class="n">' + span3('Est. Monthly', '预估月保费', 'Mensual Est.') + '</th><th class="n">' + span3('Est. Annual', '预估年保费', 'Anual Est.') + '</th><th>' + span3('Underwriting Notes', '核保要点说明', 'Notas de Suscripción') + '</th><th class="n"></th></tr></thead>' +
+            '<div class="scroll"><table class="t" id="insCarrierTable" data-no-clamp="1">' +
+              '<thead><tr><th>' + span3('Carrier & Tier', '保险机构与级别', 'Aseguradora y Nivel') + '</th><th>' + span3('Market Status', '牌照状态', 'Estado') + '</th><th class="n">' + span3('Est. Monthly', '预估月保费', 'Mensual Est.') + '</th><th class="n">' + span3('Est. Annual', '预估年保费', 'Anual Est.') + '</th><th>' + span3('Underwriting Notes', '核保要点说明', 'Notas de Suscripción') + '</th>' + (isDisplayLinksOn() ? '<th class="n oe-ref-col"></th>' : '') + '</tr></thead>' +
               '<tbody>' + carriersHtml + '</tbody>' +
             '</table></div>'
           : '') +
@@ -5718,9 +6215,9 @@
       var srcText = idxMeta.isSharedIndex ? String(ex.source || '') : cleanPublicText(ex.source || '');
       var rawSrcUrl = (ex.sourceUrl && /^https?:\/\//i.test(String(ex.sourceUrl))) ? String(ex.sourceUrl) : '';
       var safeUrl = idxMeta.isSharedIndex ? rawSrcUrl : ((rawSrcUrl && !_RE_PORTAL_HOST.test(rawSrcUrl)) ? rawSrcUrl : '');
-      var srcHtml = safeUrl
+      var srcHtml = (safeUrl && isDisplayLinksOn())
         ? '<a href="' + esc(safeUrl) + '" target="_blank" rel="noopener noreferrer" style="color:var(--pri,#0f766e);text-decoration:none">' + esc(srcText || _hostLabelFromUrl(safeUrl) || 'Source') + ' ↗</a>'
-        : esc(srcText);
+        : esc(srcText || (safeUrl ? _hostLabelFromUrl(safeUrl) : '') || '');
 
       var specBits = [];
       if (isN(ex.beds)) specBits.push(ex.beds + ' bd');
@@ -5975,6 +6472,7 @@
   }
 
   function refLinkAttrs(rawUrl, section, dataId, label) {
+    if (!isDisplayLinksOn()) return '';
     var direct = safeHttpUrl(rawUrl);
     if (!direct) return '';
     var href = direct;
@@ -6162,40 +6660,138 @@
     var vs = ins.vintageSystems || {};
     var fc = bi.futureChangeRadar || {};
     var zn = fc.zoningInfillContext || {};
+    var tod = bi.todRezoningRadar || fc.todRezoningRadar || {};
+    var ct = bi.cellTowers || {};
     var m5 = bi.mobile5gCoverage || {};
     var ns = bi.timeOfDayNoise || {};
     var el = bi.electrificationPayback || {};
+    var evExt = bi.evElectrification || (rep && rep.evElectrification) || {};
     var st = bi.strAndAduRules || {};
     var strObj = st.shortTermRental || {};
     var aduObj = st.aduAndJadu || {};
 
     var mProj = Array.isArray(fc.mappedProjects) ? fc.mappedProjects.slice(0, 4) : [];
+    var cFoot = Array.isArray(tod.constructionFootprintsHalfMi) ? tod.constructionFootprintsHalfMi.slice(0, 3) : [];
     var projHtml = mProj.length
       ? '<ul style="margin:6px 0 0;padding-left:18px;font-size:12.3px;color:var(--ink2)">' + mProj.map(function (p) {
           return '<li><b>' + esc(cleanPublicText(p.name)) + '</b> (' + esc(cleanPublicText(p.categoryLabel || '')) +
             (isN(p.distanceMiles) ? ', ' + p.distanceMiles.toFixed(2) + ' mi' : '') + ')</li>';
         }).join('') + '</ul>'
-      : '<div class="small" style="margin-top:6px">' + span3('Zero active municipal development applications mapped within search radius.', '检索半径内未发现已立案的在建/规划申报项目。', 'Cero proyectos municipales activos mapeados en el radio.') + '</div>';
+      : cFoot.length
+        ? '<ul style="margin:6px 0 0;padding-left:18px;font-size:12.3px;color:var(--ink2)">' + cFoot.map(function (c) {
+            return '<li><b>' + esc(cleanPublicText(c.name || c.kind || 'Construction / Proposed')) + '</b>' +
+              (isN(c.distanceMi) ? ' (' + Number(c.distanceMi).toFixed(2) + ' mi ' + esc(c.direction || '') + ')' : '') + '</li>';
+          }).join('') + '</ul>'
+        : '<div class="small" style="margin-top:6px">' + span3('Zero active municipal development applications mapped within search radius.', '检索半径内未发现已立案的在建/规划申报项目。', 'Cero proyectos municipales activos mapeados en el radio.') + '</div>';
 
     var overlays = Array.isArray(zn.statutoryUpzoningOverlays) ? zn.statutoryUpzoningOverlays.filter(function (o) { return o && o.applies; }) : [];
+    var todTriggers = Array.isArray(tod.statutoryTodTriggers) ? tod.statutoryTodTriggers.filter(function (t) { return t && t.triggered; }) : [];
+    var nearMajorStop = tod.nearestMajorTransitStop || null;
+    var todExtraHtml = '';
+    if (todTriggers.length) {
+      todExtraHtml += '<div class="small" style="margin-top:6px"><b>' + span3('0.50-mi Statutory TOD Trigger:', '0.5 英里法定 TOD 加密触发：', 'Activación legal TOD (0.50 mi):') + '</b> ' +
+        todTriggers.map(function (t) {
+          return '<span class="pill info" style="margin-right:4px">' + esc(cleanPublicText(t.statuteCode || t.statuteId || t.title || 'TOD')) + '</span>';
+        }).join('') + '</div>';
+    }
+    if (nearMajorStop && nearMajorStop.name) {
+      todExtraHtml += '<div class="small" style="margin-top:5px"><b>' + span3('Nearest Major Transit:', '最近骨干公交/轨交站：', 'Parada principal más cercana:') + '</b> ' +
+        esc(cleanPublicText(nearMajorStop.name)) +
+        (nearMajorStop.modeLabel ? ' (' + esc(cleanPublicText(nearMajorStop.modeLabel)) + ')' : '') +
+        (isN(nearMajorStop.distanceMi) ? ' · ' + Number(nearMajorStop.distanceMi).toFixed(2) + ' mi ' + esc(nearMajorStop.direction || '') : '') + '</div>';
+    }
+
     var carriers = Array.isArray(m5.carriers) ? m5.carriers : [];
     var ev = el.evLevel2Charging || {};
     var hp = el.heatPumpComparison || {};
     var sb = el.solarAndBatteryPayback || {};
     var portalAttrs = refLinkAttrs(fc.municipalPortalUrl, 'living_intel', 'city_permits', fc.municipalPortalName || 'City Planning Portal');
-    var fccAttrs = refLinkAttrs(m5.fccMobileMapUrl, 'living_intel', 'fcc_mobile_5g', 'FCC Broadband Map');
+    var fccAttrs = refLinkAttrs(m5.fccMobileMapUrl || m5.sourceUrl, 'living_intel', 'fcc_mobile_5g', 'FCC Broadband Map');
+    var afdcAttrs = refLinkAttrs(evExt.referenceUrl, 'living_intel', 'doe_afdc_ev', 'DOE AFDC Stations');
 
     var hasCarrierPcts = m5.available !== false && carriers.some(function (c) { return isN(c.outdoor5gNr35x3) || isN(c.outdoor4gLte5x1); });
+    var hasCarrierH3 = m5.available !== false && !hasCarrierPcts && carriers.some(function (c) {
+      return c && (typeof c.bestTier === 'string' || (c.nr35x3 && typeof c.nr35x3.covered === 'boolean') || typeof c.outdoor5gNr35x3 === 'string');
+    });
     var m5Unavail = m5.status === 'unavailable' || m5.status === 'unconfigured' || m5.available === false || /unavail|unconfig/i.test(String(m5.provenance || ''));
-    var carrierHtml = hasCarrierPcts
-      ? '<div class="small">' + carriers.map(function (c) {
-          return '<b>' + esc(c.carrierName) + '</b>: 5G ' + esc(isN(c.outdoor5gNr35x3) ? (c.outdoor5gNr35x3.toFixed(0) + '%') : '—') + ' / 4G ' + esc(isN(c.outdoor4gLte5x1) ? (c.outdoor4gLte5x1.toFixed(0) + '%') : '—');
-        }).join(' · ') + '</div>'
-      : '<div class="small">' + esc(cleanPublicText(m5.reason || m5.indoorPenetrationNote || m5.dbmHonestyNote || L3(
-          'Live FCC carrier coverage tiers unavailable here — check the official FCC Broadband Map for this address.',
-          '暂未获取实时运营商 5G/4G 覆盖数据 — 请在下方 FCC 官方信号地图核查门牌信号。',
-          'Cobertura 5G/4G por operador no disponible aquí — consulte el mapa oficial FCC.'
-        ))) + '</div>';
+    var carrierHtml = '';
+    if (hasCarrierPcts) {
+      carrierHtml = '<div class="small">' + carriers.map(function (c) {
+        return '<b>' + esc(c.carrierName) + '</b>: 5G ' + esc(isN(c.outdoor5gNr35x3) ? (c.outdoor5gNr35x3.toFixed(0) + '%') : '—') + ' / 4G ' + esc(isN(c.outdoor4gLte5x1) ? (c.outdoor4gLte5x1.toFixed(0) + '%') : '—');
+      }).join(' · ') + '</div>';
+    } else if (hasCarrierH3) {
+      carrierHtml =
+        (m5.h3Id ? '<div class="small" style="margin-bottom:5px;color:var(--muted)">' +
+          span3('FCC BDC H3 Res-8 Cell ', 'FCC BDC H3 八级网格 ', 'Celda H3 Res-8 FCC ') +
+          '<code style="font-size:11px;padding:1px 5px;border-radius:4px;background:var(--soft);color:var(--ink)">' + esc(m5.h3Id) + '</code>' +
+          (m5.bestAvailableTier ? ' · ' + esc(cleanPublicText(m5.bestAvailableTier)) : '') +
+        '</div>' : '') +
+        '<div style="display:flex;flex-direction:column;gap:4px;margin-top:4px">' +
+        carriers.map(function (c) {
+          var nr35 = c.nr35x3 || {};
+          var nr7 = c.nr7x1 || {};
+          var lte = c.lte5x1 || {};
+          var tierBadge = nr35.inVehicleMobile
+            ? span3('5G 35/3 In-Vehicle + Outdoor', '5G 35/3 车载+室外', '5G 35/3 Vehículo + Exterior')
+            : (nr35.covered || c.bestTier === '5g_nr_35_3')
+              ? span3('5G 35/3 Outdoor Stationary', '5G 35/3 室外驻留', '5G 35/3 Exterior fijo')
+              : (nr7.covered || c.bestTier === '5g_nr_7_1')
+                ? span3('5G 7/1 Outdoor', '5G 7/1 室外', '5G 7/1 Exterior')
+                : (lte.covered || c.bestTier === '4g_lte_5_1')
+                  ? span3('4G LTE 5/1 Outdoor', '4G LTE 5/1 室外', '4G LTE 5/1 Exterior')
+                  : span3('Not filed in H3 cell', '网格内未申报覆盖', 'No reportado en celda H3');
+          var pillCls = (nr35.covered || c.bestTier === '5g_nr_35_3') ? 'good' : (nr7.covered || lte.covered) ? 'info' : 'mute';
+          var rsrp = isN(c.modeledOutdoorMinRsrpDbm) ? ' · ' + span3('Outdoor min RSRP ≥ ', '室外模型最低 RSRP ≥ ', 'RSRP mín. exterior ≥ ') + Math.round(c.modeledOutdoorMinRsrpDbm) + ' dBm' : '';
+          return '<div class="small" style="display:flex;flex-wrap:wrap;align-items:center;gap:6px"><b>' + esc(c.carrierName) + ':</b> <span class="pill ' + pillCls + '">' + tierBadge + '</span><span style="color:var(--muted);font-size:11.5px">' + rsrp + '</span></div>';
+        }).join('') +
+        '</div>' +
+        '<div class="small" style="margin-top:4px;font-size:11px;color:var(--muted)">' +
+          span3('FCC BDC outdoor link-budget threshold — never indoor signal bars.', '注：RSRP 为 FCC 室外链路预算最低门槛，并非室内手机信号格数。', 'Umbral exterior modelado por FCC BDC — no barras de señal interior.') +
+        '</div>';
+    } else {
+      carrierHtml = '<div class="small">' + esc(cleanPublicText(m5.reason || m5.indoorPenetrationNote || m5.dbmHonestyNote || (fccAttrs ? L3(
+        'Live FCC carrier coverage tiers unavailable here — check the official FCC Broadband Map for this address.',
+        '暂未获取实时运营商 5G/4G 覆盖数据 — 请在下方 FCC 官方信号地图核查门牌信号。',
+        'Cobertura 5G/4G por operador no disponible aquí — consulte el mapa oficial FCC.'
+      ) : L3(
+        'Live FCC carrier coverage tiers unavailable for this address.',
+        '暂未获取该地址的实时运营商 5G/4G 覆盖数据。',
+        'Cobertura 5G/4G por operador no disponible para esta dirección.'
+      )))) + '</div>';
+    }
+
+    var nearTower = ct.nearestTower || bi.nearestMappedTower || null;
+    var towerHtml = (isN(ct.towersWithinOneMiCount) || nearTower)
+      ? '<div class="small" style="margin-top:6px;padding-top:6px;border-top:1px dashed var(--line)"><b>' +
+          span3('FCC ASR / Cellular Towers (1 mi):', '1 英里内注册通信铁塔：', 'Torres celulares FCC (1 mi):') + '</b> ' +
+          (isN(ct.towersWithinOneMiCount) ? ct.towersWithinOneMiCount + ' ' + span3('mapped', '座已核验', 'mapeadas') : '') +
+          (nearTower ? ' · ' + span3('Nearest ', '最近 ', 'Más cercana ') + esc(cleanPublicText(nearTower.ownerOrOperator || 'Tower')) +
+            (isN(nearTower.distanceMi) ? ' (' + Number(nearTower.distanceMi).toFixed(2) + ' mi ' + esc(nearTower.direction || '') +
+              (isN(nearTower.heightFt) ? ', ' + Math.round(nearTower.heightFt) + ' ft AGL' : '') + ')' : '') : '') +
+          (ct.withinFallZoneBuffer ? ' · <span class="pill bad">' + span3('Within Fall-Zone Buffer', '处于倒塔安全缓冲内', 'Dentro de zona de caída') + '</span>' : '') +
+        '</div>'
+      : '';
+
+    var pubChg = evExt.publicCharging || {};
+    var pnlRdy = evExt.panelReadiness || {};
+    var homeEvExt = evExt.homeEvCharging || {};
+    var dcfcHtml = isN(pubChg.dcfcStationsWithin5Mi)
+      ? '<div class="small" style="margin-top:5px"><b>' + span3('Public DC Fast Chargers:', '周边公共直流超充：', 'Cargadores rápidos DCFC:') + '</b> ' +
+          pubChg.dcfcStationsWithin3Mi + ' ' + span3('within 3 mi', '（3 英里内）', 'a 3 mi') + ' / ' +
+          pubChg.dcfcStationsWithin5Mi + ' ' + span3('within 5 mi', '（5 英里内）', 'a 5 mi') +
+          (pubChg.connectorStationCounts ? ' · NACS ' + (pubChg.connectorStationCounts.nacs || 0) + ' · CCS ' + (pubChg.connectorStationCounts.ccs || 0) : '') +
+          (pubChg.nearestDcfcStation && pubChg.nearestDcfcStation.name
+            ? ' · ' + span3('Nearest: ', '最近：', 'Más cercano: ') + esc(cleanPublicText(pubChg.nearestDcfcStation.name)) +
+              (isN(pubChg.nearestDcfcStation.distanceMi) ? ' (' + Number(pubChg.nearestDcfcStation.distanceMi).toFixed(2) + ' mi)' : '')
+            : '') +
+        '</div>'
+      : '';
+    var panelHtml = pnlRdy.estimatedPanelClass || pnlRdy.recommendation
+      ? '<div class="small" style="margin-top:5px"><b>' + span3('200A Panel Readiness:', '200A 电箱与慢充就绪度：', 'Tablero eléctrico 200A:') + '</b> ' +
+          (pnlRdy.estimatedPanelClass ? '<span class="pill ' + (pnlRdy.panelUpgradeLikelyNeeded ? 'watch' : 'good') + '">' + esc(humanRadarEnum(pnlRdy.estimatedPanelClass)) + '</span> ' : '') +
+          (pnlRdy.loadSplitterAlternativeApplicable ? '<span class="pill info">' + span3('NEC 625.42 Load-Splitter Option', '支持 NEC 625.42 智能分流器', 'Divisor de carga NEC 625.42') + '</span> ' : '') +
+        '</div>'
+      : '';
 
     mount.innerHTML =
       '<div class="eyebrow">' + span3('Buyer Insurability & Living Intelligence', '买家投保悬崖、5G 信号与居住深度核查', 'Seguro, 5G, Ruido y Normas de Vida') + '</div>' +
@@ -6225,15 +6821,17 @@
             (zn.infillExposureTier ? '<b>' + span3('Infill Exposure:', '加密开发敏感度：', 'Exposición infill:') + '</b> ' + esc(humanRadarEnum(zn.infillExposureTier)) : '') +
           '</div>' +
           (overlays.length ? '<div class="small" style="margin-top:6px"><b>' + span3('Applicable Overlays:', '适用法定叠加条款：', 'Normas aplicables:') + '</b> ' + esc(overlays.map(function (o) { return humanRadarEnum(o.code || o.title); }).join(', ')) + '</div>' : '') +
+          todExtraHtml +
           projHtml +
           (portalAttrs ? '<div class="small" style="margin-top:6px"><a ' + portalAttrs + ' target="_blank" rel="noopener noreferrer">' + esc(cleanPublicText(fc.municipalPortalName || L3('City Planning Portal', '市政规划官网', 'Portal municipal'))) + '</a></div>' : '') +
         '</div>' +
 
         '<div class="studio-subcard">' +
-          '<h3>' + span3('Mobile 5G Coverage & Day/Night Noise', '蜂窝 5G 覆盖与昼夜分时噪音', 'Cobertura 5G y Ruido Día/Noche') +
+          '<h3>' + span3('Mobile 5G Coverage, Towers & Noise', '蜂窝 5G 覆盖、周边基站与分时噪音', 'Cobertura 5G, Torres y Ruido') +
             (m5.provenance ? '<span class="pill ' + (m5Unavail ? 'mute' : 'info') + '">' + esc(humanRadarEnum(m5.provenance)) + '</span>' : '') +
           '</h3>' +
           carrierHtml +
+          towerHtml +
           (ns.laeq24hBandLabel || isN(ns.nighttimeDb)
             ? '<div class="small" style="margin-top:6px"><b>' + span3('Noise Profile:', '噪音画像：', 'Perfil acústico:') + '</b> ' +
               esc(cleanPublicText(ns.laeq24hBandLabel || '')) +
@@ -6245,11 +6843,17 @@
         '</div>' +
 
         '<div class="studio-subcard">' +
-          '<h3>' + span3('Electrification, STR & ADU Rules', '电气化节能、短租与 ADU 加建规则', 'Electrificación, STR y ADU') + '</h3>' +
+          '<h3>' + span3('EV Charging, 200A Panel, STR & ADU', '充电超充、200A 电箱、短租与 ADU', 'Carga EV, Tablero 200A, STR y ADU') + '</h3>' +
           (ev.available
             ? '<div class="small"><b>' + span3('Home EV Level-2:', '家用慢充：', 'Carga EV Nivel 2:') + '</b> ' + esc(fUsd(ev.costPer1000MilesUsd)) + '/1k mi' +
               (isN(ev.gasVehicleCostPer1000MilesUsd) ? ' vs ' + esc(fUsd(ev.gasVehicleCostPer1000MilesUsd)) + ' ' + span3('gas', '油车', 'gasolina') : '') +
-              (isN(ev.estimatedAnnualSavingsAt12kMilesUsd) ? ' (' + esc(fUsd(ev.estimatedAnnualSavingsAt12kMilesUsd)) + '/yr)' : '') + '</div>' : '') +
+              (isN(ev.estimatedAnnualSavingsAt12kMilesUsd) ? ' (' + esc(fUsd(ev.estimatedAnnualSavingsAt12kMilesUsd)) + '/yr)' : '') + '</div>'
+            : (isN(homeEvExt.offPeakCostPer1000MiUsd) || isN(homeEvExt.blendedCostPer1000MiUsd))
+              ? '<div class="small"><b>' + span3('Home EV Level-2:', '家用慢充：', 'Carga EV Nivel 2:') + '</b> ' +
+                esc(fUsd(isN(homeEvExt.offPeakCostPer1000MiUsd) ? homeEvExt.offPeakCostPer1000MiUsd : homeEvExt.blendedCostPer1000MiUsd)) + '/1k mi</div>'
+              : '') +
+          dcfcHtml +
+          panelHtml +
           (hp.available
             ? '<div class="small" style="margin-top:5px"><b>' + span3('Heat Pump vs Gas:', '热泵 vs 燃气供暖：', 'Bomba de calor vs Gas:') + '</b> ' +
               esc(fUsd(hp.heatPumpCostPerDeliveredMmbtuUsd)) + ' vs ' + esc(fUsd(hp.gasCostPerDeliveredMmbtuUsd)) + '/MMBtu</div>' : '') +
@@ -6260,6 +6864,7 @@
             (strObj.regulatoryTier ? '<b>STR:</b> ' + esc(humanRadarEnum(strObj.regulatoryTier)) + ' · ' : '') +
             (aduObj.feasibilityTier ? '<b>ADU:</b> ' + esc(humanRadarEnum(aduObj.feasibilityTier)) + (isN(aduObj.statutoryMaxDetachedAduSqft) ? ' (' + aduObj.statutoryMaxDetachedAduSqft + ' sq ft max)' : '') : '') +
           '</div>' +
+          (afdcAttrs ? '<div class="small" style="margin-top:6px"><a ' + afdcAttrs + ' target="_blank" rel="noopener noreferrer">' + span3('Open DOE AFDC Charger Map', '查看美国能源部充电桩地图', 'Ver mapa DOE AFDC') + '</a></div>' : '') +
         '</div>' +
       '</div>' +
       (bi.disclaimer ? '<div class="small" style="margin-top:8px">' + esc(cleanPublicText(bi.disclaimer)) + '</div>' : '');
@@ -6652,6 +7257,16 @@
       if (ev.key === 'Escape') { ev.preventDefault(); closePhotoLightbox(); }
       else if (ev.key === 'ArrowRight') { stepPhotoLightbox(1); }
       else if (ev.key === 'ArrowLeft') { stepPhotoLightbox(-1); }
+      return;
+    }
+    if (!ev.defaultPrevented && !ev.metaKey && !ev.ctrlKey && !ev.altKey && (ev.key === 'd' || ev.key === 'D')) {
+      var tgt = ev.target || document.activeElement;
+      var tag = tgt && tgt.tagName ? String(tgt.tagName).toUpperCase() : '';
+      var isEditable = tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || Boolean(tgt && (tgt.isContentEditable || (typeof tgt.closest === 'function' && tgt.closest('[contenteditable="true"]'))));
+      if (!isEditable && !(document.body && document.body.classList && document.body.classList.contains('db-cmd-active'))) {
+        ev.preventDefault();
+        setDensity(getDensity() === 'full' ? 'brief' : 'full', { fromUser: true });
+      }
     }
   });
 
@@ -6669,6 +7284,7 @@
   function refreshAllWorkspaceViews() {
     if (document.documentElement && typeof document.documentElement.setAttribute === 'function') {
       document.documentElement.setAttribute('data-role', getRole());
+      document.documentElement.setAttribute('data-density', getDensity());
     }
     syncFengShuiLanguageVisibility();
     renderInsuranceQuoteStudio();
@@ -6683,7 +7299,9 @@
     renderHeroMediaHub();
     renderRoleFocusBrief();
     renderChapterBar();
+    renderWorkspaceToolbar();
     renderQuestionCards();
+    applyProgressiveDisclosure();
     renderRoleHiddenNote();
     renderReportTocTree();
     bindTocGlobalEvents();
@@ -6710,9 +7328,15 @@
     }
     var potDrawer = byId('qDrawerPotential');
     var h3 = byId('house3d');
+    var sol = byId('solar');
     var hs = byId('house');
-    if (potDrawer && h3 && hs && h3.parentNode === potDrawer && hs.parentNode === potDrawer && typeof potDrawer.insertBefore === 'function') {
-      try { potDrawer.insertBefore(h3, hs); } catch (e) {}
+    if (potDrawer && hs && hs.parentNode === potDrawer && typeof potDrawer.insertBefore === 'function') {
+      if (h3 && h3.parentNode === potDrawer) {
+        try { potDrawer.insertBefore(h3, hs); } catch (e) {}
+      }
+      if (sol && sol.parentNode === potDrawer) {
+        try { potDrawer.insertBefore(sol, hs); } catch (e) {}
+      }
     }
   }
 
@@ -6725,6 +7349,7 @@
 
   function bootWorkspace() {
     ensureQuestionCardsCanonicalDomOrder();
+    syncInitialActiveTocBranch();
     bindChapterAutoActivation();
     refreshAllWorkspaceViews();
     var initialTarget = detectInitialChapter();
@@ -6734,6 +7359,10 @@
       syncDrawerFromLocationHash(true);
     }
     syncStickyHeaderVars();
+    setTimeout(function () {
+      applyProgressiveDisclosure();
+      syncStickyHeaderVars();
+    }, 0);
     if (!window.__DB_BOUND_STICKY_RESIZE__ && typeof window.addEventListener === 'function') {
       window.__DB_BOUND_STICKY_RESIZE__ = true;
       window.addEventListener('resize', syncStickyHeaderVars);
@@ -6764,6 +7393,9 @@
   window.OpenEstateWorkspace = {
     setRole: setRole,
     getRole: getRole,
+    getDensity: getDensity,
+    setDensity: setDensity,
+    applyProgressiveDisclosure: applyProgressiveDisclosure,
     getRoleCardDomIds: getRoleCardDomIds,
     renderRoleBrief: renderRoleFocusBrief,
     renderRoleSwitchers: renderRoleSwitchers,

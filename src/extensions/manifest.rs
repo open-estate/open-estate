@@ -27,6 +27,7 @@ use prost_types::{
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use serde_json_path::JsonPath;
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 /// Validation scope distinguishing open-source `public/extensions/*` manifests from
@@ -44,12 +45,569 @@ pub enum ManifestValidationOrigin {
 
 /// Normalize a city or county label for case- and punctuation-insensitive matching.
 pub fn norm_geo_token(s: &str) -> String {
-    s.trim()
-        .to_ascii_lowercase()
-        .replace('.', "")
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
+    let mut out = String::with_capacity(s.len());
+    let mut pending_space = false;
+    for ch in s.trim().chars() {
+        if ch == '.' {
+            continue;
+        }
+        if ch.is_whitespace() {
+            if !out.is_empty() {
+                pending_space = true;
+            }
+        } else {
+            if pending_space {
+                out.push(' ');
+                pending_space = false;
+            }
+            out.push(ch.to_ascii_lowercase());
+        }
+    }
+    out
+}
+
+/// Single-pass uppercase normalization for pre-indexed `GeoIndex` keys (zero intermediate `Vec`s).
+pub fn norm_geo_upper(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut pending_space = false;
+    for ch in s.trim().chars() {
+        if ch == '.' {
+            continue;
+        }
+        if ch.is_whitespace() {
+            if !out.is_empty() {
+                pending_space = true;
+            }
+        } else {
+            if pending_space {
+                out.push(' ');
+                pending_space = false;
+            }
+            out.push(ch.to_ascii_uppercase());
+        }
+    }
+    out
+}
+
+fn strip_county_suffix_upper(norm_upper: &str) -> &str {
+    let stripped = norm_upper.strip_suffix(" COUNTY").unwrap_or(norm_upper).trim();
+    if stripped.is_empty() {
+        norm_upper
+    } else {
+        stripped
+    }
+}
+
+fn canonicalize_country_upper(raw: &str) -> Cow<'static, str> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty()
+        || trimmed.eq_ignore_ascii_case("US")
+        || trimmed.eq_ignore_ascii_case("USA")
+        || trimmed.eq_ignore_ascii_case("UNITED STATES")
+    {
+        Cow::Borrowed("US")
+    } else if trimmed == "*" {
+        Cow::Borrowed("*")
+    } else {
+        Cow::Owned(trimmed.to_ascii_uppercase())
+    }
+}
+
+/// Orthogonal Axis 1: Geographic jurisdiction tier of an extension (`refresh_snapshot` index).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum JurisdictionTier {
+    National,
+    State,
+    County,
+    Municipal,
+    DistrictOrZip,
+}
+
+impl JurisdictionTier {
+    pub const ALL_SLUGS: &'static [&'static str] = &[
+        "national",
+        "state",
+        "county",
+        "municipal",
+        "district_or_zip",
+    ];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::National => "national",
+            Self::State => "state",
+            Self::County => "county",
+            Self::Municipal => "municipal",
+            Self::DistrictOrZip => "district_or_zip",
+        }
+    }
+
+    pub fn from_str_strict(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "national" => Some(Self::National),
+            "state" => Some(Self::State),
+            "county" => Some(Self::County),
+            "municipal" => Some(Self::Municipal),
+            "district_or_zip" => Some(Self::DistrictOrZip),
+            _ => None,
+        }
+    }
+
+    /// Deterministically derives `JurisdictionTier` from `geo_scope`:
+    /// `cities` -> `municipal`, `zip_codes`/`zip_prefixes` -> `district_or_zip`,
+    /// `counties` -> `county`, `states` -> `state`, `nationwide` -> `national`.
+    pub fn infer_from_geo_scope(gs: &GeoScopeYaml) -> Self {
+        if gs.cities.iter().any(|c| !c.trim().is_empty()) {
+            Self::Municipal
+        } else if gs.zip_codes.iter().any(|z| !z.trim().is_empty())
+            || gs.zip_prefixes.iter().any(|p| !p.trim().is_empty())
+        {
+            Self::DistrictOrZip
+        } else if gs.counties.iter().any(|c| !c.trim().is_empty()) {
+            Self::County
+        } else if gs
+            .states
+            .iter()
+            .any(|s| !s.trim().is_empty() && s.trim() != "*")
+        {
+            Self::State
+        } else {
+            Self::National
+        }
+    }
+
+    pub fn infer_from_proto(gs: Option<&GeoScopeProto>) -> Self {
+        let Some(p) = gs else {
+            return Self::National;
+        };
+        if p.cities.iter().any(|c| !c.trim().is_empty()) {
+            Self::Municipal
+        } else if p.zip_codes.iter().any(|z| !z.trim().is_empty())
+            || p.zip_prefixes.iter().any(|z| !z.trim().is_empty())
+        {
+            Self::DistrictOrZip
+        } else if p.counties.iter().any(|c| !c.trim().is_empty()) {
+            Self::County
+        } else if p
+            .states
+            .iter()
+            .any(|s| !s.trim().is_empty() && s.trim() != "*")
+        {
+            Self::State
+        } else {
+            Self::National
+        }
+    }
+}
+
+/// Orthogonal Axis 2: Government / public-data connector protocol category.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConnectorCategory {
+    ArcgisFeatureRest,
+    OgcWmsWcs,
+    SocrataCkanOpenData,
+    OpenapiRestJson,
+    CsvTabularStream,
+    HtmlPortalScrape,
+    MultiFeedNative,
+}
+
+impl ConnectorCategory {
+    pub const ALL_SLUGS: &'static [&'static str] = &[
+        "arcgis_feature_rest",
+        "ogc_wms_wcs",
+        "socrata_ckan_open_data",
+        "openapi_rest_json",
+        "csv_tabular_stream",
+        "html_portal_scrape",
+        "multi_feed_native",
+    ];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ArcgisFeatureRest => "arcgis_feature_rest",
+            Self::OgcWmsWcs => "ogc_wms_wcs",
+            Self::SocrataCkanOpenData => "socrata_ckan_open_data",
+            Self::OpenapiRestJson => "openapi_rest_json",
+            Self::CsvTabularStream => "csv_tabular_stream",
+            Self::HtmlPortalScrape => "html_portal_scrape",
+            Self::MultiFeedNative => "multi_feed_native",
+        }
+    }
+
+    pub fn from_str_strict(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "arcgis_feature_rest" => Some(Self::ArcgisFeatureRest),
+            "ogc_wms_wcs" => Some(Self::OgcWmsWcs),
+            "socrata_ckan_open_data" => Some(Self::SocrataCkanOpenData),
+            "openapi_rest_json" => Some(Self::OpenapiRestJson),
+            "csv_tabular_stream" => Some(Self::CsvTabularStream),
+            "html_portal_scrape" => Some(Self::HtmlPortalScrape),
+            "multi_feed_native" => Some(Self::MultiFeedNative),
+            _ => None,
+        }
+    }
+}
+
+/// Supported wire/document data formats across regional government portals.
+pub const VALID_GOV_DATA_FORMATS: &[&str] = &[
+    "json",
+    "geojson",
+    "arcgis_features",
+    "socrata_rows",
+    "csv",
+    "xml",
+    "html",
+    "wms_wcs",
+    "xlsx",
+    "pdf",
+    "yaml_catalog",
+];
+
+/// Declarative response payload parser mode for heterogeneous regional government portals.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GovResponseFormat {
+    #[default]
+    Auto,
+    Json,
+    Geojson,
+    ArcgisFeatures,
+    SocrataRows,
+    Csv,
+    Xml,
+    Html,
+}
+
+impl GovResponseFormat {
+    pub const ALL_SLUGS: &'static [&'static str] = &[
+        "auto",
+        "json",
+        "geojson",
+        "arcgis_features",
+        "socrata_rows",
+        "csv",
+        "xml",
+        "html",
+    ];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Json => "json",
+            Self::Geojson => "geojson",
+            Self::ArcgisFeatures => "arcgis_features",
+            Self::SocrataRows => "socrata_rows",
+            Self::Csv => "csv",
+            Self::Xml => "xml",
+            Self::Html => "html",
+        }
+    }
+
+    pub fn from_str_strict(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "auto" => Some(Self::Auto),
+            "json" => Some(Self::Json),
+            "geojson" => Some(Self::Geojson),
+            "arcgis_features" => Some(Self::ArcgisFeatures),
+            "socrata_rows" => Some(Self::SocrataRows),
+            "csv" => Some(Self::Csv),
+            "xml" => Some(Self::Xml),
+            "html" => Some(Self::Html),
+            _ => None,
+        }
+    }
+}
+
+/// Pre-normalized query tokens computed ONCE per `ExtensionHub` call so inner loops perform zero
+/// `.to_ascii_uppercase()` or string-splitting allocations.
+#[derive(Debug, Clone)]
+pub struct NormalizedGeoQuery {
+    pub country: Cow<'static, str>,
+    pub state: String,
+    pub zip5: String,
+    pub city: String,
+    pub county_fips: String,
+    pub county_name: String,
+}
+
+impl NormalizedGeoQuery {
+    pub fn from_proto(query: &ExtensionQueryProto) -> Self {
+        let country = match query
+            .extra_params
+            .get("country")
+            .map(String::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            Some(raw) => canonicalize_country_upper(raw),
+            None => Cow::Borrowed("US"),
+        };
+
+        let st_trim = query.state.trim();
+        let state = if st_trim.is_empty() {
+            String::new()
+        } else {
+            st_trim.to_ascii_uppercase()
+        };
+
+        let zip_trim = query.zip.trim();
+        let zip5 = if zip_trim.is_empty() {
+            String::new()
+        } else {
+            let mut z = String::with_capacity(5);
+            for ch in zip_trim.chars().take(5) {
+                z.push(ch.to_ascii_uppercase());
+            }
+            z
+        };
+
+        let city = if query.city.trim().is_empty() {
+            String::new()
+        } else {
+            norm_geo_upper(&query.city)
+        };
+
+        let cf_trim = query.county_fips.trim();
+        let county_fips = if cf_trim.is_empty() {
+            String::new()
+        } else {
+            cf_trim.to_ascii_uppercase()
+        };
+
+        let county_name = match query.county_name.as_deref().map(str::trim) {
+            Some(cn) if !cn.is_empty() => {
+                let norm = norm_geo_upper(cn);
+                strip_county_suffix_upper(&norm).to_string()
+            }
+            _ => String::new(),
+        };
+
+        Self {
+            country,
+            state,
+            zip5,
+            city,
+            county_fips,
+            county_name,
+        }
+    }
+
+    #[inline]
+    pub fn zip3(&self) -> &str {
+        if self.zip5.len() >= 3 && self.zip5.is_char_boundary(3) {
+            &self.zip5[..3]
+        } else {
+            ""
+        }
+    }
+}
+
+/// Pre-compiled, uppercase-normalized geographic scope for zero-allocation O(1) region gating.
+#[derive(Debug, Clone)]
+pub struct CompiledGeoScope {
+    /// `None` means wildcard (`"*"` or unset -> matches any country); `Some("US")` matches `"US"`.
+    pub country: Option<String>,
+    pub nationwide: bool,
+    pub wildcard_state: bool,
+    pub states: Vec<String>,
+    pub zip_codes: Vec<String>,
+    pub cities: Vec<String>,
+    pub zip_prefixes: Vec<String>,
+    pub county_fips_or_raw: Vec<String>,
+    pub county_names_stripped: Vec<String>,
+    pub has_sub_state: bool,
+    pub specificity_override: Option<i32>,
+}
+
+impl CompiledGeoScope {
+    pub fn from_yaml(gs: &GeoScopeYaml) -> Self {
+        let country = match gs.country.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            None => None,
+            Some(raw) => match canonicalize_country_upper(raw) {
+                Cow::Borrowed("*") => None,
+                other => Some(other.into_owned()),
+            },
+        };
+        let wildcard_state = gs.states.iter().any(|s| s.trim() == "*");
+        let states: Vec<String> = gs
+            .states
+            .iter()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty() && *s != "*")
+            .map(str::to_ascii_uppercase)
+            .collect();
+        let zip_codes: Vec<String> = gs
+            .zip_codes
+            .iter()
+            .map(|z| {
+                z.trim()
+                    .chars()
+                    .take(5)
+                    .map(|c| c.to_ascii_uppercase())
+                    .collect::<String>()
+            })
+            .filter(|z| z.len() == 5)
+            .collect();
+        let cities: Vec<String> = gs
+            .cities
+            .iter()
+            .map(|c| norm_geo_upper(c))
+            .filter(|c| !c.is_empty())
+            .collect();
+        let zip_prefixes: Vec<String> = gs
+            .zip_prefixes
+            .iter()
+            .map(|p| p.trim().to_ascii_uppercase())
+            .filter(|p| !p.is_empty())
+            .collect();
+        let mut county_fips_or_raw = Vec::new();
+        let mut county_names_stripped = Vec::new();
+        for raw_c in &gs.counties {
+            let ct = raw_c.trim();
+            if ct.is_empty() {
+                continue;
+            }
+            county_fips_or_raw.push(ct.to_ascii_uppercase());
+            let c_norm = norm_geo_upper(ct);
+            let stripped = strip_county_suffix_upper(&c_norm);
+            if !stripped.is_empty() {
+                county_names_stripped.push(stripped.to_string());
+            }
+        }
+        let has_sub_state = !gs.zip_codes.is_empty()
+            || !gs.cities.is_empty()
+            || !gs.zip_prefixes.is_empty()
+            || !gs.counties.is_empty();
+
+        Self {
+            country,
+            nationwide: gs.nationwide || wildcard_state,
+            wildcard_state,
+            states,
+            zip_codes,
+            cities,
+            zip_prefixes,
+            county_fips_or_raw,
+            county_names_stripped,
+            has_sub_state,
+            specificity_override: gs.specificity_override,
+        }
+    }
+
+    pub fn from_proto(gs_opt: Option<&GeoScopeProto>) -> Self {
+        match gs_opt {
+            Some(p) => {
+                let mut y = GeoScopeYaml::from_proto(p);
+                if y.country.is_none() {
+                    y.country = Some("US".to_string());
+                }
+                Self::from_yaml(&y)
+            }
+            None => Self::from_yaml(&GeoScopeYaml {
+                country: Some("US".to_string()),
+                nationwide: true,
+                ..Default::default()
+            }),
+        }
+    }
+
+    #[inline]
+    pub fn matches_country_norm(&self, q_country: &str) -> bool {
+        match self.country.as_deref() {
+            None => true,
+            Some(c) => c == q_country,
+        }
+    }
+
+    #[inline]
+    pub fn matches_country_and_state(&self, q: &NormalizedGeoQuery) -> bool {
+        if !self.matches_country_norm(q.country.as_ref()) {
+            return false;
+        }
+        if !self.states.is_empty() && !self.wildcard_state {
+            if q.state.is_empty() || !self.states.iter().any(|s| s == &q.state) {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Zero-allocation specificity evaluation against a pre-normalized [`NormalizedGeoQuery`].
+    pub fn match_specificity(&self, q: &NormalizedGeoQuery) -> Option<i32> {
+        if !self.matches_country_and_state(q) {
+            return None;
+        }
+
+        if self.has_sub_state {
+            let mut best_score = 0_i32;
+
+            if !self.zip_codes.is_empty()
+                && q.zip5.len() == 5
+                && self.zip_codes.iter().any(|z| z == &q.zip5)
+            {
+                best_score = 500;
+            }
+
+            if best_score < 400
+                && !self.cities.is_empty()
+                && !q.city.is_empty()
+                && self.cities.iter().any(|c| c == &q.city)
+            {
+                best_score = best_score.max(400);
+            }
+
+            if best_score < 300
+                && !self.zip_prefixes.is_empty()
+                && q.zip5.len() >= 3
+                && self
+                    .zip_prefixes
+                    .iter()
+                    .any(|p| q.zip5.starts_with(p.as_str()))
+            {
+                best_score = best_score.max(300);
+            }
+
+            if best_score < 200
+                && (!self.county_fips_or_raw.is_empty() || !self.county_names_stripped.is_empty())
+            {
+                let fips_ok = !q.county_fips.is_empty()
+                    && self
+                        .county_fips_or_raw
+                        .iter()
+                        .any(|f| f == &q.county_fips);
+                let cname_ok = !q.county_name.is_empty()
+                    && self
+                        .county_names_stripped
+                        .iter()
+                        .any(|cn| cn == &q.county_name);
+                if fips_ok || cname_ok {
+                    best_score = best_score.max(200);
+                }
+            }
+
+            if best_score > 0 {
+                return Some(self.specificity_override.unwrap_or(best_score));
+            }
+            return None;
+        }
+
+        if !self.states.is_empty() && !self.wildcard_state {
+            Some(self.specificity_override.unwrap_or(100))
+        } else if self.nationwide || self.wildcard_state {
+            Some(self.specificity_override.unwrap_or(10))
+        } else {
+            None
+        }
+    }
+
+    #[inline]
+    pub fn match_query(&self, query: &ExtensionQueryProto) -> Option<i32> {
+        let q = NormalizedGeoQuery::from_proto(query);
+        self.match_specificity(&q)
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -475,6 +1033,14 @@ pub struct ResponseMappingYaml {
     pub require_non_empty: bool,
     #[serde(default)]
     pub fields: BTreeMap<String, String>,
+    #[serde(default, alias = "response_format", alias = "responseFormat")]
+    pub format: GovResponseFormat,
+    #[serde(default, alias = "csvDelimiter")]
+    pub csv_delimiter: Option<String>,
+    #[serde(default, alias = "htmlTableIndex")]
+    pub html_table_index: Option<usize>,
+    #[serde(default, alias = "xmlRecordTag")]
+    pub xml_record_tag: Option<String>,
 }
 
 impl ResponseMappingYaml {
@@ -488,6 +1054,10 @@ impl ResponseMappingYaml {
                 .iter()
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect(),
+            format: GovResponseFormat::Auto,
+            csv_delimiter: None,
+            html_table_index: None,
+            xml_record_tag: None,
         }
     }
 }
@@ -827,6 +1397,12 @@ pub struct ManifestYamlDoc {
     pub llm: Option<LlmSpecProto>,
     #[serde(default)]
     pub sharing: Option<SharingSpecProto>,
+    #[serde(default, alias = "jurisdictionTier")]
+    pub jurisdiction_tier: Option<JurisdictionTier>,
+    #[serde(default, alias = "connectorCategory")]
+    pub connector_category: Option<ConnectorCategory>,
+    #[serde(default, alias = "dataFormats")]
+    pub data_formats: Vec<String>,
 }
 
 /// Validated, executable extension package held in `ExtensionHub`.
@@ -860,6 +1436,256 @@ pub struct ParsedExtensionPackage {
     pub depends_on: Vec<String>,
     pub input_from_domains: Vec<CapabilityDomain>,
     pub upstream_require_mode: String,
+    pub compiled_geo_scope: CompiledGeoScope,
+    pub jurisdiction_tier: JurisdictionTier,
+    pub connector_category: ConnectorCategory,
+    pub data_formats: Vec<String>,
+}
+
+/// Resolves an extension's [`JurisdictionTier`] from explicit YAML override or `geo_scope`.
+pub fn classify_extension_jurisdiction_tier(
+    manifest: &ExtensionManifestProto,
+    doc_opt: Option<&ManifestYamlDoc>,
+) -> JurisdictionTier {
+    if let Some(explicit) = doc_opt.and_then(|d| d.jurisdiction_tier) {
+        return explicit;
+    }
+    if manifest.geo_scope.is_some() {
+        JurisdictionTier::infer_from_proto(manifest.geo_scope.as_ref())
+    } else if let Some(doc) = doc_opt {
+        JurisdictionTier::infer_from_geo_scope(&doc.geo_scope)
+    } else {
+        JurisdictionTier::National
+    }
+}
+
+/// Resolves an extension's [`ConnectorCategory`] and supported `data_formats` from explicit YAML
+/// metadata or deterministic inspection of its driver, OpenAPI/HTTP endpoints, and format specs.
+pub fn classify_extension_connector(
+    manifest: &ExtensionManifestProto,
+    doc_opt: Option<&ManifestYamlDoc>,
+    openapi_opt: Option<&OpenAPI>,
+) -> (ConnectorCategory, Vec<String>) {
+    let driver = DriverKind::try_from(manifest.driver).unwrap_or(DriverKind::DriverDeclarativeYaml);
+    let explicit_cat = doc_opt.and_then(|d| d.connector_category);
+    let explicit_formats: Vec<String> = doc_opt
+        .map(|d| d.data_formats.clone())
+        .unwrap_or_default();
+    let rm_format = doc_opt
+        .and_then(|d| d.response_mapping.as_ref())
+        .map(|rm| rm.format)
+        .unwrap_or(GovResponseFormat::Auto);
+
+    let mut urls_lower: Vec<String> = Vec::new();
+    if let Some(req) = manifest.request.as_ref() {
+        if !req.url.trim().is_empty() {
+            urls_lower.push(req.url.trim().to_ascii_lowercase());
+        }
+        for (k, v) in &req.query_params {
+            urls_lower.push(format!("{}={}", k.to_ascii_lowercase(), v.to_ascii_lowercase()));
+        }
+    }
+    if let Some(oas) = openapi_opt {
+        for srv in &oas.servers {
+            if !srv.url.trim().is_empty() {
+                urls_lower.push(srv.url.trim().to_ascii_lowercase());
+            }
+        }
+        for p in oas.paths.paths.keys() {
+            urls_lower.push(p.to_ascii_lowercase());
+        }
+    }
+    if let Some(sa) = manifest.source_attribution.as_ref() {
+        if !sa.url.trim().is_empty() {
+            urls_lower.push(sa.url.trim().to_ascii_lowercase());
+        }
+    }
+    if let Some(u) = manifest.documentation_url.as_deref() {
+        if !u.trim().is_empty() {
+            urls_lower.push(u.trim().to_ascii_lowercase());
+        }
+    }
+    if let Some(u) = manifest.homepage_url.as_deref() {
+        if !u.trim().is_empty() {
+            urls_lower.push(u.trim().to_ascii_lowercase());
+        }
+    }
+    let desc_lower = manifest.description.to_ascii_lowercase();
+
+    let has_ogc = urls_lower.iter().any(|u| {
+        u.contains("service=wms")
+            || u.contains("service=wcs")
+            || u.contains("service=wfs")
+            || u.contains("/wms")
+            || u.contains("/wcs")
+            || u.contains("/ows")
+            || u.contains("wmsserver")
+            || u.contains("wcsserver")
+    });
+    let has_arcgis = urls_lower.iter().any(|u| {
+        u.contains("/arcgis/rest/services")
+            || u.contains("/server/rest/services")
+            || u.contains("featureserver")
+            || u.contains("mapserver")
+    });
+    let has_socrata_ckan = urls_lower.iter().any(|u| {
+        u.contains("socrata.com")
+            || (u.contains("/resource/") && (u.contains(".json") || u.contains(".csv")))
+            || u.contains("/api/3/action/datastore_search")
+            || u.contains("data.cityof")
+            || u.contains("data.sfgov")
+            || u.contains("data.ny.gov")
+            || u.contains("data.austintexas.gov")
+            || u.contains("data.seattle.gov")
+    });
+    let primary_req_url = manifest
+        .request
+        .as_ref()
+        .map(|r| r.url.trim().to_ascii_lowercase())
+        .unwrap_or_default();
+    let has_csv = primary_req_url.ends_with(".csv")
+        || primary_req_url.ends_with(".tsv")
+        || urls_lower
+            .iter()
+            .any(|u| u.contains("format=csv") || u.contains("f=csv"));
+    let has_html_scrape = primary_req_url.ends_with(".html")
+        || primary_req_url.ends_with(".htm")
+        || primary_req_url.ends_with(".aspx")
+        || primary_req_url.ends_with(".jsp");
+    let has_xlsx = urls_lower.iter().any(|u| u.ends_with(".xlsx")) || desc_lower.contains("xlsx");
+    let has_pdf = urls_lower.iter().any(|u| u.ends_with(".pdf")) || desc_lower.contains(" pdf");
+
+    let category = if let Some(cat) = explicit_cat {
+        cat
+    } else {
+        match rm_format {
+            GovResponseFormat::ArcgisFeatures => ConnectorCategory::ArcgisFeatureRest,
+            GovResponseFormat::SocrataRows => ConnectorCategory::SocrataCkanOpenData,
+            GovResponseFormat::Csv => ConnectorCategory::CsvTabularStream,
+            GovResponseFormat::Html | GovResponseFormat::Xml => {
+                if has_ogc {
+                    ConnectorCategory::OgcWmsWcs
+                } else {
+                    ConnectorCategory::HtmlPortalScrape
+                }
+            }
+            GovResponseFormat::Auto | GovResponseFormat::Json | GovResponseFormat::Geojson => {
+                match driver {
+                    DriverKind::DriverNativeAdapter => {
+                        if has_ogc {
+                            ConnectorCategory::OgcWmsWcs
+                        } else if has_socrata_ckan && !has_xlsx && !has_pdf {
+                            ConnectorCategory::SocrataCkanOpenData
+                        } else if has_arcgis
+                            && !has_xlsx
+                            && !has_pdf
+                            && !desc_lower.contains("dual-hedged")
+                            && !desc_lower.contains("multi-sensor")
+                        {
+                            ConnectorCategory::ArcgisFeatureRest
+                        } else {
+                            ConnectorCategory::MultiFeedNative
+                        }
+                    }
+                    DriverKind::DriverOpenapiYaml | DriverKind::DriverDeclarativeYaml | _ => {
+                        if has_ogc {
+                            ConnectorCategory::OgcWmsWcs
+                        } else if has_arcgis {
+                            ConnectorCategory::ArcgisFeatureRest
+                        } else if has_socrata_ckan {
+                            ConnectorCategory::SocrataCkanOpenData
+                        } else if has_csv {
+                            ConnectorCategory::CsvTabularStream
+                        } else if has_html_scrape {
+                            ConnectorCategory::HtmlPortalScrape
+                        } else {
+                            ConnectorCategory::OpenapiRestJson
+                        }
+                    }
+                }
+            }
+        }
+    };
+
+    let formats = if !explicit_formats.is_empty() {
+        explicit_formats
+    } else {
+        let mut out: Vec<String> = Vec::new();
+        let mut push_fmt = |f: &str| {
+            if !out.iter().any(|x| x == f) {
+                out.push(f.to_string());
+            }
+        };
+        if rm_format != GovResponseFormat::Auto {
+            push_fmt(rm_format.as_str());
+        }
+        match category {
+            ConnectorCategory::ArcgisFeatureRest => {
+                push_fmt("arcgis_features");
+                push_fmt("geojson");
+                push_fmt("json");
+            }
+            ConnectorCategory::OgcWmsWcs => {
+                push_fmt("wms_wcs");
+                push_fmt("xml");
+                push_fmt("json");
+            }
+            ConnectorCategory::SocrataCkanOpenData => {
+                push_fmt("socrata_rows");
+                if has_arcgis || desc_lower.contains("arcgis") {
+                    push_fmt("arcgis_features");
+                }
+                push_fmt("json");
+                push_fmt("csv");
+            }
+            ConnectorCategory::CsvTabularStream => {
+                push_fmt("csv");
+            }
+            ConnectorCategory::HtmlPortalScrape => {
+                if rm_format == GovResponseFormat::Xml {
+                    push_fmt("xml");
+                } else {
+                    push_fmt("html");
+                    push_fmt("xml");
+                }
+            }
+            ConnectorCategory::OpenapiRestJson => {
+                let has_http = driver == DriverKind::DriverOpenapiYaml
+                    || manifest.request.is_some();
+                if !has_http
+                    && (manifest.tariff_catalog.is_some()
+                        || manifest.footprint_catalog.is_some()
+                        || !manifest.geo_rules.is_empty())
+                {
+                    push_fmt("yaml_catalog");
+                }
+                push_fmt("json");
+            }
+            ConnectorCategory::MultiFeedNative => {
+                if has_arcgis || desc_lower.contains("arcgis") {
+                    push_fmt("arcgis_features");
+                }
+                if urls_lower.iter().any(|u| u.contains("weather.gov"))
+                    || desc_lower.contains("geojson")
+                {
+                    push_fmt("geojson");
+                }
+                if has_xlsx {
+                    push_fmt("xlsx");
+                }
+                if has_pdf {
+                    push_fmt("pdf");
+                }
+                if has_csv || desc_lower.contains("csv") {
+                    push_fmt("csv");
+                }
+                push_fmt("json");
+            }
+        }
+        out
+    };
+
+    (category, formats)
 }
 
 impl ParsedExtensionPackage {
@@ -1448,10 +2274,198 @@ fn validate_and_normalize_message(
         }
     }
 
+    if msg_full_name == MANIFEST_MSG_NAME {
+        for ext_key in ["jurisdiction_tier", "connector_category", "data_formats"] {
+            allowed_names.insert(ext_key.to_string());
+        }
+    } else if msg_full_name == ".openestate.extension.v1.ResponseMappingProto" {
+        for ext_key in [
+            "format",
+            "csv_delimiter",
+            "html_table_index",
+            "xml_record_tag",
+        ] {
+            allowed_names.insert(ext_key.to_string());
+        }
+    }
+
     let mut seen_canon: HashMap<String, String> = HashMap::new();
     let mut out = Map::new();
 
     for (raw_key, val) in obj {
+        let child_path = format!("{path}.{raw_key}");
+        if msg_full_name == MANIFEST_MSG_NAME {
+            match raw_key.as_str() {
+                "jurisdiction_tier" | "jurisdictionTier" => {
+                    if let Some(prev_key) =
+                        seen_canon.insert("jurisdiction_tier".to_string(), raw_key.clone())
+                    {
+                        return Err(anyhow!(
+                            "Conflicting keys '{prev_key}' and '{raw_key}' (both map to 'jurisdiction_tier') at {path}"
+                        ));
+                    }
+                    if !val.is_null() {
+                        let s = val.as_str().ok_or_else(|| {
+                            anyhow!(
+                                "Invalid type at {child_path}: expected string ({}), got {}",
+                                JurisdictionTier::ALL_SLUGS.join(", "),
+                                json_type_label(val)
+                            )
+                        })?;
+                        if JurisdictionTier::from_str_strict(s).is_none() {
+                            return Err(anyhow!(
+                                "Invalid enum value '{s}' at {child_path}; expected one of: {}",
+                                JurisdictionTier::ALL_SLUGS.join(", ")
+                            ));
+                        }
+                    }
+                    continue;
+                }
+                "connector_category" | "connectorCategory" => {
+                    if let Some(prev_key) =
+                        seen_canon.insert("connector_category".to_string(), raw_key.clone())
+                    {
+                        return Err(anyhow!(
+                            "Conflicting keys '{prev_key}' and '{raw_key}' (both map to 'connector_category') at {path}"
+                        ));
+                    }
+                    if !val.is_null() {
+                        let s = val.as_str().ok_or_else(|| {
+                            anyhow!(
+                                "Invalid type at {child_path}: expected string ({}), got {}",
+                                ConnectorCategory::ALL_SLUGS.join(", "),
+                                json_type_label(val)
+                            )
+                        })?;
+                        if ConnectorCategory::from_str_strict(s).is_none() {
+                            return Err(anyhow!(
+                                "Invalid enum value '{s}' at {child_path}; expected one of: {}",
+                                ConnectorCategory::ALL_SLUGS.join(", ")
+                            ));
+                        }
+                    }
+                    continue;
+                }
+                "data_formats" | "dataFormats" => {
+                    if let Some(prev_key) =
+                        seen_canon.insert("data_formats".to_string(), raw_key.clone())
+                    {
+                        return Err(anyhow!(
+                            "Conflicting keys '{prev_key}' and '{raw_key}' (both map to 'data_formats') at {path}"
+                        ));
+                    }
+                    if !val.is_null() {
+                        let arr = val.as_array().ok_or_else(|| {
+                            anyhow!(
+                                "Invalid type at {child_path}: expected sequence/array, got {}",
+                                json_type_label(val)
+                            )
+                        })?;
+                        for (idx, item) in arr.iter().enumerate() {
+                            let s = item.as_str().ok_or_else(|| {
+                                anyhow!(
+                                    "Invalid type at {child_path}[{idx}]: expected string, got {}",
+                                    json_type_label(item)
+                                )
+                            })?;
+                            let low = s.trim().to_ascii_lowercase();
+                            if !VALID_GOV_DATA_FORMATS.contains(&low.as_str()) {
+                                return Err(anyhow!(
+                                    "Invalid data_format '{s}' at {child_path}[{idx}]; expected one of: {}",
+                                    VALID_GOV_DATA_FORMATS.join(", ")
+                                ));
+                            }
+                        }
+                    }
+                    continue;
+                }
+                _ => {}
+            }
+        } else if msg_full_name == ".openestate.extension.v1.ResponseMappingProto" {
+            match raw_key.as_str() {
+                "format" | "response_format" | "responseFormat" => {
+                    if let Some(prev_key) = seen_canon.insert("format".to_string(), raw_key.clone())
+                    {
+                        return Err(anyhow!(
+                            "Conflicting keys '{prev_key}' and '{raw_key}' (both map to 'format') at {path}"
+                        ));
+                    }
+                    if !val.is_null() {
+                        let s = val.as_str().ok_or_else(|| {
+                            anyhow!(
+                                "Invalid type at {child_path}: expected string ({}), got {}",
+                                GovResponseFormat::ALL_SLUGS.join(", "),
+                                json_type_label(val)
+                            )
+                        })?;
+                        if GovResponseFormat::from_str_strict(s).is_none() {
+                            return Err(anyhow!(
+                                "Invalid response format '{s}' at {child_path}; expected one of: {}",
+                                GovResponseFormat::ALL_SLUGS.join(", ")
+                            ));
+                        }
+                    }
+                    continue;
+                }
+                "csv_delimiter" | "csvDelimiter" => {
+                    if let Some(prev_key) =
+                        seen_canon.insert("csv_delimiter".to_string(), raw_key.clone())
+                    {
+                        return Err(anyhow!(
+                            "Conflicting keys '{prev_key}' and '{raw_key}' (both map to 'csv_delimiter') at {path}"
+                        ));
+                    }
+                    if !val.is_null() {
+                        let s = val.as_str().ok_or_else(|| {
+                            anyhow!(
+                                "Invalid type at {child_path}: expected 1-byte ASCII delimiter string, got {}",
+                                json_type_label(val)
+                            )
+                        })?;
+                        if s.len() != 1 || !s.is_ascii() {
+                            return Err(anyhow!(
+                                "Invalid csv_delimiter '{s}' at {child_path}: expected a single ASCII character"
+                            ));
+                        }
+                    }
+                    continue;
+                }
+                "html_table_index" | "htmlTableIndex" => {
+                    if let Some(prev_key) =
+                        seen_canon.insert("html_table_index".to_string(), raw_key.clone())
+                    {
+                        return Err(anyhow!(
+                            "Conflicting keys '{prev_key}' and '{raw_key}' (both map to 'html_table_index') at {path}"
+                        ));
+                    }
+                    if !val.is_null() && val.as_u64().is_none() {
+                        return Err(anyhow!(
+                            "Invalid type at {child_path}: expected non-negative integer, got {}",
+                            json_type_label(val)
+                        ));
+                    }
+                    continue;
+                }
+                "xml_record_tag" | "xmlRecordTag" => {
+                    if let Some(prev_key) =
+                        seen_canon.insert("xml_record_tag".to_string(), raw_key.clone())
+                    {
+                        return Err(anyhow!(
+                            "Conflicting keys '{prev_key}' and '{raw_key}' (both map to 'xml_record_tag') at {path}"
+                        ));
+                    }
+                    if !val.is_null() && val.as_str().is_none() {
+                        return Err(anyhow!(
+                            "Invalid type at {child_path}: expected string, got {}",
+                            json_type_label(val)
+                        ));
+                    }
+                    continue;
+                }
+                _ => {}
+            }
+        }
+
         let field = if let Some(f) = by_snake.get(raw_key.as_str()).copied() {
             f
         } else if let Some(f) = by_camel.get(raw_key.as_str()).copied() {
@@ -1474,8 +2488,6 @@ fn validate_and_normalize_message(
                 "Conflicting keys '{prev_key}' and '{raw_key}' (both map to '{canon_snake}') at {path}"
             ));
         }
-
-        let child_path = format!("{path}.{raw_key}");
 
         // Handle special YAML ergonomics for `LlmSpecProto.tasks` (list OR map keyed by task name).
         if msg_full_name == ".openestate.extension.v1.LlmSpecProto" && canon_snake == "tasks" {
@@ -1559,6 +2571,13 @@ struct ManifestRawSignals {
     explicit_tier_present: bool,
     explicit_license_class_present: bool,
     explicit_execution_mode_present: bool,
+    explicit_jurisdiction_tier: Option<JurisdictionTier>,
+    explicit_connector_category: Option<ConnectorCategory>,
+    explicit_data_formats: Vec<String>,
+    explicit_rm_format: GovResponseFormat,
+    explicit_rm_csv_delimiter: Option<String>,
+    explicit_rm_html_table_index: Option<usize>,
+    explicit_rm_xml_record_tag: Option<String>,
 }
 
 fn inspect_raw_signals(root_obj: &Map<String, Value>) -> ManifestRawSignals {
@@ -1570,6 +2589,58 @@ fn inspect_raw_signals(root_obj: &Map<String, Value>) -> ManifestRawSignals {
                 .or_else(|| a.get("optionalKey"))
                 .and_then(Value::as_bool)
         });
+    let explicit_jurisdiction_tier = root_obj
+        .get("jurisdiction_tier")
+        .or_else(|| root_obj.get("jurisdictionTier"))
+        .and_then(Value::as_str)
+        .and_then(JurisdictionTier::from_str_strict);
+    let explicit_connector_category = root_obj
+        .get("connector_category")
+        .or_else(|| root_obj.get("connectorCategory"))
+        .and_then(Value::as_str)
+        .and_then(ConnectorCategory::from_str_strict);
+    let explicit_data_formats = root_obj
+        .get("data_formats")
+        .or_else(|| root_obj.get("dataFormats"))
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(Value::as_str)
+                .map(|s| s.trim().to_ascii_lowercase())
+                .filter(|s| !s.is_empty())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let rm_obj = root_obj
+        .get("response_mapping")
+        .or_else(|| root_obj.get("responseMapping"))
+        .and_then(Value::as_object);
+    let explicit_rm_format = rm_obj
+        .and_then(|rm| {
+            rm.get("format")
+                .or_else(|| rm.get("response_format"))
+                .or_else(|| rm.get("responseFormat"))
+        })
+        .and_then(Value::as_str)
+        .and_then(GovResponseFormat::from_str_strict)
+        .unwrap_or(GovResponseFormat::Auto);
+    let explicit_rm_csv_delimiter = rm_obj
+        .and_then(|rm| rm.get("csv_delimiter").or_else(|| rm.get("csvDelimiter")))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let explicit_rm_html_table_index = rm_obj
+        .and_then(|rm| {
+            rm.get("html_table_index")
+                .or_else(|| rm.get("htmlTableIndex"))
+        })
+        .and_then(Value::as_u64)
+        .map(|n| n as usize);
+    let explicit_rm_xml_record_tag = rm_obj
+        .and_then(|rm| rm.get("xml_record_tag").or_else(|| rm.get("xmlRecordTag")))
+        .and_then(Value::as_str)
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+
     ManifestRawSignals {
         explicit_enabled_by_default: root_obj
             .get("enabled_by_default")
@@ -1587,6 +2658,13 @@ fn inspect_raw_signals(root_obj: &Map<String, Value>) -> ManifestRawSignals {
             || root_obj.contains_key("licenseClass"),
         explicit_execution_mode_present: root_obj.contains_key("execution_mode")
             || root_obj.contains_key("executionMode"),
+        explicit_jurisdiction_tier,
+        explicit_connector_category,
+        explicit_data_formats,
+        explicit_rm_format,
+        explicit_rm_csv_delimiter,
+        explicit_rm_html_table_index,
+        explicit_rm_xml_record_tag,
     }
 }
 
@@ -2186,6 +3264,7 @@ fn manifest_to_compat_doc(
     tariff_catalog: Option<TariffCatalogYaml>,
     footprint_catalog: Option<FootprintCatalogYaml>,
     geo_rules: Vec<GenericGeoRuleYaml>,
+    signals: &ManifestRawSignals,
 ) -> ManifestYamlDoc {
     let primary_domain =
         CapabilityDomain::try_from(manifest.domain).unwrap_or(CapabilityDomain::DomainUnspecified);
@@ -2203,6 +3282,17 @@ fn manifest_to_compat_doc(
     let lc_enum =
         LicenseClass::try_from(manifest.license_class).unwrap_or(LicenseClass::PublicOpenData);
     let em_enum = ExecutionMode::try_from(manifest.execution_mode).unwrap_or(ExecutionMode::Eager);
+
+    let mut response_mapping = manifest
+        .response_mapping
+        .as_ref()
+        .map(ResponseMappingYaml::from_proto);
+    if let Some(ref mut rm) = response_mapping {
+        rm.format = signals.explicit_rm_format;
+        rm.csv_delimiter = signals.explicit_rm_csv_delimiter.clone();
+        rm.html_table_index = signals.explicit_rm_html_table_index;
+        rm.xml_record_tag = signals.explicit_rm_xml_record_tag.clone();
+    }
 
     ManifestYamlDoc {
         id: manifest.extension_id.clone(),
@@ -2262,10 +3352,7 @@ fn manifest_to_compat_doc(
             .request
             .as_ref()
             .map(DeclarativeRequestYaml::from_proto),
-        response_mapping: manifest
-            .response_mapping
-            .as_ref()
-            .map(ResponseMappingYaml::from_proto),
+        response_mapping,
         tariff_catalog,
         footprint_catalog,
         geo_rules,
@@ -2280,6 +3367,9 @@ fn manifest_to_compat_doc(
         upstream_require_mode: Some(manifest.upstream_require_mode.clone()),
         llm: manifest.llm.clone(),
         sharing: manifest.sharing.clone(),
+        jurisdiction_tier: signals.explicit_jurisdiction_tier,
+        connector_category: signals.explicit_connector_category,
+        data_formats: signals.explicit_data_formats.clone(),
     }
 }
 
@@ -2467,7 +3557,13 @@ pub fn parse_and_validate_package_with_origin(
         }
     }
 
-    let doc = manifest_to_compat_doc(&manifest, tariff_catalog, footprint_catalog, Vec::new());
+    let doc = manifest_to_compat_doc(
+        &manifest,
+        tariff_catalog,
+        footprint_catalog,
+        Vec::new(),
+        &signals,
+    );
 
     // Validate OpenAPI 3.x spec when driver == openapi_yaml (or when openapi_yaml is supplied)
     let openapi_doc = match (
@@ -2653,6 +3749,10 @@ pub fn parse_and_validate_package_with_origin(
     let builtin = manifest.builtin;
     let llm = manifest.llm.clone();
     let sharing = manifest.sharing.clone();
+    let compiled_geo_scope = CompiledGeoScope::from_yaml(&doc.geo_scope);
+    let jurisdiction_tier = classify_extension_jurisdiction_tier(&manifest, Some(&doc));
+    let (connector_category, data_formats) =
+        classify_extension_connector(&manifest, Some(&doc), openapi_doc.as_ref());
 
     Ok(ParsedExtensionPackage {
         extension_id,
@@ -2683,6 +3783,10 @@ pub fn parse_and_validate_package_with_origin(
         depends_on,
         input_from_domains,
         upstream_require_mode,
+        compiled_geo_scope,
+        jurisdiction_tier,
+        connector_category,
+        data_formats,
     })
 }
 
@@ -2871,6 +3975,35 @@ pub fn generate_manifest_json_schema() -> Value {
         }
     }
 
+    defs.insert(
+        "JurisdictionTier".to_string(),
+        json!({
+            "type": "string",
+            "enum": JurisdictionTier::ALL_SLUGS,
+        }),
+    );
+    defs.insert(
+        "ConnectorCategory".to_string(),
+        json!({
+            "type": "string",
+            "enum": ConnectorCategory::ALL_SLUGS,
+        }),
+    );
+    defs.insert(
+        "GovDataFormat".to_string(),
+        json!({
+            "type": "string",
+            "enum": VALID_GOV_DATA_FORMATS,
+        }),
+    );
+    defs.insert(
+        "GovResponseFormat".to_string(),
+        json!({
+            "type": "string",
+            "enum": GovResponseFormat::ALL_SLUGS,
+        }),
+    );
+
     for msg_name in &visited_msgs {
         let Some(desc) = DESCRIPTOR_REGISTRY.message(msg_name) else {
             continue;
@@ -2915,6 +4048,110 @@ pub fn generate_manifest_json_schema() -> Value {
                 }
                 props.insert((*alias).to_string(), alias_schema);
             }
+        }
+
+        if msg_name == MANIFEST_MSG_NAME {
+            props.insert(
+                "jurisdiction_tier".to_string(),
+                json!({ "$ref": "#/$defs/JurisdictionTier" }),
+            );
+            props.insert(
+                "jurisdictionTier".to_string(),
+                json!({
+                    "$ref": "#/$defs/JurisdictionTier",
+                    "x-alias-for": "jurisdiction_tier"
+                }),
+            );
+            props.insert(
+                "connector_category".to_string(),
+                json!({ "$ref": "#/$defs/ConnectorCategory" }),
+            );
+            props.insert(
+                "connectorCategory".to_string(),
+                json!({
+                    "$ref": "#/$defs/ConnectorCategory",
+                    "x-alias-for": "connector_category"
+                }),
+            );
+            props.insert(
+                "data_formats".to_string(),
+                json!({
+                    "type": "array",
+                    "items": { "$ref": "#/$defs/GovDataFormat" }
+                }),
+            );
+            props.insert(
+                "dataFormats".to_string(),
+                json!({
+                    "type": "array",
+                    "items": { "$ref": "#/$defs/GovDataFormat" },
+                    "x-alias-for": "data_formats"
+                }),
+            );
+        } else if msg_name == ".openestate.extension.v1.ResponseMappingProto" {
+            props.insert(
+                "format".to_string(),
+                json!({ "$ref": "#/$defs/GovResponseFormat" }),
+            );
+            props.insert(
+                "response_format".to_string(),
+                json!({
+                    "$ref": "#/$defs/GovResponseFormat",
+                    "x-alias-for": "format"
+                }),
+            );
+            props.insert(
+                "responseFormat".to_string(),
+                json!({
+                    "$ref": "#/$defs/GovResponseFormat",
+                    "x-alias-for": "format"
+                }),
+            );
+            props.insert(
+                "csv_delimiter".to_string(),
+                json!({
+                    "type": ["string", "null"],
+                    "minLength": 1,
+                    "maxLength": 1
+                }),
+            );
+            props.insert(
+                "csvDelimiter".to_string(),
+                json!({
+                    "type": ["string", "null"],
+                    "minLength": 1,
+                    "maxLength": 1,
+                    "x-alias-for": "csv_delimiter"
+                }),
+            );
+            props.insert(
+                "html_table_index".to_string(),
+                json!({
+                    "type": ["integer", "null"],
+                    "minimum": 0
+                }),
+            );
+            props.insert(
+                "htmlTableIndex".to_string(),
+                json!({
+                    "type": ["integer", "null"],
+                    "minimum": 0,
+                    "x-alias-for": "html_table_index"
+                }),
+            );
+            props.insert(
+                "xml_record_tag".to_string(),
+                json!({
+                    "type": ["string", "null"]
+                }),
+            );
+            props.insert(
+                "xmlRecordTag".to_string(),
+                json!({
+                    "type": ["string", "null"],
+                    "x-alias-for": "xml_record_tag"
+                }),
+            );
         }
 
         let props_val = Value::Object(props.into_iter().collect());

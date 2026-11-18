@@ -38,9 +38,41 @@ fn fred_url_with_env(env: &EnvConfig, id: &str) -> String {
     format!("{base}/graph/fredgraph.csv?id={id}")
 }
 
+fn is_valid_fred_date(d: &str) -> bool {
+    let b = d.as_bytes();
+    if b.len() != 7 && b.len() != 10 {
+        return false;
+    }
+    if !b[0..4].iter().all(u8::is_ascii_digit) || b[4] != b'-' {
+        return false;
+    }
+    let Ok(mo) = d[5..7].parse::<u32>() else {
+        return false;
+    };
+    if !(1..=12).contains(&mo) {
+        return false;
+    }
+    if b.len() == 10 {
+        if b[7] != b'-' {
+            return false;
+        }
+        let Ok(day) = d[8..10].parse::<u32>() else {
+            return false;
+        };
+        if !(1..=31).contains(&day) {
+            return false;
+        }
+    }
+    true
+}
+
 pub fn parse_fred_csv(text: &str) -> Vec<(String, f64)> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() || trimmed.starts_with('<') {
+        return Vec::new();
+    }
     let mut out = Vec::new();
-    for line in text.trim().lines().skip(1) {
+    for line in trimmed.lines().skip(1) {
         let mut parts = line.split(',');
         let Some(d) = parts.next().map(|s| s.trim()) else {
             continue;
@@ -48,7 +80,7 @@ pub fn parse_fred_csv(text: &str) -> Vec<(String, f64)> {
         let Some(v_str) = parts.next().map(|s| s.trim()) else {
             continue;
         };
-        if d.is_empty() || v_str.is_empty() || v_str == "." {
+        if !is_valid_fred_date(d) || v_str.is_empty() || v_str == "." {
             continue;
         }
         if let Ok(v) = v_str.parse::<f64>() {
@@ -570,7 +602,15 @@ async fn run_market_trends_inner(
 ) -> Result<ModuleOutput> {
     let mut warnings = Vec::new();
     let mut sources = Vec::new();
-    let strict_mode = env.is_commercial_strict() || http.is_commercial_strict();
+    let has_explicit_mode = env
+        .get("COMMERCIAL_DATA_MODE")
+        .or_else(|| env.get("PUBLIC_DATA_MODE"))
+        .is_some();
+    let strict_mode = if has_explicit_mode {
+        env.is_commercial_strict()
+    } else {
+        env.is_commercial_strict() || http.is_commercial_strict()
+    };
 
     let ids = geo.get("censusReporterIds");
     let geo_levels = ["tract", "zcta", "place", "county", "msa", "state", "nation"];
@@ -593,8 +633,8 @@ async fn run_market_trends_inner(
         geo_ids.join(",")
     );
     let msa_hpi_id = geo
-        .get("msa")
-        .and_then(|m| m.get("cbsa"))
+        .pointer("/msa/cbsa")
+        .or_else(|| geo.get("cbsa"))
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty())
         .map(|cbsa| format!("ATNHPIUS{cbsa}Q"));
@@ -1077,8 +1117,222 @@ async fn run_market_trends_inner(
     }
 
     // ---- 4. ZIP / Metro Appreciation, Forward-Return Distributions & Rent Benchmarks ----
+    let has_zillow = !strict_mode
+        && zillow
+            .get("zipSeries")
+            .and_then(|z| z.as_object())
+            .map(|o| {
+                !value_array_to_series(o.get("zhvi_mid")).is_empty()
+                    || !value_array_to_series(o.get("zhvi_sfr")).is_empty()
+            })
+            .unwrap_or(false);
+
     let mut zillow_used = false;
-    if strict_mode {
+    let mut public_fallback_used = false;
+    if has_zillow {
+        zillow_used = true;
+        sources.push(SourceItem::new(
+            "Zillow Home Value Index (ZHVI), Observed Rent Index (ZORI), Home Value Forecast & market metrics",
+            "https://www.zillow.com/research/data/",
+        ));
+        let zs = zillow.get("zipSeries");
+        let ms = zillow.get("metroSeries");
+        let us = zillow.get("usSeries");
+
+        let zs_mid = value_array_to_series(zs.and_then(|o| o.get("zhvi_mid")));
+        let zs_sfr = value_array_to_series(zs.and_then(|o| o.get("zhvi_sfr")));
+        let ms_mid = value_array_to_series(ms.and_then(|o| o.get("zhvi_mid")));
+        let us_mid = value_array_to_series(us.and_then(|o| o.get("zhvi_mid")));
+
+        let zhvi_stats = series_stats(&zs_mid, 12);
+        let zhvi_sfr_stats = series_stats(&zs_sfr, 12);
+        let metro_zhvi_stats = series_stats(&ms_mid, 12);
+        let us_zhvi_stats = series_stats(&us_mid, 12);
+
+        data.insert("zhvi".into(), zhvi_stats.clone().unwrap_or(Value::Null));
+        data.insert("zhviSfr".into(), zhvi_sfr_stats.unwrap_or(Value::Null));
+        data.insert("metroZhvi".into(), metro_zhvi_stats.unwrap_or(Value::Null));
+        data.insert("usZhvi".into(), us_zhvi_stats.unwrap_or(Value::Null));
+
+        let mut tiers = Map::new();
+        for k in [
+            "zhvi_bottom",
+            "zhvi_mid",
+            "zhvi_top",
+            "zhvi_sfr",
+            "zhvi_bd1",
+            "zhvi_bd2",
+            "zhvi_bd3",
+            "zhvi_bd4",
+            "zhvi_bd5",
+        ] {
+            let s = value_array_to_series(zs.and_then(|o| o.get(k)));
+            let short_k = k.trim_start_matches("zhvi_");
+            if let Some(last) = s.last() {
+                tiers.insert(short_k.to_string(), json!(last.1.round() as i64));
+            } else if short_k != "bd1" {
+                tiers.insert(short_k.to_string(), Value::Null);
+            }
+        }
+        data.insert("tiers".into(), Value::Object(tiers));
+
+        let mut bd_yoy = Map::new();
+        for k in ["zhvi_bd2", "zhvi_bd3", "zhvi_bd4", "zhvi_bd5"] {
+            let s = value_array_to_series(zs.and_then(|o| o.get(k)));
+            let short_k = k.trim_start_matches("zhvi_");
+            bd_yoy.insert(
+                short_k.to_string(),
+                yoy_of_series(&s, 12)
+                    .map(|x| json!(x))
+                    .unwrap_or(Value::Null),
+            );
+        }
+        data.insert("bedroomYoY".into(), Value::Object(bd_yoy));
+
+        let zori_s = value_array_to_series(zs.and_then(|o| o.get("zori")));
+        let ms_zori_s = value_array_to_series(ms.and_then(|o| o.get("zori")));
+        let latest_zhvi = zhvi_stats
+            .as_ref()
+            .and_then(|z| z.get("latest"))
+            .and_then(|v| v.as_f64());
+        if let Some(last_zori) = zori_s.last() {
+            let ptr = latest_zhvi
+                .filter(|&zv| zv > 0.0 && last_zori.1 > 0.0)
+                .map(|zv| round_n(zv / (last_zori.1 * 12.0), 1));
+            let gy = latest_zhvi
+                .filter(|&zv| zv > 0.0 && last_zori.1 > 0.0)
+                .map(|zv| round_n(((last_zori.1 * 12.0) / zv) * 100.0, 2));
+            data.insert(
+                "rent".into(),
+                json!({
+                    "zori": last_zori.1.round() as i64,
+                    "date": last_zori.0,
+                    "yoy": yoy_of_series(&zori_s, 12),
+                    "metroZori": ms_zori_s.last().map(|x| x.1.round() as i64),
+                    "metroYoY": yoy_of_series(&ms_zori_s, 12),
+                    "priceToRent": ptr,
+                    "grossYieldPct": gy,
+                }),
+            );
+        } else {
+            let fallback_bench_rent = data
+                .get("hudFmr")
+                .and_then(|h| h.get("br3"))
+                .and_then(|v| v.as_f64())
+                .filter(|&r| r > 0.0)
+                .or_else(|| {
+                    let acs_zip = data.get("acs").and_then(|a| a.get("zip"))?;
+                    let tc = acs_zip
+                        .get("medianGrossRentTopCoded")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
+                    if tc {
+                        None
+                    } else {
+                        acs_zip
+                            .get("medianGrossRent")
+                            .and_then(|v| v.as_f64())
+                            .filter(|&r| r > 0.0 && r < 3501.0)
+                    }
+                })
+                .or_else(|| ms_zori_s.last().map(|x| x.1).filter(|&r| r > 0.0));
+            if ms_zori_s.last().is_some()
+                || (latest_zhvi.is_some() && fallback_bench_rent.is_some())
+            {
+                let ptr = match (latest_zhvi, fallback_bench_rent) {
+                    (Some(zv), Some(br)) if zv > 0.0 && br > 0.0 => {
+                        Some(round_n(zv / (br * 12.0), 1))
+                    }
+                    _ => None,
+                };
+                let gy = match (latest_zhvi, fallback_bench_rent) {
+                    (Some(zv), Some(br)) if zv > 0.0 && br > 0.0 => {
+                        Some(round_n(((br * 12.0) / zv) * 100.0, 2))
+                    }
+                    _ => None,
+                };
+                data.insert(
+                    "rent".into(),
+                    json!({
+                        "zori": Value::Null,
+                        "date": ms_zori_s.last().map(|x| x.0.clone()),
+                        "yoy": Value::Null,
+                        "metroZori": ms_zori_s.last().map(|x| x.1.round() as i64),
+                        "metroYoY": yoy_of_series(&ms_zori_s, 12),
+                        "priceToRent": ptr,
+                        "grossYieldPct": gy,
+                    }),
+                );
+            } else {
+                data.insert("rent".into(), Value::Null);
+            }
+        }
+
+        data.insert(
+            "forecast".into(),
+            zillow.get("zhvfForecast").cloned().unwrap_or(Value::Null),
+        );
+
+        let mut mm = Map::new();
+        mm.insert(
+            "metro".into(),
+            zillow.get("metroName").cloned().unwrap_or(Value::Null),
+        );
+        let mut temp_val = None;
+        if let Some(ms_obj) = ms.and_then(|v| v.as_object()) {
+            for (k, s_val) in ms_obj {
+                if k == "zhvi_mid" || k == "zori" {
+                    continue;
+                }
+                let s = value_array_to_series(Some(s_val));
+                if let Some(lv) = s.last() {
+                    if k == "market_temp" {
+                        temp_val = Some(lv.1);
+                    }
+                    let tail: Vec<Value> = s
+                        .iter()
+                        .rev()
+                        .take(60)
+                        .rev()
+                        .map(|(d, v)| json!([d, v]))
+                        .collect();
+                    mm.insert(
+                        k.clone(),
+                        json!({
+                            "value": lv.1,
+                            "date": lv.0,
+                            "yoy": yoy_of_series(&s, 12),
+                            "series": tail,
+                        }),
+                    );
+                }
+            }
+        }
+        mm.insert(
+            "label".into(),
+            market_temp_label(temp_val)
+                .map(|s| json!(s))
+                .unwrap_or(Value::Null),
+        );
+        data.insert("metroMarket".into(), Value::Object(mm));
+
+        data.insert(
+            "series".into(),
+            json!({
+                "zip": zs.and_then(|o| o.get("zhvi_mid")).cloned().unwrap_or_else(|| json!([])),
+                "zipSfr": zs.and_then(|o| o.get("zhvi_sfr")).cloned().unwrap_or_else(|| json!([])),
+                "zipTop": zs.and_then(|o| o.get("zhvi_top")).cloned().unwrap_or_else(|| json!([])),
+                "zipBottom": zs.and_then(|o| o.get("zhvi_bottom")).cloned().unwrap_or_else(|| json!([])),
+                "metro": ms.and_then(|o| o.get("zhvi_mid")).cloned().unwrap_or_else(|| json!([])),
+                "us": us.and_then(|o| o.get("zhvi_mid")).cloned().unwrap_or_else(|| json!([])),
+                "zori": zs.and_then(|o| o.get("zori")).cloned().unwrap_or_else(|| json!([])),
+                "metroZori": ms.and_then(|o| o.get("zori")).cloned().unwrap_or_else(|| json!([])),
+            }),
+        );
+    } else {
+        // Both strict clean-room mode and research mode without local Zillow CSVs
+        // synthesize market curves from real US public-domain FHFA HPI, Census ACS,
+        // HUD SAFMR/FMR, and BLS CPI Shelter datasets.
         let mort30_latest = data
             .get("rates")
             .and_then(|r| r.get("mort30"))
@@ -1097,225 +1351,47 @@ async fn run_market_trends_inner(
             &mut sources,
         )
         .await;
-    } else {
-        let has_zillow = zillow
-            .get("zipSeries")
-            .and_then(|z| z.as_object())
-            .map(|o| !o.is_empty())
+
+        let has_fallback_series = data
+            .get("series")
+            .and_then(|s| s.get("zip"))
+            .and_then(|v| v.as_array())
+            .map(|a| !a.is_empty())
             .unwrap_or(false);
 
-        if has_zillow {
-            zillow_used = true;
-            sources.push(SourceItem::new(
-                "Zillow Home Value Index (ZHVI), Observed Rent Index (ZORI), Home Value Forecast & market metrics",
-                "https://www.zillow.com/research/data/",
-            ));
-            let zs = zillow.get("zipSeries");
-            let ms = zillow.get("metroSeries");
-            let us = zillow.get("usSeries");
-
-            let zs_mid = value_array_to_series(zs.and_then(|o| o.get("zhvi_mid")));
-            let zs_sfr = value_array_to_series(zs.and_then(|o| o.get("zhvi_sfr")));
-            let ms_mid = value_array_to_series(ms.and_then(|o| o.get("zhvi_mid")));
-            let us_mid = value_array_to_series(us.and_then(|o| o.get("zhvi_mid")));
-
-            let zhvi_stats = series_stats(&zs_mid, 12);
-            let zhvi_sfr_stats = series_stats(&zs_sfr, 12);
-            let metro_zhvi_stats = series_stats(&ms_mid, 12);
-            let us_zhvi_stats = series_stats(&us_mid, 12);
-
-            data.insert("zhvi".into(), zhvi_stats.clone().unwrap_or(Value::Null));
-            data.insert("zhviSfr".into(), zhvi_sfr_stats.unwrap_or(Value::Null));
-            data.insert("metroZhvi".into(), metro_zhvi_stats.unwrap_or(Value::Null));
-            data.insert("usZhvi".into(), us_zhvi_stats.unwrap_or(Value::Null));
-
-            let mut tiers = Map::new();
-            for k in [
-                "zhvi_bottom",
-                "zhvi_mid",
-                "zhvi_top",
-                "zhvi_sfr",
-                "zhvi_bd1",
-                "zhvi_bd2",
-                "zhvi_bd3",
-                "zhvi_bd4",
-                "zhvi_bd5",
-            ] {
-                let s = value_array_to_series(zs.and_then(|o| o.get(k)));
-                let short_k = k.trim_start_matches("zhvi_");
-                if let Some(last) = s.last() {
-                    tiers.insert(short_k.to_string(), json!(last.1.round() as i64));
-                } else if short_k != "bd1" {
-                    tiers.insert(short_k.to_string(), Value::Null);
-                }
-            }
-            data.insert("tiers".into(), Value::Object(tiers));
-
-            let mut bd_yoy = Map::new();
-            for k in ["zhvi_bd2", "zhvi_bd3", "zhvi_bd4", "zhvi_bd5"] {
-                let s = value_array_to_series(zs.and_then(|o| o.get(k)));
-                let short_k = k.trim_start_matches("zhvi_");
-                bd_yoy.insert(
-                    short_k.to_string(),
-                    yoy_of_series(&s, 12)
-                        .map(|x| json!(x))
-                        .unwrap_or(Value::Null),
+        if !strict_mode {
+            public_fallback_used = has_fallback_series;
+            if !has_fallback_series {
+                warnings.push(
+                    "ZIP home-value dataset empty or unavailable; public FHFA/ACS fallback also unavailable."
+                        .into(),
                 );
             }
-            data.insert("bedroomYoY".into(), Value::Object(bd_yoy));
-
-            let zori_s = value_array_to_series(zs.and_then(|o| o.get("zori")));
-            let ms_zori_s = value_array_to_series(ms.and_then(|o| o.get("zori")));
-            let latest_zhvi = zhvi_stats
-                .as_ref()
-                .and_then(|z| z.get("latest"))
-                .and_then(|v| v.as_f64());
-            if let Some(last_zori) = zori_s.last() {
-                let ptr = latest_zhvi
-                    .filter(|&zv| zv > 0.0 && last_zori.1 > 0.0)
-                    .map(|zv| round_n(zv / (last_zori.1 * 12.0), 1));
-                let gy = latest_zhvi
-                    .filter(|&zv| zv > 0.0 && last_zori.1 > 0.0)
-                    .map(|zv| round_n(((last_zori.1 * 12.0) / zv) * 100.0, 2));
-                data.insert(
-                    "rent".into(),
-                    json!({
-                        "zori": last_zori.1.round() as i64,
-                        "date": last_zori.0,
-                        "yoy": yoy_of_series(&zori_s, 12),
-                        "metroZori": ms_zori_s.last().map(|x| x.1.round() as i64),
-                        "metroYoY": yoy_of_series(&ms_zori_s, 12),
-                        "priceToRent": ptr,
-                        "grossYieldPct": gy,
-                    }),
-                );
-            } else {
-                let fallback_bench_rent = data
-                    .get("hudFmr")
-                    .and_then(|h| h.get("br3"))
-                    .and_then(|v| v.as_f64())
-                    .filter(|&r| r > 0.0)
-                    .or_else(|| {
-                        let acs_zip = data.get("acs").and_then(|a| a.get("zip"))?;
-                        let tc = acs_zip
-                            .get("medianGrossRentTopCoded")
-                            .and_then(|v| v.as_bool())
-                            .unwrap_or(false);
-                        if tc {
-                            None
-                        } else {
-                            acs_zip
-                                .get("medianGrossRent")
-                                .and_then(|v| v.as_f64())
-                                .filter(|&r| r > 0.0 && r < 3501.0)
-                        }
-                    })
-                    .or_else(|| ms_zori_s.last().map(|x| x.1).filter(|&r| r > 0.0));
-                if ms_zori_s.last().is_some()
-                    || (latest_zhvi.is_some() && fallback_bench_rent.is_some())
-                {
-                    let ptr = match (latest_zhvi, fallback_bench_rent) {
-                        (Some(zv), Some(br)) if zv > 0.0 && br > 0.0 => {
-                            Some(round_n(zv / (br * 12.0), 1))
-                        }
-                        _ => None,
-                    };
-                    let gy = match (latest_zhvi, fallback_bench_rent) {
-                        (Some(zv), Some(br)) if zv > 0.0 && br > 0.0 => {
-                            Some(round_n(((br * 12.0) / zv) * 100.0, 2))
-                        }
-                        _ => None,
-                    };
-                    data.insert(
-                        "rent".into(),
-                        json!({
-                            "zori": Value::Null,
-                            "date": ms_zori_s.last().map(|x| x.0.clone()),
-                            "yoy": Value::Null,
-                            "metroZori": ms_zori_s.last().map(|x| x.1.round() as i64),
-                            "metroYoY": yoy_of_series(&ms_zori_s, 12),
-                            "priceToRent": ptr,
-                            "grossYieldPct": gy,
-                        }),
-                    );
-                } else {
-                    data.insert("rent".into(), Value::Null);
-                }
-            }
-
-            data.insert(
-                "forecast".into(),
-                zillow.get("zhvfForecast").cloned().unwrap_or(Value::Null),
-            );
-
-            let mut mm = Map::new();
-            mm.insert(
-                "metro".into(),
-                zillow.get("metroName").cloned().unwrap_or(Value::Null),
-            );
-            let mut temp_val = None;
-            if let Some(ms_obj) = ms.and_then(|v| v.as_object()) {
-                for (k, s_val) in ms_obj {
-                    if k == "zhvi_mid" || k == "zori" {
-                        continue;
-                    }
-                    let s = value_array_to_series(Some(s_val));
-                    if let Some(lv) = s.last() {
-                        if k == "market_temp" {
-                            temp_val = Some(lv.1);
-                        }
-                        let tail: Vec<Value> = s
-                            .iter()
-                            .rev()
-                            .take(60)
-                            .rev()
-                            .map(|(d, v)| json!([d, v]))
-                            .collect();
-                        mm.insert(
-                            k.clone(),
-                            json!({
-                                "value": lv.1,
-                                "date": lv.0,
-                                "yoy": yoy_of_series(&s, 12),
-                                "series": tail,
-                            }),
-                        );
-                    }
-                }
-            }
-            mm.insert(
-                "label".into(),
-                market_temp_label(temp_val)
-                    .map(|s| json!(s))
-                    .unwrap_or(Value::Null),
-            );
-            data.insert("metroMarket".into(), Value::Object(mm));
-
-            data.insert(
-                "series".into(),
-                json!({
-                    "zip": zs.and_then(|o| o.get("zhvi_mid")).cloned().unwrap_or_else(|| json!([])),
-                    "zipSfr": zs.and_then(|o| o.get("zhvi_sfr")).cloned().unwrap_or_else(|| json!([])),
-                    "zipTop": zs.and_then(|o| o.get("zhvi_top")).cloned().unwrap_or_else(|| json!([])),
-                    "zipBottom": zs.and_then(|o| o.get("zhvi_bottom")).cloned().unwrap_or_else(|| json!([])),
-                    "metro": ms.and_then(|o| o.get("zhvi_mid")).cloned().unwrap_or_else(|| json!([])),
-                    "us": us.and_then(|o| o.get("zhvi_mid")).cloned().unwrap_or_else(|| json!([])),
-                    "zori": zs.and_then(|o| o.get("zori")).cloned().unwrap_or_else(|| json!([])),
-                    "metroZori": ms.and_then(|o| o.get("zori")).cloned().unwrap_or_else(|| json!([])),
-                }),
-            );
-        } else {
-            warnings.push(
-                "ZIP home-value dataset empty or unavailable; ZIP-level value history skipped."
-                    .into(),
-            );
         }
     }
 
-    data.insert(
-        "data_licensing".into(),
-        crate::property::commercial_data::build_data_licensing_block(env, zillow_used),
-    );
+    let mut licensing =
+        crate::property::commercial_data::build_data_licensing_block(env, zillow_used);
+    if let Some(obj) = licensing.as_object_mut() {
+        let engine = if strict_mode {
+            "commercial_clean_room"
+        } else if zillow_used {
+            "zillow_research_csv"
+        } else {
+            "public_fhfa_acs_fallback"
+        };
+        obj.insert("market_data_engine".into(), json!(engine));
+        if !strict_mode && !zillow_used {
+            obj.insert("public_fallback_used".into(), json!(public_fallback_used));
+            obj.insert(
+                "fallback_note".into(),
+                json!(
+                    "Zillow ZIP dataset unavailable in research mode; populated from public-domain FHFA HPI, Census ACS, HUD SAFMR, and BLS CPI Shelter."
+                ),
+            );
+        }
+    }
+    data.insert("data_licensing".into(), licensing);
     // ---- 5. Official U.S. BLS Retail Electricity Rate ----
     let elec_reg = r_bls_elec
         .ok()
@@ -1577,5 +1653,301 @@ mod tests {
         assert_eq!(parsed["br5"], json!(3818)); // round(3320 * 1.15)
         assert_eq!(parsed["paymentStandards90"]["br3"], json!(2511));
         assert_eq!(parsed["paymentStandards110"]["br3"], json!(3069));
+    }
+
+    #[test]
+    fn test_parse_fred_csv_rejects_html_error_pages_and_non_dates() {
+        let html_404 = "<!DOCTYPE html>\n<html><head><style>\nbody, 100\nmargin, 20\npadding, 10\nfont, 14\nline, 18\n</style></head><body>404 Not Found</body></html>";
+        assert!(parse_fred_csv(html_404).is_empty());
+
+        let mixed = "observation_date,ATNHPIUS06085A\nnot-a-date,123.4\n2024-01-01,.\n2024-01-01,412.50\n2025-01-01,428.75\n";
+        let parsed = parse_fred_csv(mixed);
+        assert_eq!(
+            parsed,
+            vec![
+                ("2024-01-01".to_string(), 412.50),
+                ("2025-01-01".to_string(), 428.75),
+            ]
+        );
+    }
+
+    async fn spawn_synthetic_fred_and_census(
+    ) -> (String, String) {
+        use axum::{extract::Query, routing::get, Json, Router};
+        use std::collections::HashMap;
+        use tokio::net::TcpListener;
+
+        let fred_listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind synthetic FRED listener");
+        let fred_addr = fred_listener.local_addr().unwrap();
+        let fred_app = Router::new().route(
+            "/graph/fredgraph.csv",
+            get(|Query(q): Query<HashMap<String, String>>| async move {
+                let id = q.get("id").map(String::as_str).unwrap_or("");
+                if id == "ATNHPIUS95008A" {
+                    return (
+                        [("content-type", "text/html; charset=utf-8")],
+                        "<!DOCTYPE html><html><head><style>\nbody, 100\nmargin, 20\npadding, 10\nfont, 14\nline, 18\n</style></head><body>Not Found</body></html>".to_string(),
+                    );
+                }
+                let mut csv = format!("observation_date,{id}\n");
+                match id {
+                    "ATNHPIUS06085A" => {
+                        for yr in 2000..=2025 {
+                            let val = 180.0 * (1.055_f64).powi(yr - 2000);
+                            csv.push_str(&format!("{yr:04}-01-01,{val:.2}\n"));
+                        }
+                    }
+                    "ATNHPIUS41940Q" | "CASTHPI" | "USSTHPI" => {
+                        let base = if id == "USSTHPI" { 200.0 } else { 220.0 };
+                        let rate = if id == "USSTHPI" { 1.009_f64 } else { 1.0125_f64 };
+                        for yr in 2000..=2026 {
+                            for mo in [1, 4, 7, 10] {
+                                if yr == 2026 && mo > 4 {
+                                    break;
+                                }
+                                let q_idx = (yr - 2000) * 4 + (mo / 3);
+                                let val = base * rate.powi(q_idx);
+                                csv.push_str(&format!("{yr:04}-{mo:02}-01,{val:.2}\n"));
+                            }
+                        }
+                    }
+                    "CUUR0000SEHA" => {
+                        for yr in 2014..=2026 {
+                            for mo in 1..=12 {
+                                if yr == 2026 && mo > 9 {
+                                    break;
+                                }
+                                let idx_m = (yr - 2014) * 12 + (mo - 1);
+                                let val = 270.0 * (1.0032_f64).powi(idx_m);
+                                csv.push_str(&format!("{yr:04}-{mo:02}-01,{val:.2}\n"));
+                            }
+                        }
+                    }
+                    "MORTGAGE30US" | "MORTGAGE15US" => {
+                        let base = if id == "MORTGAGE30US" { 6.45 } else { 5.85 };
+                        for yr in 2020..=2026 {
+                            for mo in 1..=12 {
+                                if yr == 2026 && mo > 9 {
+                                    break;
+                                }
+                                csv.push_str(&format!("{yr:04}-{mo:02}-01,{base:.2}\n"));
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+                ([("content-type", "text/csv; charset=utf-8")], csv)
+            }),
+        );
+        tokio::spawn(async move {
+            let _ = axum::serve(fred_listener, fred_app).await;
+        });
+
+        let census_listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind synthetic Census listener");
+        let census_addr = census_listener.local_addr().unwrap();
+        let census_app = Router::new().route(
+            "/1.0/data/show/latest",
+            get(|| async {
+                let mk_geo = |hv: f64, rent: f64, inc: f64| {
+                    json!({
+                        "B25077": { "estimate": { "B25077001": hv } },
+                        "B25064": { "estimate": { "B25064001": rent } },
+                        "B19013": { "estimate": { "B19013001": inc } },
+                        "B25003": { "estimate": { "B25003001": 10000.0, "B25003002": 5800.0 } }
+                    })
+                };
+                Json(json!({
+                    "release": { "name": "ACS 2023 5-Year" },
+                    "geography": {
+                        "14000US06085506501": { "name": "Census Tract 5065.01, Santa Clara, CA" },
+                        "86000US95008": { "name": "95008" },
+                        "16000US0610345": { "name": "Campbell, CA" },
+                        "05000US06085": { "name": "Santa Clara County, CA" },
+                        "31000US41940": { "name": "San Jose-Sunnyvale-Santa Clara, CA" },
+                        "04000US06": { "name": "California" },
+                        "01000US": { "name": "United States" }
+                    },
+                    "data": {
+                        "14000US06085506501": mk_geo(1_590_000.0, 2750.0, 155_000.0),
+                        "86000US95008": mk_geo(1_633_600.0, 2689.0, 162_000.0),
+                        "16000US0610345": mk_geo(1_610_000.0, 2710.0, 158_000.0),
+                        "05000US06085": mk_geo(1_520_000.0, 2690.0, 153_000.0),
+                        "31000US41940": mk_geo(1_490_000.0, 2640.0, 150_000.0),
+                        "04000US06": mk_geo(735_000.0, 1950.0, 96_000.0),
+                        "01000US": mk_geo(340_000.0, 1410.0, 78_000.0)
+                    }
+                }))
+            }),
+        );
+        tokio::spawn(async move {
+            let _ = axum::serve(census_listener, census_app).await;
+        });
+
+        (format!("http://{fred_addr}"), format!("http://{census_addr}"))
+    }
+
+    #[tokio::test]
+    async fn test_run_market_trends_research_mode_falls_back_to_public_fhfa_acs_for_campbell_95008()
+    {
+        let (fred_url, census_url) = spawn_synthetic_fred_and_census().await;
+        let env = EnvConfig::from_map(std::collections::HashMap::from([
+            ("COMMERCIAL_DATA_MODE".to_string(), "research".to_string()),
+            ("FRED_BASE_URL".to_string(), fred_url),
+            ("CENSUS_REPORTER_BASE_URL".to_string(), census_url),
+        ]));
+        let http = HttpClient::offline_loopback_only(None);
+
+        let geo = json!({
+            "matched": true,
+            "city": "Campbell",
+            "county": "Santa Clara County",
+            "countyFips": "06085",
+            "state": "CA",
+            "zip": "95008",
+            "tract": "06085506501",
+            "msa": { "cbsa": "41940", "name": "San Jose-Sunnyvale-Santa Clara, CA" },
+            "censusReporterIds": {
+                "tract": "14000US06085506501",
+                "zcta": "86000US95008",
+                "place": "16000US0610345",
+                "county": "05000US06085",
+                "msa": "31000US41940",
+                "state": "04000US06",
+                "nation": "01000US"
+            }
+        });
+
+        // Empty Zillow payload as returned by `load_zillow_for_zip` when no CSVs or ZILLOW_STATIC_BASE_URL exist
+        let empty_zillow = json!({
+            "zip": "95008",
+            "zipSeries": {},
+            "metroSeries": {},
+            "usSeries": {},
+        });
+
+        let out = run_market_trends(&http, &env, &geo, &empty_zillow)
+            .await
+            .expect("run_market_trends research fallback succeeds");
+        let md = &out.data;
+
+        assert_eq!(md["zhvi"]["methodology"], json!("fhfa_county_blended"));
+        assert_eq!(
+            md["zhvi"]["anchorSource"],
+            json!("census_acs_b25077_fhfa_indexed")
+        );
+        assert!(md["zhvi"]["latest"].as_i64().unwrap_or(0) > 1_000_000);
+        assert!(md["zhvi"]["forwardReturns"]["1"]["p50"].is_number());
+        assert!(md["zhvi"]["forwardReturns"]["5"]["p50"].is_number());
+        assert!(md["tiers"]["mid"].as_i64().unwrap_or(0) > 1_000_000);
+        assert_eq!(md["rent"]["cleanRoom"], json!(true));
+        assert!(md["affordability"]["typicalHomePrice"].as_i64().unwrap_or(0) > 1_000_000);
+        assert_eq!(
+            md.pointer("/metroMarket/market_temp/series")
+                .and_then(Value::as_array)
+                .map(Vec::len),
+            Some(60)
+        );
+        for key in ["zip", "zipSfr", "zipTop", "zipBottom", "metro", "us", "zori", "metroZori"] {
+            assert!(
+                md["series"][key]
+                    .as_array()
+                    .map(|a| a.len() >= 120)
+                    .unwrap_or(false),
+                "expected fallback series.{key} to contain >=120 monthly observations"
+            );
+        }
+        // `ATNHPIUS95008A` returned HTML -> must fall back cleanly to `ATNHPIUS06085A` without citing 95008 HPI
+        assert!(out
+            .sources
+            .iter()
+            .any(|s| s.url.contains("ATNHPIUS06085A")));
+        assert!(!out
+            .sources
+            .iter()
+            .any(|s| s.url.contains("ATNHPIUS95008A")));
+        assert!(!out
+            .warnings
+            .iter()
+            .any(|w| w.contains("ZIP-level value history skipped")));
+        assert_eq!(md["data_licensing"]["mode"], json!("research"));
+        assert_eq!(md["data_licensing"]["zillow_public_csv_used"], json!(false));
+        assert_eq!(
+            md["data_licensing"]["market_data_engine"],
+            json!("public_fhfa_acs_fallback")
+        );
+        assert_eq!(md["data_licensing"]["public_fallback_used"], json!(true));
+    }
+
+    #[tokio::test]
+    async fn test_populate_clean_room_uses_pre_fetched_hud_fmr_without_token() {
+        let (fred_url, _census_url) = spawn_synthetic_fred_and_census().await;
+        let env = EnvConfig::from_map(std::collections::HashMap::from([(
+            "FRED_BASE_URL".to_string(),
+            fred_url,
+        )]));
+        let http = HttpClient::offline_loopback_only(None);
+
+        let geo = json!({
+            "zip": "95008",
+            "countyFips": "06085",
+            "state": "CA",
+            "tract": "06085506501",
+            "msa": { "cbsa": "41940", "name": "San Jose-Sunnyvale-Santa Clara, CA" }
+        });
+        let acs = json!({
+            "zip": { "medianHomeValue": 1_633_600.0, "medianGrossRent": 2_689.0 },
+            "metro": { "medianHomeValue": 1_490_000.0, "medianGrossRent": 2_640.0 },
+            "us": { "medianHomeValue": 340_000.0, "medianGrossRent": 1_410.0 }
+        });
+        let synth_fhfa: Vec<(String, f64)> = (2000..=2026)
+            .flat_map(|yr| {
+                [1, 4, 7, 10].into_iter().filter_map(move |mo| {
+                    if yr == 2026 && mo > 4 {
+                        return None;
+                    }
+                    let q_idx = (yr - 2000) * 4 + (mo / 3);
+                    Some((format!("{yr:04}-{mo:02}"), 220.0 * (1.0125_f64).powi(q_idx)))
+                })
+            })
+            .collect();
+
+        let mut data = Map::new();
+        data.insert(
+            "hudFmr".into(),
+            json!({
+                "fiscalYear": 2026,
+                "zip": "95008",
+                "br2": 3650,
+                "br3": 4480,
+                "sourceUrl": "https://www.huduser.gov/portal/datasets/fmr/smallarea/index.html"
+            }),
+        );
+        let mut sources = Vec::new();
+        crate::property::commercial_data::populate_clean_room_market_data(
+            &http,
+            &env,
+            &geo,
+            Some(&acs),
+            Some(&synth_fhfa),
+            Some(&synth_fhfa),
+            Some(&synth_fhfa),
+            Some(6.45),
+            &mut data,
+            &mut sources,
+        )
+        .await;
+
+        assert_eq!(data["rent"]["safmrMonthly"], json!(4480));
+        assert_eq!(data["rent"]["benchmarkMonthlyRent"], json!(4480));
+        assert_eq!(data["rent"]["methodology"], json!("hud_safmr_bls_cpi"));
+        assert_eq!(data["rent"]["cleanRoom"], json!(true));
+        assert!(data["series"]["zori"]
+            .as_array()
+            .map(|a| a.len() >= 120)
+            .unwrap_or(false));
     }
 }

@@ -1,14 +1,14 @@
 id: planning_rezoning_radar
-name: "Municipal Planning, Rezoning & Quarter-Mile Construction Radar"
-version: "1.0.0"
-description: "Active construction footprints, proposed roadways/transit, and municipal ArcGIS/Socrata planning & infill entitlement radar within 0.25–0.50 miles of a parcel."
+name: "Municipal Planning, FTA TOD Upzoning & Quarter-Mile Construction Radar"
+version: "1.1.0"
+description: "Native TOD & infill radar combining keyless US DOT BTS/FTA NTAD National Transit Map stops, Amtrak stations, nearby municipal permit signals (18–805 m), Overpass construction footprints, 0.50-mi statutory TOD upzoning triggers (CA AB 2097/SB 79/SB 9, WA HB 1110, MA MBTA 3A, CO HB 24-1313), and the tod-transit-stops GeoJSON map layer."
 domain: livability
 domains:
   - livability
   - property_facts
-driver: declarative_yaml
+driver: native_adapter
 proto_message_type: "openestate.extension.v1.LivabilitySummaryProto"
-priority: 215
+priority: 255
 enabled_by_default: true
 tier: basic
 license_class: public_open_data
@@ -23,8 +23,8 @@ metering:
     - bytes_downloaded
 builtin: true
 provenance: live_verified
-homepage_url: "https://www.openstreetmap.org/copyright"
-documentation_url: "https://wiki.openstreetmap.org/wiki/Key:construction"
+homepage_url: "https://www.bts.gov/ntad"
+documentation_url: "https://geodata.bts.gov/"
 codeowners:
   - "@openestate/planning"
 geo_scope:
@@ -38,9 +38,9 @@ geo_scope:
 auth:
   auth_type: none
 rate_limit:
-  requests_per_second: 3
-  burst: 6
-  timeout_ms: 4500
+  requests_per_second: 5
+  burst: 10
+  timeout_ms: 8000
   max_retries: 1
 cache_ttl_secs: 86400
 sharing:
@@ -49,17 +49,8 @@ sharing:
   stale_while_revalidate_secs: 21600
   background_refresh: true
 source_attribution:
-  name: "OpenStreetMap Overpass Construction Ways & Municipal Planning Open GIS"
-  url: "https://www.openstreetmap.org/copyright"
-  reference_url_template: "https://www.openstreetmap.org/#map=17/{{lat}}/{{lon}}"
-  schedule_or_version: "ODbL Live Construction/Proposed Ways + Municipal Open Data"
-  notes: "Queries active building/landuse/highway construction and proposed features within 600m alongside city ArcGIS/Socrata planning records; never fabricates unmapped projects."
-request:
-  method: "GET"
-  url: "https://overpass-api.de/api/interpreter"
-  query_params:
-    data: "[out:json][timeout:6];(way[\"building\"=\"construction\"](around:600,{{ lat }},{{ lon }});way[\"landuse\"=\"construction\"](around:600,{{ lat }},{{ lon }});way[\"highway\"=\"construction\"](around:600,{{ lat }},{{ lon }});nw[\"proposed\"](around:600,{{ lat }},{{ lon }}););out center tags;"
-response_mapping:
-  root_path: "$.elements"
-  require_non_empty: true
-  fields: {}
+  name: "US DOT BTS / FTA National Transit Map, Amtrak NTAD & OpenStreetMap Construction Radar"
+  url: "https://www.bts.gov/ntad"
+  reference_url_template: "https://www.openstreetmap.org/#map=16/{{lat}}/{{lon}}"
+  schedule_or_version: "BTS NTAD Live FeatureServer + ODbL Construction/Proposed Ways"
+  notes: "Queries keyless NTAD_National_Transit_Map_Stops, NTAD_Amtrak_Stations, and hedged Overpass construction ways within 0.50 miles (805 m); never calls token-gated National_Transit_Map_Stops and never fabricates unmapped projects."

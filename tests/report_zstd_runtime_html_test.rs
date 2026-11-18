@@ -30,9 +30,10 @@ use open_estate::shared::{round_geojson_coordinates_6dec, EnvConfig, HttpClient}
 use open_estate::web::render::{
     live_template_compile_count, localize_i18n_json_for_brand, render_report_html,
     render_template_single_pass, safe_inline_json, sanitize_report_for_html, BUYER_COPILOT_JS,
-    HOUSE3D_JS, I18NEXT_JS, I18N_EN_JSON, I18N_ES_JSON, I18N_ZH_JSON, OPEN_ESTATE_CORE_JS,
-    PDF_STUDIO_JS, REPORT_DASHBOARD_JS, REPORT_MOTION_JS, REPORT_TEMPLATE_HTML,
-    REPORT_WORKSPACE_JS, WALKIN_MEDIA_JS,
+    HOUSE3D_JS, I18NEXT_JS, I18N_EN_JSON, I18N_ES_JSON, I18N_ZH_JSON, NOISE_WIDGET_JS,
+    OPEN_ESTATE_CORE_JS, PDF_STUDIO_JS, RAINFALL_MOISTURE_WIDGET_JS, REPORT_DASHBOARD_JS,
+    REPORT_MOTION_JS, REPORT_TEMPLATE_HTML, REPORT_WORKSPACE_JS, SOLAR_WIDGET_JS, WALKIN_MEDIA_JS,
+    WEATHER_WIDGET_JS,
 };
 use open_estate::web::server::{build_router, AppState};
 use serde_json::{json, Value};
@@ -360,6 +361,10 @@ async fn zstd_roundtrip_compression_ratio_null_html_and_compiled_template_parity
             ("__REPORT_WORKSPACE_JS__", &open_estate::web::render::safe_inline_js(&combined_ws)),
             ("__REPORT_MOTION_JS__", &open_estate::web::render::safe_inline_js(REPORT_MOTION_JS)),
             ("__REPORT_DASHBOARD_JS__", &open_estate::web::render::safe_inline_js(REPORT_DASHBOARD_JS)),
+            ("__WEATHER_WIDGET_JS__", &open_estate::web::render::safe_inline_js(WEATHER_WIDGET_JS)),
+            ("__SOLAR_WIDGET_JS__", &open_estate::web::render::safe_inline_js(SOLAR_WIDGET_JS)),
+            ("__NOISE_WIDGET_JS__", &open_estate::web::render::safe_inline_js(NOISE_WIDGET_JS)),
+            ("__RAINFALL_MOISTURE_WIDGET_JS__", &open_estate::web::render::safe_inline_js(RAINFALL_MOISTURE_WIDGET_JS)),
             ("__I18N_EN_JSON__", &en_json),
             ("__I18N_ZH_JSON__", &zh_json),
             ("__I18N_ES_JSON__", &es_json),

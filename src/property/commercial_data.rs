@@ -306,6 +306,22 @@ async fn fetch_hud_safmr_rent(
     (r > 200.0).then_some((r, url))
 }
 
+fn hud_fmr_from_data(hud: Option<&Value>) -> Option<(f64, String)> {
+    let h = hud?;
+    let r = h
+        .get("br3")
+        .or_else(|| h.get("br2"))
+        .and_then(|v| v.as_f64())
+        .filter(|&x| x > 200.0)?;
+    let url = h
+        .get("sourceUrl")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("https://www.huduser.gov/portal/datasets/fmr/smallarea/index.html")
+        .to_string();
+    Some((r, url))
+}
+
 fn pick_acs_metric(acs: Option<&Value>, levels: &[&str], field: &str) -> Option<f64> {
     let acs_obj = acs?;
     let geos = acs_obj.get("geos").and_then(|v| v.as_array());
@@ -344,6 +360,34 @@ fn pick_acs_metric(acs: Option<&Value>, levels: &[&str], field: &str) -> Option<
     None
 }
 
+async fn fetch_census_b25077_zip_anchor(
+    http: &HttpClient,
+    env: &EnvConfig,
+    zip5: &str,
+) -> Option<f64> {
+    if zip5.len() != 5 {
+        return None;
+    }
+    let base = env
+        .get_or("CENSUS_REPORTER_BASE_URL", "https://api.censusreporter.org")
+        .trim_end_matches('/')
+        .to_string();
+    let gid = format!("86000US{zip5}");
+    let url = format!("{base}/1.0/data/show/latest?table_ids=B25077&geo_ids={gid}");
+    let j = http
+        .get_json_opts(&url, 5500, 0, 86400 * 14, None)
+        .await
+        .ok()?;
+    j.get("data")
+        .and_then(|d| d.get(&gid))
+        .and_then(|t| t.get("B25077"))
+        .and_then(|b| b.get("estimate"))
+        .and_then(|e| e.get("B25077001"))
+        .and_then(|v| v.as_f64())
+        .filter(|&x| x > 10_000.0)
+        .map(|med| round_n(med, 0))
+}
+
 /// Fast clean-room ZIP home-value anchor when `COMMERCIAL_DATA_MODE=strict`
 /// (prefers free U.S. Census ACS B25077 primary; falls back to optional ATTOM licensed quote).
 pub async fn clean_room_zip_anchor(http: &HttpClient, env: &EnvConfig, geo: &Value) -> Option<f64> {
@@ -355,26 +399,8 @@ pub async fn clean_room_zip_anchor(http: &HttpClient, env: &EnvConfig, geo: &Val
         .chars()
         .take(5)
         .collect();
-    if zip5.len() == 5 {
-        let base = env
-            .get_or("CENSUS_REPORTER_BASE_URL", "https://api.censusreporter.org")
-            .trim_end_matches('/')
-            .to_string();
-        let gid = format!("86000US{zip5}");
-        let url = format!("{base}/1.0/data/show/latest?table_ids=B25077&geo_ids={gid}");
-        if let Ok(j) = http.get_json_opts(&url, 5500, 0, 86400 * 14, None).await {
-            if let Some(med) = j
-                .get("data")
-                .and_then(|d| d.get(&gid))
-                .and_then(|t| t.get("B25077"))
-                .and_then(|b| b.get("estimate"))
-                .and_then(|e| e.get("B25077001"))
-                .and_then(|v| v.as_f64())
-                .filter(|&x| x > 10_000.0)
-            {
-                return Some(round_n(med, 0));
-            }
-        }
+    if let Some(med) = fetch_census_b25077_zip_anchor(http, env, &zip5).await {
+        return Some(med);
     }
     let licensed = fetch_licensed_market_quote(http, env, &zip5).await;
     licensed.median_price.filter(|&x| x > 0.0)
@@ -464,8 +490,8 @@ pub async fn populate_clean_room_market_data(
         .unwrap_or("")
         .trim();
     let metro_name = geo
-        .get("msa")
-        .and_then(|m| m.get("name"))
+        .pointer("/msa/name")
+        .or_else(|| geo.get("cbsaName"))
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
 
@@ -541,23 +567,39 @@ pub async fn populate_clean_room_market_data(
         "medianGrossRent",
     );
     let cpi_rent_fut = http.get_text_opts(&cpi_rent_url, 6500, 0, 86400 * 7, None);
-    let licensed_fut = async {
+    let anchor_fallback_fut = async {
         if acs_zip_val.is_none() {
-            fetch_licensed_market_quote(http, env, &zip5).await
+            let b25077 = fetch_census_b25077_zip_anchor(http, env, &zip5).await;
+            let lic = if b25077.is_none() {
+                fetch_licensed_market_quote(http, env, &zip5).await
+            } else {
+                LicensedMarketQuote::default()
+            };
+            (b25077, lic)
         } else {
-            LicensedMarketQuote::default()
+            (None, LicensedMarketQuote::default())
         }
     };
     let hud_fut = fetch_hud_safmr_rent(http, env, &zip5, county_fips);
+    let pre_fetched_hud = hud_fmr_from_data(data.get("hudFmr"));
 
-    let (zip_hpi_txt, county_hpi_txt, tract_hpi_txt, cpi_rent_res, licensed, hud_safmr) = tokio::join!(
+    let (
+        zip_hpi_txt,
+        county_hpi_txt,
+        tract_hpi_txt,
+        cpi_rent_res,
+        (fallback_acs_zip_val, licensed),
+        hud_api_safmr,
+    ) = tokio::join!(
         zip_hpi_fut,
         county_hpi_fut,
         tract_hpi_fut,
         cpi_rent_fut,
-        licensed_fut,
+        anchor_fallback_fut,
         hud_fut
     );
+    let acs_zip_val = acs_zip_val.or(fallback_acs_zip_val);
+    let hud_safmr = hud_api_safmr.or(pre_fetched_hud);
 
     // 1. Build monthly HPI curves (2000-01 onwards) strictly from real FHFA HPI series
     let us_hpi_monthly = fhfa_us_raw
@@ -578,17 +620,20 @@ pub async fn populate_clean_room_market_data(
         .or_else(|| state_hpi_monthly.clone())
         .unwrap_or_default();
 
-    let zip_hpi_raw = zip_hpi_txt
+    let zip_hpi_monthly = zip_hpi_txt
         .as_deref()
         .map(parse_fred_csv)
-        .filter(|s| s.len() >= 5);
-    let county_hpi_raw = county_hpi_txt
+        .filter(|s| s.len() >= 5)
+        .map(|raw| interpolate_to_monthly(&raw, "2000-01"))
+        .filter(|mo| mo.len() >= 24);
+    let county_hpi_monthly = county_hpi_txt
         .as_deref()
         .map(parse_fred_csv)
-        .filter(|s| s.len() >= 5);
+        .filter(|s| s.len() >= 5)
+        .map(|raw| interpolate_to_monthly(&raw, "2000-01"))
+        .filter(|mo| mo.len() >= 24);
 
-    let (local_hpi_monthly, hpi_granularity) = if let Some(ref z_raw) = zip_hpi_raw {
-        let z_mo = interpolate_to_monthly(z_raw, "2000-01");
+    let (local_hpi_monthly, hpi_granularity) = if let Some(ref z_mo) = zip_hpi_monthly {
         if let Some(ref id) = zip_hpi_id {
             sources.push(SourceItem::new(
                 format!("FHFA 5-Digit ZIP Code House Price Index ({id}, US Public Domain)"),
@@ -596,11 +641,10 @@ pub async fn populate_clean_room_market_data(
             ));
         }
         (
-            blend_zip_and_regional_hpi(&z_mo, &metro_hpi_monthly),
+            blend_zip_and_regional_hpi(z_mo, &metro_hpi_monthly),
             "fhfa_zip5_blended",
         )
-    } else if let Some(ref c_raw) = county_hpi_raw {
-        let c_mo = interpolate_to_monthly(c_raw, "2000-01");
+    } else if let Some(ref c_mo) = county_hpi_monthly {
         if let Some(ref id) = county_hpi_id {
             sources.push(SourceItem::new(
                 format!("FHFA County House Price Index ({id}, US Public Domain)"),
@@ -608,7 +652,7 @@ pub async fn populate_clean_room_market_data(
             ));
         }
         (
-            blend_zip_and_regional_hpi(&c_mo, &metro_hpi_monthly),
+            blend_zip_and_regional_hpi(c_mo, &metro_hpi_monthly),
             "fhfa_county_blended",
         )
     } else {
@@ -695,8 +739,9 @@ pub async fn populate_clean_room_market_data(
         .as_deref()
         .map(parse_fred_csv)
         .filter(|s| s.len() >= 5)
-        .map(|raw| {
-            let t_mo = interpolate_to_monthly(&raw, "2000-01");
+        .map(|raw| interpolate_to_monthly(&raw, "2000-01"))
+        .filter(|t_mo| t_mo.len() >= 24)
+        .map(|t_mo| {
             if let Some(ref u) = tract_hpi_url {
                 sources.push(SourceItem::new(
                     "FHFA Census Tract House Price Index (US Public Domain)",
@@ -781,10 +826,15 @@ pub async fn populate_clean_room_market_data(
 
     let (zip_rent_series, static_rent_anchor, rent_methodology) =
         if let Some((hud_r, hud_url)) = hud_safmr.clone() {
-            sources.push(SourceItem::new(
-                "U.S. HUD Small Area Fair Market Rents (SAFMR) / Fair Market Rents (Public Domain)",
-                hud_url,
-            ));
+            if !sources
+                .iter()
+                .any(|s| s.url == hud_url || s.name.contains("HUD"))
+            {
+                sources.push(SourceItem::new(
+                    "U.S. HUD Small Area Fair Market Rents (SAFMR) / Fair Market Rents (Public Domain)",
+                    hud_url,
+                ));
+            }
             (
                 scale_hpi_to_dollars(&cpi_rent_monthly, hud_r, None),
                 Some(hud_r),

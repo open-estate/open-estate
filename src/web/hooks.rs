@@ -10,7 +10,7 @@ use crate::metering::{
 };
 pub use crate::shared::scrub_rental_source_brands;
 use crate::shared::{EnvConfig, HttpClient};
-use crate::web::http_util::{html_response, json_response};
+use crate::web::http_util::{html_response, json_response, report_not_found_html};
 use crate::web::render::safe_inline_js;
 use crate::web::server::AppState;
 use axum::{
@@ -144,11 +144,9 @@ pub fn default_authorize_report(
         });
     }
     if html_404 {
-        let brand_name = env.brand_name();
-        let brand = html_escape::encode_text(&brand_name);
         return Err(html_response(
             StatusCode::NOT_FOUND,
-            format!("<h1>Report not found</h1><p><a href=\"/\">Back to {brand}</a></p>"),
+            report_not_found_html(&env.brand_name()),
         ));
     }
     Err(json_response(

@@ -78,6 +78,13 @@ pub use super::routing_providers::{
 
 /// Default / fallback router base URL, e.g. `http://osrm:5000`.
 pub const ENV_OSRM_BASE_URL: &str = "OSRM_BASE_URL";
+/// Optional self-hosted OSRM walking/foot router base URL (`foot` profile; public demo hosts banned).
+pub const ENV_OSRM_FOOT_BASE_URL: &str = "OSRM_FOOT_BASE_URL";
+/// Optional self-hosted OSRM cycling/bike router base URL (`bike` profile; public demo hosts banned).
+pub const ENV_OSRM_BIKE_BASE_URL: &str = "OSRM_BIKE_BASE_URL";
+/// Keyless Esri OpenStreetMap North America Trails / Sidewalks / Bikeways FeatureServer.
+pub const OSM_NA_TRAILS_LAYER: &str =
+    "https://services6.arcgis.com/Do88DoK2xjTUCXd1/arcgis/rest/services/OSM_NA_Trails/FeatureServer/0";
 /// Regional OSRM endpoints JSON (`[{"name":"ca","bbox":[-124.5,32.5,-114.1,42.0],"baseUrl":"http://osrm-ca:5000"}]`).
 pub const ENV_OSRM_REGIONS_JSON: &str = "OSRM_REGIONS_JSON";
 /// Peak-traffic multiplier applied to free-flow minutes (default 1.3, clamped to 1.0–3.0).
@@ -174,6 +181,10 @@ impl OsrmRegion {
 pub struct RoutingConfig {
     /// Fallback / single-region router base URL without a trailing slash. `None`: rely on `regions` or estimates.
     pub base_url: Option<String>,
+    /// Optional self-hosted OSRM `foot` profile base URL (`OSRM_FOOT_BASE_URL`).
+    pub foot_base_url: Option<String>,
+    /// Optional self-hosted OSRM `bike` profile base URL (`OSRM_BIKE_BASE_URL`).
+    pub bike_base_url: Option<String>,
     /// Optional regional OSRM endpoints parsed from `OSRM_REGIONS_JSON`.
     pub regions: Vec<OsrmRegion>,
     /// Multiplier from free-flow to buffered minutes.
@@ -198,6 +209,8 @@ impl Default for RoutingConfig {
     fn default() -> Self {
         Self {
             base_url: None,
+            foot_base_url: None,
+            bike_base_url: None,
             regions: Vec::new(),
             traffic_buffer: DEFAULT_TRAFFIC_BUFFER,
             traffic_buffer_overridden: false,
@@ -212,9 +225,9 @@ impl Default for RoutingConfig {
 }
 
 impl RoutingConfig {
-    /// Reads `OSRM_BASE_URL`, `OSRM_REGIONS_JSON`, `OSRM_TRAFFIC_BUFFER`,
-    /// `OSRM_MAX_TABLE_LOCATIONS`, `OSRM_TIMEOUT_MS`, `OSRM_FAILURE_COOLDOWN_SECS`, and all
-    /// Tier-2 cloud matrix fallback environment variables.
+    /// Reads `OSRM_BASE_URL`, `OSRM_FOOT_BASE_URL`, `OSRM_BIKE_BASE_URL`, `OSRM_REGIONS_JSON`,
+    /// `OSRM_TRAFFIC_BUFFER`, `OSRM_MAX_TABLE_LOCATIONS`, `OSRM_TIMEOUT_MS`,
+    /// `OSRM_FAILURE_COOLDOWN_SECS`, and all Tier-2 cloud matrix fallback environment variables.
     /// Invalid values fall back to their defaults and are listed in `issues`; an invalid or
     /// public-demo base URL disables that router.
     pub fn from_env(env: &EnvConfig) -> Self {
@@ -222,6 +235,18 @@ impl RoutingConfig {
         if let Some(raw) = env.get(ENV_OSRM_BASE_URL) {
             match normalize_base_url_for(raw, ENV_OSRM_BASE_URL) {
                 Ok(url) => cfg.base_url = Some(url),
+                Err(issue) => cfg.issues.push(issue),
+            }
+        }
+        if let Some(raw) = env.get(ENV_OSRM_FOOT_BASE_URL) {
+            match normalize_base_url_for(raw, ENV_OSRM_FOOT_BASE_URL) {
+                Ok(url) => cfg.foot_base_url = Some(url),
+                Err(issue) => cfg.issues.push(issue),
+            }
+        }
+        if let Some(raw) = env.get(ENV_OSRM_BIKE_BASE_URL) {
+            match normalize_base_url_for(raw, ENV_OSRM_BIKE_BASE_URL) {
+                Ok(url) => cfg.bike_base_url = Some(url),
                 Err(issue) => cfg.issues.push(issue),
             }
         }
@@ -333,6 +358,7 @@ pub fn is_public_demo_host(host: &str) -> bool {
     h == "project-osrm.org"
         || h.ends_with(".project-osrm.org")
         || h == "routing.openstreetmap.de"
+        || h.ends_with(".routing.openstreetmap.de")
 }
 
 fn normalize_base_url_for(raw: &str, env_name: &str) -> Result<String, String> {
@@ -1151,10 +1177,19 @@ fn parse_table(j: &Value, rows: usize, cols: usize) -> Result<TableResponse, Str
 /// `{base}/table/v1/driving/{lon,lat;...}?sources=..&destinations=..`: sources first, then
 /// destinations, each coordinate at the 5-decimal cache precision.
 fn table_url(base: &str, sources: &[(i32, i32)], destinations: &[(i32, i32)]) -> String {
+    table_url_for_profile(base, PROFILE, sources, destinations)
+}
+
+fn table_url_for_profile(
+    base: &str,
+    profile: &str,
+    sources: &[(i32, i32)],
+    destinations: &[(i32, i32)],
+) -> String {
     use std::fmt::Write as _;
     let n = sources.len() + destinations.len();
     let mut url = String::with_capacity(base.len() + 96 + n * 26);
-    let _ = write!(url, "{base}/table/v1/{PROFILE}/");
+    let _ = write!(url, "{base}/table/v1/{profile}/");
     for (i, (lat, lon)) in sources.iter().chain(destinations).enumerate() {
         if i > 0 {
             url.push(';');
@@ -2036,6 +2071,381 @@ impl RoutingClient {
         });
         futures::future::join_all(futs).await
     }
+
+    /// Computes active-mobility (`foot` or `bike`) travel durations and distances from `origin` to
+    /// `destinations`. Calls self-hosted `OSRM_FOOT_BASE_URL` / `OSRM_BIKE_BASE_URL` when configured
+    /// (public demo hosts are strictly rejected by `is_public_demo_host`), and otherwise falls back
+    /// honestly (`estimated: true`) to routed road-network distance from `drive_cells` (when available)
+    /// or a detour-adjusted Haversine distance.
+    pub async fn active_mobility_row(
+        &self,
+        mode: ActiveMobilityMode,
+        origin: LatLon,
+        destinations: &[LatLon],
+        drive_cells: Option<&[Option<DriveTime>]>,
+        has_bikeway_corridor: bool,
+    ) -> Vec<Option<ActiveMobilityTime>> {
+        if !origin.is_valid() || destinations.is_empty() {
+            return vec![None; destinations.len()];
+        }
+
+        let mod_enabled =
+            crate::modules::routing_providers::is_routing_module_enabled(&self.extension_hub);
+        let ext_enabled = mod_enabled && self.extension_hub.is_enabled("osrm_routing");
+        let base_opt = match mode {
+            ActiveMobilityMode::Foot => self.config.foot_base_url.as_deref(),
+            ActiveMobilityMode::Bike => self.config.bike_base_url.as_deref(),
+        };
+
+        let mut routed_map: HashMap<(i32, i32), (f64, f64)> = HashMap::new();
+        let mut fallback_reason = EstimateReason::RouterUnset;
+
+        if ext_enabled {
+            if let Some(base) = base_opt {
+                let (dst_keys, _) = unique_keys(destinations);
+                if !dst_keys.is_empty() {
+                    let src_key = [origin.key()];
+                    let max_dst = self
+                        .config
+                        .max_table_locations
+                        .max(MIN_TABLE_LOCATIONS)
+                        .saturating_sub(1)
+                        .max(1);
+                    let mut router_failed = false;
+                    for chunk in dst_keys.chunks(max_dst) {
+                        match self
+                            .fetch_profile_table(base, mode.osrm_profile(), &src_key, chunk)
+                            .await
+                        {
+                            Ok(table) => {
+                                let src_far = table
+                                    .source_snap_m
+                                    .first()
+                                    .copied()
+                                    .flatten()
+                                    .is_some_and(|m| m > self.config.max_snap_m);
+                                if !src_far {
+                                    for (j, &dk) in chunk.iter().enumerate() {
+                                        let dst_far = table
+                                            .destination_snap_m
+                                            .get(j)
+                                            .copied()
+                                            .flatten()
+                                            .is_some_and(|m| m > self.config.max_snap_m);
+                                        if dst_far {
+                                            continue;
+                                        }
+                                        if let (Some(sec), Some(met)) = (
+                                            table.durations.first().and_then(|r| r.get(j)).copied().flatten(),
+                                            table.distances.first().and_then(|r| r.get(j)).copied().flatten(),
+                                        ) {
+                                            routed_map.insert(dk, (sec, met));
+                                        }
+                                    }
+                                }
+                            }
+                            Err(_) => {
+                                router_failed = true;
+                                break;
+                            }
+                        }
+                    }
+                    fallback_reason = if router_failed {
+                        EstimateReason::RouterDown
+                    } else {
+                        EstimateReason::OutsideCoverage
+                    };
+                }
+            }
+        }
+
+        destinations
+            .iter()
+            .enumerate()
+            .map(|(idx, dst)| {
+                if !dst.is_valid() {
+                    return None;
+                }
+                let dk = dst.key();
+                if let Some(&(seconds, meters)) = routed_map.get(&dk) {
+                    return Some(ActiveMobilityTime {
+                        duration_min: (seconds / 60.0).max(1.0),
+                        distance_mi: meters / MILE_M,
+                        estimated: false,
+                        reason: None,
+                        basis: "self_hosted_osrm",
+                        profile: mode.osrm_profile(),
+                    });
+                }
+
+                let routed_drive_mi = drive_cells
+                    .and_then(|row| row.get(idx))
+                    .copied()
+                    .flatten()
+                    .filter(|c| !c.estimated && c.distance_mi.is_finite() && c.distance_mi > 0.0)
+                    .map(|c| c.distance_mi);
+
+                let (dist_mi, basis) = if let Some(d_mi) = routed_drive_mi {
+                    (d_mi, "drive_network_distance_scaled")
+                } else {
+                    let straight_m = haversine_m(origin.lat, origin.lon, dst.lat, dst.lon);
+                    let detour = match mode {
+                        ActiveMobilityMode::Foot => 1.25,
+                        ActiveMobilityMode::Bike => ROAD_DISTANCE_FACTOR,
+                    };
+                    ((straight_m / MILE_M) * detour, "straight_line_detour_estimate")
+                };
+
+                let speed_mph = match mode {
+                    ActiveMobilityMode::Foot => 3.0,
+                    ActiveMobilityMode::Bike => {
+                        if has_bikeway_corridor {
+                            11.5
+                        } else {
+                            10.5
+                        }
+                    }
+                };
+                let duration_min = ((dist_mi / speed_mph) * 60.0).max(1.0);
+
+                Some(ActiveMobilityTime {
+                    duration_min,
+                    distance_mi: dist_mi,
+                    estimated: true,
+                    reason: Some(fallback_reason),
+                    basis,
+                    profile: mode.osrm_profile(),
+                })
+            })
+            .collect()
+    }
+
+    async fn fetch_profile_table(
+        &self,
+        base: &str,
+        profile: &str,
+        sources: &[(i32, i32)],
+        destinations: &[(i32, i32)],
+    ) -> Result<TableResponse, String> {
+        let cooldown_key = format!("{profile}|{base}");
+        if self.config.failure_cooldown_secs > 0 {
+            if let Some(cached_warn) = active_router_cooldown(&cooldown_key) {
+                return Err(cached_warn);
+            }
+        }
+        let url = table_url_for_profile(base, profile, sources, destinations);
+        let client = self
+            .http
+            .direct_client_for_url(&url)
+            .map_err(|e| describe_failure(&e, &url))?;
+        let sem = self.http.host_semaphore(&url);
+        let _permit = sem.acquire_owned().await.ok();
+
+        let resp = client
+            .get(&url)
+            .header("Accept", "application/json")
+            .timeout(Duration::from_millis(self.config.timeout_ms))
+            .send()
+            .await
+            .map_err(|re| {
+                let e: anyhow::Error = re.into();
+                let desc = describe_failure(&e, &url);
+                if is_cooldown_worthy_error(&e) {
+                    record_router_cooldown(&cooldown_key, self.config.failure_cooldown_secs, &desc);
+                }
+                desc
+            })?;
+
+        let status = resp.status().as_u16();
+        if !(200..300).contains(&status) {
+            let e = anyhow::anyhow!("{} returned HTTP {status}", url_host_label(&url));
+            let desc = describe_failure(&e, &url);
+            if is_cooldown_worthy_error(&e) {
+                record_router_cooldown(&cooldown_key, self.config.failure_cooldown_secs, &desc);
+            }
+            return Err(desc);
+        }
+        clear_router_cooldown(&cooldown_key);
+        let json: Value = resp.json().await.map_err(|je| {
+            let e = anyhow::anyhow!("invalid JSON from {}: {je}", url_host_label(&url));
+            describe_failure(&e, &url)
+        })?;
+        parse_table(&json, sources.len(), destinations.len())
+    }
+}
+
+/// Active-mobility profile (`foot` or `bike`) for walking and cycling matrices.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ActiveMobilityMode {
+    Foot,
+    Bike,
+}
+
+impl ActiveMobilityMode {
+    pub fn osrm_profile(self) -> &'static str {
+        match self {
+            Self::Foot => "foot",
+            Self::Bike => "bike",
+        }
+    }
+}
+
+/// Walking or cycling duration & distance cell between two points, with honest `estimated` metadata.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ActiveMobilityTime {
+    pub duration_min: f64,
+    pub distance_mi: f64,
+    pub estimated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<EstimateReason>,
+    pub basis: &'static str,
+    pub profile: &'static str,
+}
+
+/// Summary of mapped neighborhood sidewalks, footways, cycleways, and trails within 800 m from
+/// Esri's keyless `OSM_NA_Trails` FeatureServer.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ActiveMobilityCorridorSummary {
+    pub queried: bool,
+    pub status: String,
+    pub sidewalk_or_footway_segments_800m: usize,
+    pub bikeway_or_cycleway_segments_800m: usize,
+    pub lit_pathway_segments_800m: usize,
+    pub has_sidewalk_corridor: bool,
+    pub has_bikeway_corridor: bool,
+    pub named_trails: Vec<String>,
+}
+
+impl ActiveMobilityCorridorSummary {
+    pub fn skipped(status: &str) -> Self {
+        Self {
+            queried: false,
+            status: status.to_string(),
+            sidewalk_or_footway_segments_800m: 0,
+            bikeway_or_cycleway_segments_800m: 0,
+            lit_pathway_segments_800m: 0,
+            has_sidewalk_corridor: false,
+            has_bikeway_corridor: false,
+            named_trails: Vec::new(),
+        }
+    }
+}
+
+/// Queries keyless Esri `OSM_NA_Trails` within 800 m of `(lat, lon)` to check sidewalk/footway
+/// and dedicated bikeway/cycleway corridor presence. Respects `http.is_offline_external_blocked()`.
+pub async fn fetch_osm_na_trails_corridor(
+    http: &HttpClient,
+    lat: f64,
+    lon: f64,
+) -> ActiveMobilityCorridorSummary {
+    if http.is_offline_external_blocked() {
+        return ActiveMobilityCorridorSummary::skipped("offline_skipped");
+    }
+    fetch_osm_na_trails_corridor_with_layer(http, OSM_NA_TRAILS_LAYER, lat, lon).await
+}
+
+pub async fn fetch_osm_na_trails_corridor_with_layer(
+    http: &HttpClient,
+    layer_url: &str,
+    lat: f64,
+    lon: f64,
+) -> ActiveMobilityCorridorSummary {
+    if !LatLon::new(lat, lon).is_valid() {
+        return ActiveMobilityCorridorSummary::skipped("invalid_coordinates");
+    }
+    let params = vec![
+        ("geometry", format!("{lon},{lat}")),
+        ("geometryType", "esriGeometryPoint".to_string()),
+        ("inSR", "4326".to_string()),
+        ("spatialRel", "esriSpatialRelIntersects".to_string()),
+        ("distance", "800".to_string()),
+        ("units", "esriSRUnit_Meter".to_string()),
+        (
+            "outFields",
+            "osm_id,name,highway,foot,footway,bicycle,bicycle_road,cycleway,sidewalk,surface,lit"
+                .to_string(),
+        ),
+        ("returnGeometry", "false".to_string()),
+        ("resultRecordCount", "80".to_string()),
+    ];
+    let Ok(j) = http.arcgis_query(layer_url, &params, 4_500).await else {
+        return ActiveMobilityCorridorSummary::skipped("upstream_unavailable");
+    };
+    let Some(feats) = j.get("features").and_then(Value::as_array) else {
+        return ActiveMobilityCorridorSummary::skipped("upstream_unavailable");
+    };
+
+    let mut foot_cnt = 0usize;
+    let mut bike_cnt = 0usize;
+    let mut lit_cnt = 0usize;
+    let mut named_trails: Vec<String> = Vec::new();
+
+    for f in feats {
+        let Some(attrs) = f.get("attributes").and_then(Value::as_object) else {
+            continue;
+        };
+        let s = |k: &str| {
+            attrs
+                .get(k)
+                .and_then(Value::as_str)
+                .map(|v| v.trim().to_ascii_lowercase())
+                .unwrap_or_default()
+        };
+        let hwy = s("highway");
+        let foot = s("foot");
+        let footway = s("footway");
+        let sidewalk = s("sidewalk");
+        let bicycle = s("bicycle");
+        let bike_rd = s("bicycle_road");
+        let cycleway = s("cycleway");
+        let lit = s("lit");
+
+        let is_foot = matches!(
+            hwy.as_str(),
+            "footway" | "pedestrian" | "path" | "steps" | "living_street"
+        ) || matches!(foot.as_str(), "yes" | "designated" | "permissive")
+            || !footway.is_empty()
+            || (!sidewalk.is_empty() && sidewalk != "no" && sidewalk != "none");
+
+        let is_bike = hwy == "cycleway"
+            || matches!(bicycle.as_str(), "designated" | "yes")
+            || bike_rd == "yes"
+            || (!cycleway.is_empty() && cycleway != "no" && cycleway != "none");
+
+        if is_foot {
+            foot_cnt += 1;
+        }
+        if is_bike {
+            bike_cnt += 1;
+        }
+        if lit == "yes" {
+            lit_cnt += 1;
+        }
+        if let Some(nm) = attrs
+            .get("name")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|v| !v.is_empty() && named_trails.len() < 5)
+        {
+            if !named_trails.iter().any(|x| x.eq_ignore_ascii_case(nm)) {
+                named_trails.push(nm.to_string());
+            }
+        }
+    }
+
+    ActiveMobilityCorridorSummary {
+        queried: true,
+        status: "verified_osm_na_trails".to_string(),
+        sidewalk_or_footway_segments_800m: foot_cnt,
+        bikeway_or_cycleway_segments_800m: bike_cnt,
+        lit_pathway_segments_800m: lit_cnt,
+        has_sidewalk_corridor: foot_cnt > 0,
+        has_bikeway_corridor: bike_cnt > 0,
+        named_trails,
+    }
 }
 
 /// Commute times for every home against every place, using the routing settings captured by
@@ -2424,5 +2834,97 @@ mod tests {
         assert!(!first.estimated);
         assert!((first.distance_mi - (10_420.0 / MILE_M)).abs() < 1e-6);
         assert!((first.free_flow_min - 642.0 / 60.0).abs() < 1e-6);
+    }
+
+    #[tokio::test]
+    async fn foot_and_bike_routers_reject_public_demo_hosts_and_route_or_estimate_honestly() {
+        use axum::{routing::any, Json, Router};
+
+        for demo in [
+            "https://routing.openstreetmap.de/routed-foot",
+            "https://router.project-osrm.org",
+            "http://foot.routing.openstreetmap.de",
+        ] {
+            let env = EnvConfig::from_map(HashMap::from([
+                (ENV_OSRM_FOOT_BASE_URL.to_string(), demo.to_string()),
+                (ENV_OSRM_BIKE_BASE_URL.to_string(), demo.to_string()),
+            ]));
+            let cfg = RoutingConfig::from_env(&env);
+            assert!(cfg.foot_base_url.is_none(), "{demo} must be banned");
+            assert!(cfg.bike_base_url.is_none(), "{demo} must be banned");
+            assert_eq!(cfg.issues.len(), 2);
+        }
+
+        let app = Router::new()
+            .route(
+                "/table/v1/foot/:coords",
+                any(|| async {
+                    Json(json!({
+                        "code": "Ok",
+                        "durations": [[480.0]],
+                        "distances": [[640.0]],
+                        "sources": [{"distance": 2.0}],
+                        "destinations": [{"distance": 3.0}]
+                    }))
+                }),
+            )
+            .route(
+                "/trails/query",
+                any(|| async {
+                    Json(json!({
+                        "features": [
+                            {
+                                "attributes": {
+                                    "osm_id": 1001,
+                                    "name": "Los Gatos Creek Trail",
+                                    "highway": "cycleway",
+                                    "foot": "designated",
+                                    "bicycle": "designated",
+                                    "lit": "yes"
+                                }
+                            }
+                        ]
+                    }))
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        let base = format!("http://{addr}");
+
+        let env = EnvConfig::from_map(HashMap::from([(
+            ENV_OSRM_FOOT_BASE_URL.to_string(),
+            base.clone(),
+        )]));
+        let http = HttpClient::offline_loopback_only(None);
+        let client = RoutingClient::new(http.clone(), RoutingConfig::from_env(&env));
+        let orig = LatLon::new(37.2883, -121.9441);
+        let dst = [LatLon::new(37.2850, -121.9480)];
+
+        let foot = client
+            .active_mobility_row(ActiveMobilityMode::Foot, orig, &dst, None, false)
+            .await;
+        let f0 = foot[0].expect("foot cell");
+        assert!(!f0.estimated);
+        assert_eq!(f0.basis, "self_hosted_osrm");
+        assert!((f0.duration_min - 8.0).abs() < 1e-6);
+
+        // Bike router is unset -> falls back honestly to estimated: true
+        let bike = client
+            .active_mobility_row(ActiveMobilityMode::Bike, orig, &dst, None, true)
+            .await;
+        let b0 = bike[0].expect("bike cell");
+        assert!(b0.estimated);
+        assert_eq!(b0.reason, Some(EstimateReason::RouterUnset));
+
+        let corridor =
+            fetch_osm_na_trails_corridor_with_layer(&http, &format!("{base}/trails"), orig.lat, orig.lon)
+                .await;
+        assert!(corridor.queried);
+        assert!(corridor.has_sidewalk_corridor);
+        assert!(corridor.has_bikeway_corridor);
+        assert_eq!(corridor.named_trails, vec!["Los Gatos Creek Trail".to_string()]);
     }
 }

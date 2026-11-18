@@ -10,10 +10,17 @@
 //
 // Planning benchmarks only — never a contractor bid or appraisal; homeowners should obtain 3 licensed local bids.
 
+use crate::extensions::proto::{extension_envelope_proto::Payload, ExtensionQueryProto};
+use crate::extensions::ExtensionHub;
+use crate::modules::pipeline_easements::{
+    compute_buildable_yard_metrics, BuildableYardInputs, NPMS_SOURCE_NAME, NPMS_VIEWER_URL,
+    PIPELINE_EASEMENTS_EXT_ID,
+};
 use crate::registry::rates_and_costs::{state_cost_multiplier, COUNTY_COST_MULT};
 use crate::registry::us_geo::census_division_and_region;
-use crate::shared::{round_n, ModuleOutput, SourceItem};
+use crate::shared::{round_n, EnvConfig, HttpClient, ModuleOutput, SourceItem};
 use serde_json::{json, Value};
+use std::collections::HashMap;
 
 fn state_cost_and_division(state: &str) -> (f64, &'static str, &'static str) {
     let (div, reg) = census_division_and_region(state);
@@ -209,8 +216,217 @@ pub(crate) fn build_turf_rebate_info_opt(
     })
 }
 
+fn extract_lidar_and_footprint_from_report(
+    report: &Value,
+    facts: &Value,
+) -> (Option<f64>, Option<f64>, Option<f64>) {
+    let explicit_fp = facts
+        .get("buildingFootprintSqft")
+        .or_else(|| facts.pointer("/buildingRegister/footprintSqft"))
+        .and_then(Value::as_f64)
+        .filter(|&fp| fp.is_finite() && fp > 0.0);
+
+    let slope_pct = [
+        "/house3d/metrics/lotSlopePct",
+        "/modules/house3d/data/metrics/lotSlopePct",
+        "/house3d/scene/metrics/lotSlopePct",
+    ]
+    .into_iter()
+    .find_map(|p| report.pointer(p).and_then(Value::as_f64))
+    .filter(|&s| s.is_finite() && (0.0..=150.0).contains(&s));
+
+    let relief_m = [
+        "/house3d/metrics/lotReliefM",
+        "/modules/house3d/data/metrics/lotReliefM",
+        "/house3d/scene/metrics/lotReliefM",
+    ]
+    .into_iter()
+    .find_map(|p| report.pointer(p).and_then(Value::as_f64))
+    .filter(|&r| r.is_finite() && r >= 0.0);
+
+    (explicit_fp, slope_pct, relief_m)
+}
+
+pub fn build_pipeline_easements_query_from_report(report: &Value) -> Option<ExtensionQueryProto> {
+    let geo = report.get("geo")?;
+    let lat = geo.get("lat").and_then(Value::as_f64).filter(|v| v.is_finite())?;
+    let lon = geo.get("lon").and_then(Value::as_f64).filter(|v| v.is_finite())?;
+    let empty = Value::Null;
+    let facts = report.get("facts").unwrap_or(&empty);
+
+    let pt_lc = facts
+        .get("propertyType")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let is_condo = pt_lc.contains("condo") || pt_lc.contains("co-op") || pt_lc.contains("apart");
+    let is_townhome = pt_lc.contains("town");
+
+    let raw_sqft = facts
+        .get("sqft")
+        .and_then(Value::as_f64)
+        .filter(|&s| s.is_finite() && s > 0.0)
+        .map(|s| s.round() as i64);
+    let raw_lot = facts
+        .get("lotSqft")
+        .or_else(|| facts.get("landSqft"))
+        .and_then(Value::as_f64)
+        .filter(|&l| l.is_finite() && l > 0.0)
+        .or_else(|| {
+            facts
+                .get("lotAcres")
+                .or_else(|| facts.get("acres"))
+                .and_then(Value::as_f64)
+                .filter(|&a| a.is_finite() && a > 0.0)
+                .map(|a| a * 43_560.0)
+        });
+    let stories_opt = facts
+        .get("stories")
+        .and_then(Value::as_f64)
+        .filter(|&s| s.is_finite() && (1.0..=10.0).contains(&s));
+    let year_built = facts
+        .get("yearBuilt")
+        .and_then(Value::as_i64)
+        .filter(|&y| (1700..=2035).contains(&y));
+    let (explicit_fp, slope_pct, relief_m) = extract_lidar_and_footprint_from_report(report, facts);
+
+    let mut extra_params = HashMap::new();
+    if let Some(c) = geo
+        .get("country")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        extra_params.insert("country".to_string(), c.to_string());
+    }
+    if is_townhome {
+        extra_params.insert("is_townhome".to_string(), "true".to_string());
+    }
+    if let Some(lot) = raw_lot {
+        extra_params.insert("lot_sqft".to_string(), format!("{lot:.1}"));
+    }
+    if let Some(st) = stories_opt {
+        extra_params.insert("stories".to_string(), format!("{st:.2}"));
+    }
+    if let Some(fp) = explicit_fp {
+        extra_params.insert("footprint_sqft".to_string(), format!("{fp:.1}"));
+    }
+    if let Some(sl) = slope_pct {
+        extra_params.insert("lot_slope_pct".to_string(), format!("{sl:.2}"));
+    }
+    if let Some(rl) = relief_m {
+        extra_params.insert("lot_relief_m".to_string(), format!("{rl:.2}"));
+    }
+
+    Some(ExtensionQueryProto {
+        lat: Some(lat),
+        lon: Some(lon),
+        state: geo
+            .get("state")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+        city: geo
+            .get("city")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+        zip: geo
+            .get("zip")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+        county_fips: geo
+            .get("countyFips")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+        county_name: geo.get("county").and_then(Value::as_str).map(String::from),
+        sqft: raw_sqft,
+        year_built,
+        is_condo_or_attached: Some(is_condo),
+        extra_params,
+        ..Default::default()
+    })
+}
+
+/// Executes the `pipeline_row_easements` extension via `ExtensionHub::global().execute_enabled_extension(...)`
+/// to retrieve verified HIFLD pipeline & high-voltage transmission ROW clearance and GeoJSON polylines.
+pub async fn fetch_pipeline_row_easements_for_report(
+    http: &HttpClient,
+    env: &EnvConfig,
+    report: &Value,
+) -> Option<Value> {
+    fetch_pipeline_row_easements_for_report_with_hub(ExtensionHub::global(), http, env, report)
+        .await
+}
+
+pub async fn fetch_pipeline_row_easements_for_report_with_hub(
+    hub: &ExtensionHub,
+    http: &HttpClient,
+    env: &EnvConfig,
+    report: &Value,
+) -> Option<Value> {
+    let query = build_pipeline_easements_query_from_report(report)?;
+    let envs = match hub
+        .execute_enabled_extension(PIPELINE_EASEMENTS_EXT_ID, &query, http, env)
+        .await
+    {
+        Ok(v) => v,
+        Err(err) => {
+            tracing::warn!(
+                error = %err,
+                "remodel_rebuild: pipeline_row_easements extension fetch unavailable"
+            );
+            return None;
+        }
+    };
+    for env_msg in envs {
+        if env_msg.extension_id != PIPELINE_EASEMENTS_EXT_ID {
+            continue;
+        }
+        if let Some(Payload::RawJson(raw)) = env_msg.payload {
+            if let Ok(parsed) = serde_json::from_str::<Value>(&raw) {
+                return Some(parsed);
+            }
+        }
+    }
+    None
+}
+
+/// Async entry point consuming `pipeline_row_easements` via `ExtensionHub::global().execute_enabled_extension(...)`
+/// alongside `house3d` LiDAR slope metrics to enrich ADU, pool, and addition feasibility.
+pub async fn run_remodel_and_rebuild(
+    http: &HttpClient,
+    env: &EnvConfig,
+    report: &Value,
+) -> ModuleOutput {
+    let live_easements = fetch_pipeline_row_easements_for_report(http, env, report).await;
+    build_remodel_and_rebuild_with_easements(report, live_easements.as_ref())
+}
+
+pub async fn run_remodel_and_rebuild_with_hub(
+    hub: &ExtensionHub,
+    http: &HttpClient,
+    env: &EnvConfig,
+    report: &Value,
+) -> ModuleOutput {
+    let live_easements =
+        fetch_pipeline_row_easements_for_report_with_hub(hub, http, env, report).await;
+    build_remodel_and_rebuild_with_easements(report, live_easements.as_ref())
+}
+
 /// Builds the complete `remodelAndRebuild` module from a Open Estate report JSON.
 pub fn build_remodel_and_rebuild(report: &Value) -> ModuleOutput {
+    build_remodel_and_rebuild_with_easements(report, None)
+}
+
+/// Builds `remodelAndRebuild`, fusing parcel/footprint dimensions, `house3d` LiDAR slope metrics,
+/// and optional `pipeline_row_easements` ROW clearance payloads.
+pub fn build_remodel_and_rebuild_with_easements(
+    report: &Value,
+    live_easements_override: Option<&Value>,
+) -> ModuleOutput {
     let empty = Value::Null;
     let facts = report.get("facts").unwrap_or(&empty);
     let geo = report.get("geo").unwrap_or(&empty);
@@ -230,6 +446,18 @@ pub fn build_remodel_and_rebuild(report: &Value) -> ModuleOutput {
         .pointer("/permitsAndCondition/zoning")
         .or_else(|| report.get("zoning"))
         .unwrap_or(&empty);
+    let resolved_easements = live_easements_override
+        .or_else(|| report.get("pipelineRowEasements").filter(|v| v.is_object()))
+        .or_else(|| {
+            report
+                .pointer("/modules/pipelineRowEasements/data")
+                .filter(|v| v.is_object())
+        })
+        .or_else(|| {
+            report
+                .pointer("/remodelAndRebuild/pipelineRowEasements")
+                .filter(|v| v.is_object())
+        });
 
     let state = geo
         .get("state")
@@ -300,10 +528,52 @@ pub fn build_remodel_and_rebuild(report: &Value) -> ModuleOutput {
                 .map(|a| a * 43_560.0)
         });
 
-    let explicit_footprint_sqft = facts
-        .get("buildingFootprintSqft")
-        .and_then(|v| v.as_f64())
-        .filter(|&fp| fp.is_finite() && fp > 0.0);
+    let (explicit_footprint_sqft, lidar_lot_slope_pct, lidar_lot_relief_m) =
+        extract_lidar_and_footprint_from_report(report, facts);
+
+    let in_pipeline_row_30m = resolved_easements
+        .and_then(|e| {
+            e.pointer("/clearanceFlags/inPipelineRowEasementRisk30m")
+                .or_else(|| e.pointer("/clearanceFlags/inRowEasementRisk30m"))
+        })
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let in_phmsa_200m = resolved_easements
+        .and_then(|e| e.pointer("/clearanceFlags/inPhmsaConsultationZone200m"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let in_fha_hv_fall_zone_45m = resolved_easements
+        .and_then(|e| e.pointer("/clearanceFlags/inFhaHvFallZone45m"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let nearest_pipeline_ft = resolved_easements
+        .and_then(|e| e.pointer("/summary/nearestPipeline/effectiveDistanceFt"))
+        .and_then(Value::as_i64);
+    let nearest_hv_ft = resolved_easements
+        .and_then(|e| e.pointer("/summary/nearestHvTransmissionLine/effectiveDistanceFt"))
+        .and_then(Value::as_i64);
+
+    let buildable_yard = compute_buildable_yard_metrics(&BuildableYardInputs {
+        is_attached_condo,
+        is_townhome,
+        state: state.clone(),
+        lot_sqft: raw_lot,
+        living_sqft: raw_sqft,
+        stories: stories_opt,
+        explicit_footprint_sqft,
+        lidar_lot_slope_pct,
+        lidar_lot_relief_m,
+        in_pipeline_row_30m,
+        in_phmsa_200m,
+        in_fha_hv_fall_zone_45m,
+        nearest_pipeline_ft,
+        nearest_hv_ft,
+    });
+    let easements_map_layers: Vec<Value> = resolved_easements
+        .and_then(|e| e.get("mapLayers"))
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
 
     let est_market_val = valuation
         .pointer("/estimate/value")
@@ -363,7 +633,7 @@ pub fn build_remodel_and_rebuild(report: &Value) -> ModuleOutput {
     let grading_prep_rate = round_n(1.15 * regional_mult, 2);
     let fence_rate_lf = round_n(54.0 * regional_mult, 2);
 
-    let sources = vec![
+    let mut sources = vec![
         SourceItem::new(
             "U.S. Census Bureau — Survey of Construction (SOC) Characteristics of New Housing ($/sq ft by Region)",
             "https://www.census.gov/construction/chars/",
@@ -381,10 +651,25 @@ pub fn build_remodel_and_rebuild(report: &Value) -> ModuleOutput {
             "https://fred.stlouisfed.org/series/WPUSI012011",
         ),
     ];
+    if resolved_easements.is_some() {
+        sources.push(SourceItem::new(NPMS_SOURCE_NAME, NPMS_VIEWER_URL));
+    }
 
     let disclaimer = "Regional remodeling, tear-down/rebuilding, and landscaping figures are planning benchmarks calibrated from U.S. Census SOC, NAHB, Zonda/JLC Cost vs. Value, and BLS construction indices. Soil conditions, hillside engineering, HOA/historic review, concealed hazards, and finish selections can shift costs by ±25%+; always obtain 3 itemized bids from licensed, insured local contractors and verify municipal zoning/permits before starting work.";
 
     let mut warnings = Vec::new();
+    if in_pipeline_row_30m {
+        warnings.push(format!(
+            "Transmission pipeline ROW easement risk (~{} ft): verify recorded Schedule B-II pipeline easements and call 811 before any backyard ADU, pool, or foundation excavation.",
+            nearest_pipeline_ft.unwrap_or(100)
+        ));
+    }
+    if in_fha_hv_fall_zone_45m {
+        warnings.push(format!(
+            "High-voltage transmission corridor within ~{} ft (<=150 ft FHA/HUD fall-zone): verify overhead conductor clearance and utility ROW setbacks prior to vertical or backyard expansion.",
+            nearest_hv_ft.unwrap_or(150)
+        ));
+    }
     let Some(sqft) = raw_sqft else {
         warnings.push(
             "Living area (sqft) is missing from public property records; size-dependent remodel and tear-down rebuild quotes are omitted."
@@ -433,6 +718,10 @@ pub fn build_remodel_and_rebuild(report: &Value) -> ModuleOutput {
                 },
                 "isAssumedLot": false,
                 "buildingFootprintSqft": explicit_footprint_sqft.map(|fp| fp.round() as i64),
+                "lotCoveragePct": buildable_yard.get("lotCoveragePct").cloned().unwrap_or(Value::Null),
+                "lidarLotSlopePct": lidar_lot_slope_pct.map(|s| round_n(s, 1)),
+                "lidarLotReliefM": lidar_lot_relief_m.map(|r| round_n(r, 1)),
+                "netFlatBuildableYardSqft": buildable_yard.get("netFlatBuildableYardSqft").cloned().unwrap_or(Value::Null),
                 "roofAreaEstSqft": explicit_footprint_sqft.map(|fp| (fp * 1.15).round() as i64),
                 "maxZoningBuildableSqft": Value::Null,
             },
@@ -494,6 +783,15 @@ pub fn build_remodel_and_rebuild(report: &Value) -> ModuleOutput {
                 "quotes": [],
             },
             "readyToMoveIn": crate::modules::move_in_cost::build_ready_to_move_in_from_report(report),
+            "buildableYard": buildable_yard.clone(),
+            "expansionFeasibility": buildable_yard.get("feasibility").cloned().unwrap_or(Value::Null),
+            "aduPotential": {
+                "feasible": buildable_yard.pointer("/feasibility/detachedAdu/feasible").cloned().unwrap_or(Value::Null),
+                "status": buildable_yard.pointer("/feasibility/detachedAdu/status").cloned().unwrap_or(Value::Null),
+                "maxRecommendedFootprintSqft": buildable_yard.pointer("/feasibility/detachedAdu/maxRecommendedFootprintSqft").cloned().unwrap_or(Value::Null),
+            },
+            "pipelineRowEasements": resolved_easements.cloned().unwrap_or(Value::Null),
+            "mapLayers": easements_map_layers,
             "disclaimer": disclaimer,
         });
         return ModuleOutput {
@@ -698,8 +996,33 @@ pub fn build_remodel_and_rebuild(report: &Value) -> ModuleOutput {
     ));
 
     if !is_attached_condo {
+        let net_flat_yard_opt = buildable_yard
+            .get("netFlatBuildableYardSqft")
+            .and_then(Value::as_i64);
+        let row_caution_suffix = if in_pipeline_row_30m {
+            " (ROW Alert: transmission pipeline within <=100 ft — verify Schedule B-II easements & 811 mark-out before excavation)"
+        } else if in_fha_hv_fall_zone_45m {
+            " (HV Alert: overhead transmission corridor within <=150 ft FHA fall-zone — verify utility ROW setbacks)"
+        } else if in_phmsa_200m {
+            " (inside 660-ft PHMSA pipeline consultation buffer — call 811 prior to trenching)"
+        } else {
+            ""
+        };
+        let slope_suffix = match lidar_lot_slope_pct {
+            Some(sl) if sl >= 15.0 => {
+                format!("; {:.1}% LiDAR hillside grade requires engineered footings/retaining wall", sl)
+            }
+            Some(sl) => format!("; {:.1}% LiDAR grade", sl),
+            None => String::new(),
+        };
+
         let add_sqft = 400.0;
-        let add_base = add_sqft * 295.0;
+        let add_slope_mult = if lidar_lot_slope_pct.map(|s| s >= 15.0).unwrap_or(false) {
+            1.14
+        } else {
+            1.0
+        };
+        let add_base = add_sqft * 295.0 * add_slope_mult;
         remodel_projects.push(mk_remodel(
             "home-addition-400",
             "Primary Suite / Family Room Addition (+400 sq ft)",
@@ -711,8 +1034,10 @@ pub fn build_remodel_and_rebuild(report: &Value) -> ModuleOutput {
             true,
             "16–24 wks",
             format!(
-                "Ground-floor 400 sq ft addition (~${}/sq ft regionalized): foundation tie-in, framing, roof integration, full bath & finishes.",
-                ((295.0 * regional_mult).round() as i64)
+                "Ground-floor 400 sq ft addition (~${}/sq ft regionalized): foundation tie-in, framing, roof integration, full bath & finishes{}{}.",
+                ((295.0 * add_slope_mult * regional_mult).round() as i64),
+                slope_suffix,
+                row_caution_suffix
             ),
         ));
 
@@ -730,19 +1055,58 @@ pub fn build_remodel_and_rebuild(report: &Value) -> ModuleOutput {
         ));
 
         if !is_townhome && raw_lot.map(|l| l >= 4_500.0).unwrap_or(false) {
+            let adu_slope_mult = if lidar_lot_slope_pct.map(|s| s >= 15.0).unwrap_or(false) {
+                1.15
+            } else {
+                1.0
+            };
+            let yard_ctx = net_flat_yard_opt
+                .map(|nf| format!(" across ~{nf} sq ft net flat buildable yard"))
+                .unwrap_or_default();
             remodel_projects.push(mk_remodel(
                 "detached-adu",
                 "Detached Backyard ADU (~650 sq ft 1BR/1BA)",
                 "Expansion & ADU",
-                228_000.0,
+                228_000.0 * adu_slope_mult,
                 0.84,
                 1.36,
                 71.0,
                 true,
                 "24–36 wks",
                 format!(
-                    "New-build 650 sq ft backyard cottage (~${}/sq ft all-in incl. foundation, sewer/water/electric trenching, architecture & permits).",
-                    ((228_000.0 * regional_mult / 650.0).round() as i64)
+                    "New-build 650 sq ft backyard cottage (~${}/sq ft all-in incl. foundation, sewer/water/electric trenching, architecture & permits{}{}{}).",
+                    ((228_000.0 * adu_slope_mult * regional_mult / 650.0).round() as i64),
+                    yard_ctx,
+                    slope_suffix,
+                    row_caution_suffix
+                ),
+            ));
+        }
+
+        let pool_feasible = buildable_yard
+            .pointer("/feasibility/ingroundPool/feasible")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        if !is_townhome && raw_lot.map(|l| l >= 5_000.0).unwrap_or(false) && pool_feasible {
+            let pool_slope_mult = if lidar_lot_slope_pct.map(|s| s >= 12.0).unwrap_or(false) {
+                1.28
+            } else {
+                1.0
+            };
+            remodel_projects.push(mk_remodel(
+                "inground-pool",
+                "In-Ground Gunite Pool & Paver Deck (15×30 ft)",
+                "Exterior & Envelope",
+                68_500.0 * pool_slope_mult,
+                0.80,
+                1.38,
+                54.0,
+                true,
+                "10–16 wks",
+                format!(
+                    "450 sq ft shotcrete/gunite pool shell, variable-speed pump, heater, 350 sq ft coping/paver deck & code safety barrier{}{}.",
+                    slope_suffix,
+                    row_caution_suffix
                 ),
             ));
         }
@@ -1324,6 +1688,10 @@ pub fn build_remodel_and_rebuild(report: &Value) -> ModuleOutput {
             },
             "isAssumedLot": false,
             "buildingFootprintSqft": footprint_sqft_opt.map(|fp| fp.round() as i64),
+            "lotCoveragePct": buildable_yard.get("lotCoveragePct").cloned().unwrap_or(Value::Null),
+            "lidarLotSlopePct": lidar_lot_slope_pct.map(|s| round_n(s, 1)),
+            "lidarLotReliefM": lidar_lot_relief_m.map(|r| round_n(r, 1)),
+            "netFlatBuildableYardSqft": buildable_yard.get("netFlatBuildableYardSqft").cloned().unwrap_or(Value::Null),
             "roofAreaEstSqft": roof_footprint_sqft_opt.map(|r| r.round() as i64),
             "maxZoningBuildableSqft": max_far_sqft,
         },
@@ -1370,6 +1738,9 @@ pub fn build_remodel_and_rebuild(report: &Value) -> ModuleOutput {
                     json!(raw_lot.map(|l| l.round() as i64))
                 },
                 "buildingFootprintSqft": footprint_sqft_opt.map(|fp| fp.round() as i64),
+                "lotCoveragePct": buildable_yard.get("lotCoveragePct").cloned().unwrap_or(Value::Null),
+                "lidarLotSlopePct": lidar_lot_slope_pct.map(|s| round_n(s, 1)),
+                "netFlatBuildableYardSqft": buildable_yard.get("netFlatBuildableYardSqft").cloned().unwrap_or(Value::Null),
                 "hardscapeDrivewayPatioEstSqft": hardscape_est_sqft_opt,
                 "openLandscapingSqft": open_landscaping_sqft_opt,
                 "estimatedLawnSqft": est_lawn_sqft_opt,
@@ -1391,6 +1762,15 @@ pub fn build_remodel_and_rebuild(report: &Value) -> ModuleOutput {
             "quotes": lawn_quotes,
         },
         "readyToMoveIn": crate::modules::move_in_cost::build_ready_to_move_in_from_report(report),
+        "buildableYard": buildable_yard.clone(),
+        "expansionFeasibility": buildable_yard.get("feasibility").cloned().unwrap_or(Value::Null),
+        "aduPotential": {
+            "feasible": buildable_yard.pointer("/feasibility/detachedAdu/feasible").cloned().unwrap_or(Value::Null),
+            "status": buildable_yard.pointer("/feasibility/detachedAdu/status").cloned().unwrap_or(Value::Null),
+            "maxRecommendedFootprintSqft": buildable_yard.pointer("/feasibility/detachedAdu/maxRecommendedFootprintSqft").cloned().unwrap_or(Value::Null),
+        },
+        "pipelineRowEasements": resolved_easements.cloned().unwrap_or(Value::Null),
+        "mapLayers": easements_map_layers,
         "disclaimer": disclaimer,
     });
 
@@ -1546,5 +1926,82 @@ mod tests {
             .collect();
         assert!(!quote_ids.contains(&"lawn-sod-rebuild"));
         assert!(!quote_ids.contains(&"fence-privacy"));
+    }
+
+    #[tokio::test]
+    async fn run_remodel_and_rebuild_executes_pipeline_easements_and_fuses_lidar_slope() {
+        let mut rep = crate::test_synth::synth_report_primary();
+        rep["house3d"] = json!({
+            "metrics": {
+                "lotSlopePct": 5.4,
+                "lotReliefM": 1.6
+            }
+        });
+
+        // Offline call via ExtensionHub::global().execute_enabled_extension("pipeline_row_easements", ...)
+        // must never fabricate pipeline corridors while still fusing verified house3d LiDAR slope!
+        let http = HttpClient::offline_loopback_only(None);
+        let env = EnvConfig::from_map(HashMap::new());
+        let out_offline = run_remodel_and_rebuild(&http, &env, &rep).await;
+
+        assert_eq!(out_offline.data["status"], json!("ok"));
+        assert_eq!(out_offline.data["propertyBasis"]["lidarLotSlopePct"], json!(5.4));
+        assert_eq!(out_offline.data["buildableYard"]["isFlatLotUnder10Pct"], json!(true));
+        assert!(
+            out_offline.data["buildableYard"]["netFlatBuildableYardSqft"]
+                .as_i64()
+                .unwrap()
+                >= 2_000
+        );
+        assert_eq!(out_offline.data["aduPotential"]["feasible"], json!(true));
+        assert!(out_offline.data["pipelineRowEasements"].is_null());
+
+        // Attached pipeline ROW encroachment (e.g. gas trunk line at 42 ft) blocks in-ground pool
+        // and flags conditional ADU utility ROW survey + emits pipeline-easements GeoJSON layer.
+        let mock_easements = json!({
+            "extensionId": "pipeline_row_easements",
+            "overallClearanceStatus": "encroachment_or_fall_zone_risk",
+            "clearanceFlags": {
+                "inPhmsaConsultationZone200m": true,
+                "inRowEasementRisk30m": true,
+                "inPipelineRowEasementRisk30m": true,
+                "inHvRowEasementRisk30m": false,
+                "inFhaHvFallZone45m": false
+            },
+            "summary": {
+                "nearestPipeline": { "effectiveDistanceFt": 42 },
+                "nearestHvTransmissionLine": Value::Null
+            },
+            "mapLayers": [
+                {
+                    "id": "pipeline-easements",
+                    "title": "Transmission Pipelines & High-Voltage ROW",
+                    "kind": "lines",
+                    "color": "#dc2626",
+                    "features": [
+                        {
+                            "type": "Feature",
+                            "geometry": { "type": "LineString", "coordinates": [[-121.965, 37.282], [-121.958, 37.282]] },
+                            "properties": { "name": "California Gas Transmission Co" }
+                        }
+                    ]
+                }
+            ]
+        });
+        let out_row = build_remodel_and_rebuild_with_easements(&rep, Some(&mock_easements));
+        assert_eq!(
+            out_row.data["expansionFeasibility"]["ingroundPool"]["feasible"],
+            json!(false)
+        );
+        assert_eq!(
+            out_row.data["expansionFeasibility"]["ingroundPool"]["status"],
+            json!("prohibited_or_high_risk_pipeline_row")
+        );
+        assert_eq!(
+            out_row.data["expansionFeasibility"]["detachedAdu"]["status"],
+            json!("conditional_utility_row_survey_required")
+        );
+        assert_eq!(out_row.data["mapLayers"][0]["id"], json!("pipeline-easements"));
+        assert!(!out_row.warnings.is_empty());
     }
 }

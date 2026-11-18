@@ -1613,7 +1613,22 @@
     return studioState.annotations[k];
   }
 
-  /* -------------------- Studio CSS & DOM Shell (Light Theme) -------------------- */
+  /* -------------------- Studio CSS & DOM Shell (Light & Dark Theme) -------------------- */
+  function scopeDarkCss(rules) {
+    function withPrefix(pfx) {
+      return rules.map(function (rule) {
+        var bi = rule.indexOf('{');
+        if (bi < 0) return rule;
+        var sels = rule.slice(0, bi).split(',').map(function (s) {
+          var t = s.trim();
+          return t ? (pfx + ' ' + t) : t;
+        }).join(',');
+        return sels + rule.slice(bi);
+      }).join('\n');
+    }
+    return '@media (prefers-color-scheme: dark){\n' + withPrefix('html:not([data-theme="light"])') + '\n}\n' + withPrefix('html[data-theme="dark"]');
+  }
+
   function injectStyles() {
     if (!document.getElementById('oe-pdfjs-viewer-css')) {
       try {
@@ -1625,6 +1640,72 @@
       } catch (_) {}
     }
     if (document.getElementById('oe-pdf-studio-styles')) return;
+    var darkRules = [
+      '#oePdfStudioBackdrop{background:rgba(15,23,42,.82)}',
+      '.ps-studio{background:var(--surface,#111827);border-color:var(--line-strong,#334155);box-shadow:0 24px 60px rgba(0,0,0,.65);color:var(--ink,#f1f5f9)}',
+      '.ps-topbar{background:var(--surface,#111827);border-bottom-color:var(--line-strong,#334155)}',
+      '.ps-title{color:var(--ink,#f8fafc)}',
+      '.ps-addr-chip{color:var(--ink2,#cbd5e1);background:var(--surface-2,#1e293b);border-color:var(--line-strong,#334155)}',
+      '.ps-privacy-pill{color:#a7f3d0;background:rgba(16,185,129,.16);border-color:rgba(52,211,153,.38)}',
+      '.ps-toolbar{background:var(--surface-2,#1e293b);border-bottom-color:var(--line-strong,#334155)}',
+      '.ps-grp{border-right-color:var(--line-strong,#334155)}',
+      '.ps-select{border-color:var(--line-strong,#334155);color:var(--ink,#f1f5f9);background:var(--surface,#0f172a)}',
+      '.ps-badge{background:var(--surface,#0f172a);color:var(--ink2,#cbd5e1);border:1px solid var(--line-strong,#334155)}',
+      '.ps-btn{border-color:var(--line-strong,#334155);background:var(--surface,#0f172a);color:var(--ink2,#e2e8f0)}',
+      '.ps-btn:not(.act):not(.pri):not(.danger):hover:not(:disabled){background:#293548;border-color:#475569;color:#f8fafc}',
+      '.ps-btn.act,.ps-btn.pri{background:#0f766e;color:#ffffff;border-color:#14b8a6}',
+      '.ps-btn.pri:hover:not(:disabled){background:#14b8a6;color:#042f2e}',
+      '.ps-btn.danger{color:#fca5a5;border-color:rgba(248,113,113,.42);background:rgba(220,38,38,.18)}',
+      '.ps-btn.danger:hover:not(:disabled){background:rgba(220,38,38,.28)}',
+      '.ps-page-inp{border-color:var(--line-strong,#334155);color:var(--ink,#f1f5f9);background:var(--surface,#0f172a)}',
+      '.ps-page-tot{color:var(--muted,#94a3b8)}',
+      '.ps-zoom-pct{color:var(--ink2,#cbd5e1)}',
+      '.ps-swatch{border-color:#1e293b;box-shadow:0 0 0 1px #475569}',
+      '.ps-swatch.act{box-shadow:0 0 0 2px #f8fafc}',
+      '.ps-main{background:#0b1120}',
+      '.ps-rail{background:var(--surface-2,#1e293b);border-right-color:var(--line-strong,#334155)}',
+      '.ps-rail-item{border-color:var(--line-strong,#334155);background:var(--surface,#111827);color:var(--ink2,#cbd5e1)}',
+      '.ps-rail-item:hover{border-color:#2dd4bf}',
+      '.ps-rail-item.act{border-color:#14b8a6;background:rgba(20,184,166,.18);color:#5eead4}',
+      '.ps-rail-dot{color:#5eead4}',
+      '.ps-ai-banner{background:var(--surface-2,#1e293b);color:var(--ink,#f1f5f9);box-shadow:0 6px 20px rgba(0,0,0,.4)}',
+      '.ps-ai-banner.crit{border-color:rgba(248,113,113,.5);background:rgba(127,29,29,.88);color:#fecaca}',
+      '.ps-ai-banner.warn{border-color:rgba(251,191,36,.5);background:rgba(120,53,15,.88);color:#fde68a}',
+      '.ps-ai-banner.info{border-color:rgba(45,212,191,.5);background:rgba(17,94,89,.88);color:#ccfbf1}',
+      '.ps-page-stage{border-color:#334155;box-shadow:0 12px 34px rgba(0,0,0,.55)}',
+      '.ps-empty-stage{background:var(--surface,#111827);border-color:var(--line-strong,#475569);color:var(--ink,#f1f5f9);box-shadow:0 10px 28px rgba(0,0,0,.4)}',
+      '.ps-empty-title{color:var(--ink,#f8fafc)}',
+      '.ps-empty-desc,.ps-chat-status,.ps-disclaimer-note{color:var(--muted,#94a3b8)}',
+      '.ps-sum-strat{color:var(--ink2,#cbd5e1)}',
+      '.ps-sidepanel{border-color:var(--line-strong,#334155);background:var(--surface,#111827)}',
+      '.ps-tabs{background:var(--surface-2,#1e293b);border-bottom-color:var(--line-strong,#334155)}',
+      '.ps-tab-btn{color:var(--muted,#94a3b8)}',
+      '.ps-tab-btn.act{background:var(--surface,#111827);color:#5eead4;border-color:var(--line-strong,#334155)}',
+      '.ps-sum-banner{background:var(--surface-2,#1e293b);border-color:var(--line-strong,#334155);color:var(--ink2,#cbd5e1)}',
+      '.ps-sec-hdr{color:var(--muted,#94a3b8)}',
+      '.ps-card{background:var(--surface-2,#1e293b);border-color:var(--line-strong,#334155)}',
+      '.ps-card.missing{background:var(--soft,#0f172a)}',
+      '.ps-sev.crit{background:rgba(220,38,38,.2);color:#fca5a5;border-color:rgba(248,113,113,.4)}',
+      '.ps-sev.maj{background:rgba(217,119,6,.2);color:#fde68a;border-color:rgba(251,191,36,.4)}',
+      '.ps-sev.mod{background:rgba(37,99,235,.22);color:#93c5fd;border-color:rgba(96,165,250,.4)}',
+      '.ps-sev.good{background:rgba(16,185,129,.2);color:#a7f3d0;border-color:rgba(52,211,153,.4)}',
+      '.ps-card-title{color:var(--ink,#f8fafc)}',
+      '.ps-card-detail{color:var(--ink2,#cbd5e1)}',
+      '.ps-cite-tag{color:var(--ink2,#cbd5e1);background:var(--surface,#0f172a);border-color:var(--line-strong,#334155)}',
+      '.ps-locate-btn{border-color:rgba(45,212,191,.45);background:rgba(20,184,166,.16);color:#5eead4}',
+      '.ps-locate-btn:hover{background:#0f766e;color:#ffffff;border-color:#14b8a6}',
+      '.ps-role-bar{background:var(--surface-2,#1e293b);border-bottom-color:var(--line-strong,#334155);color:var(--ink2,#cbd5e1)}',
+      '.ps-role-pill{border-color:var(--line-strong,#334155);background:var(--surface,#0f172a);color:var(--ink2,#cbd5e1)}',
+      '.ps-role-pill.act{background:#0f766e;color:#ffffff;border-color:#14b8a6}',
+      '#psChatLog{background:var(--surface,#111827)}',
+      '.ps-msg.a{background:var(--surface-2,#1e293b);color:var(--ink,#f1f5f9);border-color:var(--line-strong,#334155)}',
+      '.ps-chat-cite-btn{border-color:rgba(45,212,191,.42);background:rgba(20,184,166,.16);color:#5eead4}',
+      '.ps-chat-cite-btn:hover{background:#0f766e;color:#ffffff}',
+      '.ps-chat-foot{border-top-color:var(--line-strong,#334155);background:var(--surface-2,#1e293b)}',
+      '#psChatInput{border-color:var(--line-strong,#334155);color:var(--ink,#f8fafc);background:var(--surface,#0f172a)}',
+      '#psChatInput::placeholder{color:var(--muted,#94a3b8)}'
+    ];
+
     var st = document.createElement('style');
     st.id = 'oe-pdf-studio-styles';
     st.textContent = [
@@ -1672,6 +1753,11 @@
       '#psTextLayer{position:absolute;inset:0;z-index:2;overflow:hidden;line-height:1;opacity:1;color:transparent}',
       '#psAnnotCanvas{position:absolute;inset:0;z-index:3;display:block}',
       '.ps-empty-stage{max-width:540px;margin:auto;background:#ffffff;border:1.5px dashed #94a3b8;border-radius:16px;padding:28px 24px;text-align:center;box-shadow:0 6px 20px rgba(15,23,42,.05)}',
+      '.ps-empty-title{font-size:15.5px;font-weight:800;color:#0f172a;margin-bottom:6px}',
+      '.ps-empty-desc{font-size:13px;color:#475569;line-height:1.5;margin-bottom:14px}',
+      '.ps-chat-status{font-size:11px;color:#64748b}',
+      '.ps-sum-strat{margin-top:5px;color:#334155}',
+      '.ps-disclaimer-note{font-size:11px;color:#64748b;margin-top:4px;line-height:1.4}',
       '.ps-sidepanel{width:400px;min-width:320px;max-width:44vw;border-left:1px solid #e2e8f0;background:#ffffff;display:flex;flex-direction:column;min-height:0}',
       '.ps-tabs{display:flex;border-bottom:1px solid #e2e8f0;background:#f8fafc;padding:6px 8px 0;gap:6px}',
       '.ps-tab-btn{flex:1;border:1px solid transparent;border-bottom:0;background:transparent;border-radius:9px 9px 0 0;padding:8px 10px;font:700 12.5px Inter,sans-serif;color:#475569;cursor:pointer}',
@@ -1712,7 +1798,8 @@
       '.ps-chat-foot{border-top:1px solid #e2e8f0;padding:9px 11px;background:#f8fafc;display:flex;flex-direction:column;gap:7px}',
       '.ps-chat-form{display:flex;gap:6px;align-items:flex-end}',
       '#psChatInput{flex:1;border:1px solid #cbd5e1;border-radius:9px;padding:7px 10px;font:500 12.8px Inter,sans-serif;color:#0f172a;background:#ffffff;resize:none;min-height:38px;max-height:96px}',
-      '@media(max-width:960px){.ps-body{flex-direction:column}.ps-sidepanel{width:100%;max-width:none;height:44%;border-left:0;border-top:1px solid #e2e8f0}.ps-rail{display:none}}'
+      '@media(max-width:960px){.ps-body{flex-direction:column}.ps-sidepanel{width:100%;max-width:none;height:44%;border-left:0;border-top:1px solid #e2e8f0}.ps-rail{display:none}}',
+      scopeDarkCss(darkRules)
     ].join('\n');
     document.head.appendChild(st);
   }
@@ -1796,8 +1883,8 @@
       '        </div>',
       '        <div class="ps-empty-stage" id="psEmptyStage">',
       '          <div style="font-size:28px;margin-bottom:8px">📂</div>',
-      '          <div style="font-size:15.5px;font-weight:800;color:#0f172a;margin-bottom:6px" id="psEmptyTitle"></div>',
-      '          <div style="font-size:13px;color:#475569;line-height:1.5;margin-bottom:14px" id="psEmptyDesc"></div>',
+      '          <div class="ps-empty-title" id="psEmptyTitle"></div>',
+      '          <div class="ps-empty-desc" id="psEmptyDesc"></div>',
       '          <button type="button" class="ps-btn pri" id="psEmptyLoadBtn" style="padding:8px 15px;font-size:13px"></button>',
       '        </div>',
       '      </div>',
@@ -1814,7 +1901,7 @@
       '        <div class="ps-chat-foot">',
       '          <div style="display:flex;justify-content:space-between;align-items:center;gap:6px;flex-wrap:wrap">',
       '            <button type="button" class="ps-btn" id="psRefCurrentBtn" style="font-size:11.5px"></button>',
-      '            <span id="psChatStatus" style="font-size:11px;color:#64748b"></span>',
+      '            <span class="ps-chat-status" id="psChatStatus"></span>',
       '          </div>',
       '          <form class="ps-chat-form" id="psChatForm">',
       '            <textarea id="psChatInput" rows="2"></textarea>',
@@ -2007,7 +2094,7 @@
         '<div><strong>' + esc(L('Analysis Summary:', '分析概览：', 'Resumen:')) + '</strong> ' + esc(vm.headline || '') +
         (vm.aiEnhanced ? (' <span class="ps-sev good" style="margin-left:6px">✨ ' + esc(vm.model || 'AI') + '</span>') : '') + '</div>' +
         (vm.executiveSummary ? ('<div style="margin-top:5px;line-height:1.45">' + esc(vm.executiveSummary) + '</div>') : '') +
-        (vm.negotiationStrategy ? ('<div style="margin-top:5px;color:#334155"><strong>' + esc(L('Negotiation Strategy:', '谈判策略：', 'Estrategia:')) + '</strong> ' + esc(vm.negotiationStrategy) + '</div>') : '') +
+        (vm.negotiationStrategy ? ('<div class="ps-sum-strat"><strong>' + esc(L('Negotiation Strategy:', '谈判策略：', 'Estrategia:')) + '</strong> ' + esc(vm.negotiationStrategy) + '</div>') : '') +
         '</div>'
       );
     }
@@ -2089,7 +2176,7 @@
         '</div>'
       );
     } else if (vm.disclaimer) {
-      parts.push('<div style="font-size:11px;color:#64748b;margin-top:4px;line-height:1.4">' + esc(vm.disclaimer) + '</div>');
+      parts.push('<div class="ps-disclaimer-note">' + esc(vm.disclaimer) + '</div>');
     }
 
     el.innerHTML = parts.join('');

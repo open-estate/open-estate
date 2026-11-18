@@ -141,6 +141,17 @@
     return brandName() + ' AI';
   }
 
+  function isDisplayLinksOn() {
+    if (typeof window !== 'undefined' && window.OpenEstateCore && typeof window.OpenEstateCore.isDisplayLinksEnabled === 'function') {
+      return window.OpenEstateCore.isDisplayLinksEnabled();
+    }
+    try {
+      var m = (document.cookie || '').match(/(?:^|;\s*)display_link=([^;]*)/);
+      if (m) return decodeURIComponent(m[1].trim()) === '1';
+    } catch (_) {}
+    return Boolean(typeof document !== 'undefined' && document.documentElement && document.documentElement.getAttribute('data-display-links') === '1');
+  }
+
   function toRedirectHref(rawUrl, opts) {
     var clean = safeHttpUrl(rawUrl);
     if (!clean) return '';
@@ -376,15 +387,16 @@
         return stash('<code class="bc-md-code">' + esc(code) + '</code>');
       });
       work = work.replace(/\[([^\]\n]+)\]\(((?:[^()\s]+|\([^()\s]*\))+)\)/g, function (_, rawLbl, rawHref) {
-        var lblHtml = expand(fmtEmph(esc(rawLbl)));
+        var cleanRawLbl = isDisplayLinksOn() ? String(rawLbl || '') : String(rawLbl || '').replace(/\s*↗\s*$/, '');
+        var lblHtml = expand(fmtEmph(esc(cleanRawLbl)));
         var href = String(rawHref || '').trim();
         if (/^#[A-Za-z][A-Za-z0-9_-]*$/.test(href)) {
           return stash('<a href="' + esc(href) + '" class="bc-md-link" data-bc-anchor="' + esc(href.slice(1)) + '">' + lblHtml + '</a>');
         }
-        if (/^https?:\/\//i.test(href)) {
+        if (/^https?:\/\//i.test(href) && isDisplayLinksOn()) {
           var cleanU = safeHttpUrl(href);
           if (cleanU) {
-            var arrow = /↗\s*$/.test(rawLbl) ? '' : ' ↗';
+            var arrow = /↗\s*$/.test(cleanRawLbl) ? '' : ' ↗';
             return stash('<a href="' + esc(cleanU) + '" target="_blank" rel="noopener noreferrer" class="bc-md-link">' + lblHtml + arrow + '</a>');
           }
         }
@@ -2316,9 +2328,10 @@
             });
             out.push('  </ul>');
           }
-          if (srcName || srcUrl) {
+          var showSrcLink = Boolean(srcUrl && isDisplayLinksOn());
+          if (srcName || showSrcLink) {
             out.push('  <div style="margin-top:auto;padding-top:4px;font-size:11.5px;color:var(--bc-subtle)">' +
-              (srcUrl ? ('<a href="' + esc(redirSrcUrl || srcUrl) + '" data-direct-url="' + esc(srcUrl) + '" target="_blank" rel="noopener noreferrer" style="color:var(--bc-brand-fg);font-weight:700;text-decoration:none">' + esc(srcName || 'Official Source') + ' ↗</a>') : esc(srcName)) +
+              (showSrcLink ? ('<a href="' + esc(redirSrcUrl || srcUrl) + '" data-direct-url="' + esc(srcUrl) + '" target="_blank" rel="noopener noreferrer" style="color:var(--bc-brand-fg);font-weight:700;text-decoration:none">' + esc(srcName || 'Official Source') + ' ↗</a>') : esc(srcName)) +
               '</div>');
           }
           out.push('</div>');
