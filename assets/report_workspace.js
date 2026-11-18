@@ -5532,7 +5532,8 @@
     if (!slug) return;
     var lazyRent = rep && rep.lazySections && rep.lazySections.rentResearch;
     var idxMeta = (rr && rr.indexMeta) || _collectRentalIndexMeta(rep, null);
-    var cloudActive = Boolean(window.OpenEstateCommercialWorkspace || lazyRent || rep.rentalMarket || /rental market index/i.test(String(idxMeta.sourceLabel || '')));
+    var mpCloudActive = (typeof document !== 'undefined' && document.documentElement && document.documentElement.getAttribute('data-cloud-marketplace') === '1') || window.__CLOUD_MARKETPLACE_ENABLED__ === true || Boolean(window.OpenEstateCommercialWorkspace);
+    var cloudActive = mpCloudActive && Boolean(window.OpenEstateCommercialWorkspace || lazyRent || rep.rentalMarket || /rental market index/i.test(String(idxMeta.sourceLabel || '')));
     if (!cloudActive) return;
     if (idxMeta.freshestAt && Object.keys(idxMeta.sourcesBreakdown || {}).length) return;
     var cacheKey = String(slug);

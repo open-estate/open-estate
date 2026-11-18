@@ -8429,7 +8429,8 @@ function renderPayment() {
       }, true);
     }
 
-    if (triggerMpFetch && location.protocol !== 'file:' && R.marketplace?.verticals?.mortgage && R.geo?.zip) {
+    const mpCloudActive = document.documentElement.getAttribute('data-cloud-marketplace') === '1' || window.__CLOUD_MARKETPLACE_ENABLED__ === true;
+    if (mpCloudActive && triggerMpFetch && location.protocol !== 'file:' && R.marketplace?.verticals?.mortgage && R.geo?.zip) {
       clearTimeout(mpTimer);
       mpTimer = setTimeout(() => {
         const qs = new URLSearchParams({
